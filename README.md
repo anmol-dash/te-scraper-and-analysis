@@ -421,19 +421,7 @@ paramiko>=2.7.0
 
 ---
 
-## Citation
 
-If you use this pipeline, please cite:
-- MAFFT: Katoh & Standley (2013) Mol Biol Evol 30:772-780
-- HDBSCAN: McInnes et al. (2017) JOSS 2(11):205
-- UMAP: McInnes et al. (2018) arXiv:1802.03426
-- CIAlign: Tumescheit et al. (2022) PeerJ 10:e12983
-
----
-
-## License
-
-[Add your license here]
 
 ## Contact
 
