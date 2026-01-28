@@ -1,11 +1,27 @@
+#!/usr/bin/env python3
+"""
+TE Analysis Pipeline - Transposable Element clustering, alignment, and primer design
+
+Usage:
+    python query.py                    # Run with pre-loaded df (interactive/notebook)
+    python query.py --test             # Run with mock test data (standalone)
+    python query.py --input FILE.csv   # Run with input CSV file
+"""
 import os
+import sys
+import argparse
 import json
 import requests
+import traceback
 from bs4 import BeautifulSoup
 from pathlib import Path
 from collections import defaultdict
 import pandas as pd
 import numpy as np
+
+# Fix matplotlib backend BEFORE any plotting imports
+os.environ['MPLBACKEND'] = 'Agg'
+
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from sklearn.feature_extraction.text import CountVectorizer
@@ -38,10 +54,103 @@ TOP_N_GLOBAL = 8
 TOP_N_CLUSTER = 5
 TOP_N_FORWARD_PRIMERS = 3  # NEW: Number of top sequences to generate forward primers from
 MIN_SEQUENCES_FOR_CLUSTERING = 10  # NEW: Minimum sequences required for clustering
+DEBUG = False  # Set to True for verbose debugging output
 
-# Fix matplotlib backend for CIAlign (prevents Jupyter inline backend issues)
-import os
-os.environ['MPLBACKEND'] = 'Agg'
+def debug_print(msg):
+    """Print debug message if DEBUG mode is enabled"""
+    if DEBUG:
+        print(f"[DEBUG] {msg}")
+
+def create_test_data():
+    """Create mock test data for standalone testing"""
+    import random
+    random.seed(42)
+    np.random.seed(42)
+
+    def random_seq(length, gc_bias=0.5):
+        bases = []
+        for _ in range(length):
+            if random.random() < gc_bias:
+                bases.append(random.choice(['G', 'C']))
+            else:
+                bases.append(random.choice(['A', 'T']))
+        return ''.join(bases)
+
+    def mutate_seq(seq, mutation_rate=0.1):
+        bases = list(seq)
+        for i in range(len(bases)):
+            if random.random() < mutation_rate:
+                bases[i] = random.choice(['A', 'C', 'G', 'T'])
+        return ''.join(bases)
+
+    base_seq1 = random_seq(500, gc_bias=0.45)
+    base_seq2 = random_seq(480, gc_bias=0.55)
+
+    test_data = []
+
+    # Cluster 1: 8 sequences
+    for i in range(8):
+        seq = mutate_seq(base_seq1, mutation_rate=0.05 + i*0.01)
+        test_data.append({
+            'chr': f'chr{(i % 5) + 1}',
+            'start': 1000000 + i * 10000,
+            'stop': 1000000 + i * 10000 + len(seq),
+            'TE_name': f'{FAMILY_NAME}_element_{i+1}',
+            'family': FAMILY_NAME,
+            'strand': '+' if i % 2 == 0 else '-',
+            'Seq': seq,
+            'A1_siCTRL_r1': np.random.uniform(0, 50),
+            'A1_siCTRL_r2': np.random.uniform(0, 50),
+            'A1_siKD_r1': np.random.uniform(0, 30),
+            'A1_siKD_r2': np.random.uniform(0, 30),
+        })
+
+    # Cluster 2: 7 sequences
+    for i in range(7):
+        seq = mutate_seq(base_seq2, mutation_rate=0.05 + i*0.01)
+        test_data.append({
+            'chr': f'chr{(i % 5) + 6}',
+            'start': 2000000 + i * 10000,
+            'stop': 2000000 + i * 10000 + len(seq),
+            'TE_name': f'{FAMILY_NAME}_element_{i+9}',
+            'family': FAMILY_NAME,
+            'strand': '+' if i % 2 == 0 else '-',
+            'Seq': seq,
+            'A1_siCTRL_r1': np.random.uniform(20, 100),
+            'A1_siCTRL_r2': np.random.uniform(20, 100),
+            'A1_siKD_r1': np.random.uniform(10, 50),
+            'A1_siKD_r2': np.random.uniform(10, 50),
+        })
+
+    return pd.DataFrame(test_data)
+
+# Parse command line arguments
+def parse_args():
+    parser = argparse.ArgumentParser(description='TE Analysis Pipeline')
+    parser.add_argument('--test', action='store_true', help='Run with mock test data')
+    parser.add_argument('--input', type=str, help='Input CSV file with TE data')
+    parser.add_argument('--family', type=str, default=FAMILY_NAME, help='TE family name to analyze')
+    parser.add_argument('--output', type=str, default=str(BASE_OUT_DIR), help='Output directory')
+    parser.add_argument('--debug', action='store_true', help='Enable debug output')
+    parser.add_argument('--skip-genome-search', action='store_true', help='Skip genome-wide primer search')
+    return parser.parse_args() if len(sys.argv) > 1 else argparse.Namespace(
+        test=False, input=None, family=FAMILY_NAME, output=str(BASE_OUT_DIR), debug=False, skip_genome_search=False
+    )
+
+# Only parse args when running as script
+if __name__ == "__main__" or len(sys.argv) > 1:
+    args = parse_args()
+    if args.test:
+        FAMILY_NAME = "TEST_TE"
+        BASE_OUT_DIR = Path("test_output")
+        DEBUG = True
+        print("\n" + "="*60)
+        print("RUNNING IN TEST MODE WITH MOCK DATA")
+        print("="*60)
+    else:
+        FAMILY_NAME = args.family
+        BASE_OUT_DIR = Path(args.output)
+        DEBUG = args.debug
 # ================================================
 
 # Setup output directory with improved structure
@@ -70,8 +179,35 @@ for name, path in DIRS.items():
 
 # ==================== LOAD AND FILTER DATA ====================
 print("\n=== LOADING DATA ===")
-# Assuming df is already loaded with the structure you provided
-# df should have columns: chr, start, stop, TE_name, family, strand, and expression columns (A1_siCTRL_r1, etc.)
+
+# Handle different data sources
+if __name__ == "__main__" and len(sys.argv) > 1:
+    args = parse_args()
+    if args.test:
+        print("Creating mock test data...")
+        df = create_test_data()
+        print(f"Created {len(df)} mock sequences")
+    elif args.input:
+        print(f"Loading data from {args.input}...")
+        df = pd.read_csv(args.input)
+        print(f"Loaded {len(df)} rows from input file")
+    else:
+        # Check if df exists in global scope (notebook/interactive mode)
+        if 'df' not in dir():
+            print("ERROR: No data source specified.")
+            print("Usage:")
+            print("  python query.py --test              # Run with mock test data")
+            print("  python query.py --input FILE.csv   # Run with input CSV file")
+            print("  Or ensure 'df' is loaded in interactive mode")
+            sys.exit(1)
+else:
+    # Interactive/notebook mode - df should be pre-loaded
+    if 'df' not in dir():
+        print("WARNING: 'df' not found. Creating test data for demonstration.")
+        df = create_test_data()
+        FAMILY_NAME = "TEST_TE"
+        BASE_OUT_DIR = Path("test_output")
+        DEBUG = True
 
 # Filter for target family
 df_family = df[df['TE_name'].str.contains(FAMILY_NAME, case=False, na=False)].copy()
@@ -80,45 +216,54 @@ print(f"Found {len(df_family)} instances of {FAMILY_NAME}")
 
 if len(df_family) == 0:
     print(f"ERROR: No instances found for family {FAMILY_NAME}")
-    exit(1)
+    print(f"Available TE names (first 10): {df['TE_name'].unique()[:10].tolist()}")
+    sys.exit(1)
 
 # ==================== FETCH SEQUENCES FROM UCSC ====================
 print("\n=== FETCHING SEQUENCES FROM UCSC ===")
-seqlist = []
-failed_indices = []
 
-for i in range(len(df_family)):
-    print(f"{i+1}/{len(df_family)}", end="\r")
-    try:
-        # UCSC API uses semicolons as parameter separators
-        link = (f"https://api.genome.ucsc.edu/getData/sequence?"
-                f"genome=hg38;chrom={df_family['chr'].iloc[i]};"
-                f"start={int(df_family['start'].iloc[i])};end={int(df_family['stop'].iloc[i])}")
-        r = requests.get(link, timeout=30)
-        r.raise_for_status()  # Raise an error for bad HTTP status codes
+# Check if sequences are already provided (e.g., test mode or pre-processed data)
+if 'Seq' in df_family.columns and df_family['Seq'].notna().all():
+    print("Sequences already present in data, skipping UCSC fetch")
+    # Ensure sequences are uppercase
+    df_family['Seq'] = df_family['Seq'].str.upper()
+    failed_indices = []
+else:
+    seqlist = []
+    failed_indices = []
 
-        # Parse JSON response directly (no BeautifulSoup needed)
-        res = r.json()
+    for i in range(len(df_family)):
+        print(f"{i+1}/{len(df_family)}", end="\r")
+        try:
+            # UCSC API uses semicolons as parameter separators
+            link = (f"https://api.genome.ucsc.edu/getData/sequence?"
+                    f"genome=hg38;chrom={df_family['chr'].iloc[i]};"
+                    f"start={int(df_family['start'].iloc[i])};end={int(df_family['stop'].iloc[i])}")
+            r = requests.get(link, timeout=30)
+            r.raise_for_status()  # Raise an error for bad HTTP status codes
 
-        # Check for error in response
-        if 'error' in res:
-            raise ValueError(f"API error: {res['error']}")
+            # Parse JSON response directly (no BeautifulSoup needed)
+            res = r.json()
 
-        # Extract DNA sequence
-        if 'dna' in res:
-            seqlist.append(res['dna'].upper())
-        else:
-            # Some UCSC API versions return sequence differently
-            raise KeyError(f"'dna' not in response. Keys: {list(res.keys())}")
-    except Exception as e:
-        print(f"\nWarning: Failed to fetch sequence for row {i}: {e}")
-        seqlist.append("N" * 100)  # placeholder for failed fetches
-        failed_indices.append(i)
+            # Check for error in response
+            if 'error' in res:
+                raise ValueError(f"API error: {res['error']}")
 
-df_family['Seq'] = seqlist
-print(f"\nSuccessfully fetched {len(df_family) - len(failed_indices)} sequences")
-if failed_indices:
-    print(f"Failed to fetch {len(failed_indices)} sequences")
+            # Extract DNA sequence
+            if 'dna' in res:
+                seqlist.append(res['dna'].upper())
+            else:
+                # Some UCSC API versions return sequence differently
+                raise KeyError(f"'dna' not in response. Keys: {list(res.keys())}")
+        except Exception as e:
+            print(f"\nWarning: Failed to fetch sequence for row {i}: {e}")
+            seqlist.append("N" * 100)  # placeholder for failed fetches
+            failed_indices.append(i)
+
+    df_family['Seq'] = seqlist
+    print(f"\nSuccessfully fetched {len(df_family) - len(failed_indices)} sequences")
+    if failed_indices:
+        print(f"Failed to fetch {len(failed_indices)} sequences")
 
 # Save raw data with sequences
 df_family.to_csv(DIRS['data'] / f"{FAMILY_NAME.lower()}_with_sequences.csv", index=False)
@@ -892,9 +1037,15 @@ def search_seq_chromosomal(primer, fasta=HG38_FA):
     rc = reverse_complement(primer)
     plen = len(primer)
     hits = []
-    fasta_path = Path(fasta)
+    fasta_path = Path(fasta) if fasta else None
+
+    # Check if genome file exists
+    if fasta_path is None or not fasta_path.exists():
+        debug_print(f"Genome file not found: {fasta}. Skipping genome search.")
+        return pd.DataFrame(columns=["chrom", "start", "stop", "strand"])
+
     print(f"Searching genome for primer {primer} (rc {rc}) in {fasta_path.name} ...")
-    
+
     with open(fasta_path, "r") as f:
         chrom = None
         seq_buf = []

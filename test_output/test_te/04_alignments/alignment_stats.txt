@@ -1,0 +1,5 @@
+=== GLOBAL ALIGNMENT STATISTICS ===
+
+Number of sequences: 15
+Alignment length: 550
+Consensus length (no gaps): 550

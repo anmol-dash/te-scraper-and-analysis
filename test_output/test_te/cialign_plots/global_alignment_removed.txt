@@ -1,0 +1,2 @@
+remove_divergent	row11|TEST_TE_element_12|cluster0,row14|TEST_TE_element_15|cluster0,row8|TEST_TE_element_9|cluster0,row13|TEST_TE_element_14|cluster0,row12|TEST_TE_element_13|cluster0,row10|TEST_TE_element_11|cluster0,row9|TEST_TE_element_10|cluster0
+remove_gap_only	0,1,2,3,4,5,6,7,8,9,10,11,12,51,52,53,54,55,56,57,58,59,60,61,62,104,105,106,107,108,109,110,144,145,146,147,148,149,150,151,152,153,154,155,391,392,393,417,418,419

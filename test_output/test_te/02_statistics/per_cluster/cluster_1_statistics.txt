@@ -1,0 +1,22 @@
+============================================================
+STATISTICS FOR TEST_TE - CLUSTER 1 (n=7)
+============================================================
+
+Dataset size: 7 sequences
+
+=== SEQUENCE LENGTH STATISTICS ===
+Mean:    480.00 bp
+Median:  480.00 bp
+Min:     480 bp
+Max:     480 bp
+
+=== GC CONTENT STATISTICS ===
+Mean:    0.545 (54.5%)
+Min:     0.535
+Max:     0.552
+
+=== EXPRESSION STATISTICS ===
+A1_siCTRL_r1: mean=46.57, max=95.16
+A1_siCTRL_r2: mean=59.77, max=95.91
+A1_siKD_r1: mean=30.62, max=48.78
+A1_siKD_r2: mean=36.86, max=46.87

@@ -1,0 +1,2 @@
+cluster,size,mean_length,median_length,mean_gc,median_gc,mean_total_expr,median_total_expr,sum_total_expr
+0,15,490.6666666666667,500.0,0.4781777777777777,0.434,118.925340890261,97.58033394463729,1783.880113353915

@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>CIAlign Alignment Plots - TEST_TE</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }
+        h1 { color: #333; border-bottom: 3px solid #4CAF50; padding-bottom: 10px; }
+        h2 { color: #4CAF50; margin-top: 30px; }
+        .plot-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(500px, 1fr)); gap: 20px; margin: 20px 0; }
+        .plot-card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .plot-card h3 { margin-top: 0; color: #333; }
+        .plot-card img { width: 100%; height: auto; border: 1px solid #ddd; border-radius: 4px; }
+        .plot-card a { display: inline-block; margin: 5px 5px 0 0; padding: 8px 16px; background-color: #4CAF50; color: white; text-decoration: none; border-radius: 4px; font-size: 14px; }
+        .plot-card a:hover { background-color: #45a049; }
+    </style>
+</head>
+<body>
+    <h1>CIAlign Alignment Visualization - TEST_TE</h1>
+    <p>Interactive alignment plots showing conservation, insertions, and sequence quality.</p>
+    
+    <h2>Global Alignment</h2>
+    <div class="plot-grid">
+
+        <div class="plot-card">
+            <h3>Input</h3>
+            <img src="global_alignment_input.png" alt="Input">
+            <a href="global_alignment_input.png" download>Download</a>
+        </div>
+
+        <div class="plot-card">
+            <h3>Markup</h3>
+            <img src="global_alignment_markup.png" alt="Markup">
+            <a href="global_alignment_markup.png" download>Download</a>
+        </div>
+
+        <div class="plot-card">
+            <h3>Markup Legend</h3>
+            <img src="global_alignment_markup_legend.png" alt="Markup Legend">
+            <a href="global_alignment_markup_legend.png" download>Download</a>
+        </div>
+
+        <div class="plot-card">
+            <h3>Output</h3>
+            <img src="global_alignment_output.png" alt="Output">
+            <a href="global_alignment_output.png" download>Download</a>
+        </div>
+
+    </div>
+    
+    <h2>Per-Cluster Alignments</h2>
+
+    <h3>Cluster 0</h3>
+    <div class="plot-grid">
+
+        <div class="plot-card">
+            <h3>Input</h3>
+            <img src="cluster_0_alignment_input.png" alt="Input">
+            <a href="cluster_0_alignment_input.png" download>Download</a>
+        </div>
+
+        <div class="plot-card">
+            <h3>Markup</h3>
+            <img src="cluster_0_alignment_markup.png" alt="Markup">
+            <a href="cluster_0_alignment_markup.png" download>Download</a>
+        </div>
+
+        <div class="plot-card">
+            <h3>Markup Legend</h3>
+            <img src="cluster_0_alignment_markup_legend.png" alt="Markup Legend">
+            <a href="cluster_0_alignment_markup_legend.png" download>Download</a>
+        </div>
+
+        <div class="plot-card">
+            <h3>Output</h3>
+            <img src="cluster_0_alignment_output.png" alt="Output">
+            <a href="cluster_0_alignment_output.png" download>Download</a>
+        </div>
+
+    </div>
+
+    <div style="margin-top: 40px; padding: 20px; background: white; border-radius: 8px;">
+        <h2>About These Plots</h2>
+        <p>Generated with CIAlign - a tool for cleaning and visualizing multiple sequence alignments.</p>
+        <ul>
+            <li><strong>Input plot</strong>: Shows the original alignment before cleaning</li>
+            <li><strong>Output plot</strong>: Shows the cleaned alignment after removing insertions, divergent sequences, and short sequences</li>
+            <li><strong>Markup plot</strong>: Highlights regions that were removed during cleaning</li>
+        </ul>
+        <p><a href="https://github.com/KatyBrown/CIAlign" target="_blank">CIAlign GitHub</a></p>
+    </div>
+</body>
+</html>

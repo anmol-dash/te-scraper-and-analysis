@@ -1,0 +1,15 @@
+============================================================
+CLUSTER COMPARISON FOR TEST_TE
+============================================================
+
+Total sequences: 15
+Number of clusters: 1
+
+CLUSTER SIZE DISTRIBUTION:
+----------------------------------------
+Cluster   0:    15 sequences (100.0%)
+
+CLUSTER CHARACTERISTICS:
+----------------------------------------
+Cluster    Size     Mean Len     Mean GC    Mean Expr   
+0          15       490.7        0.478      118.9       

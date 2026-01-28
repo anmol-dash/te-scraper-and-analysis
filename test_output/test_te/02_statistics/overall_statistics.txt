@@ -1,0 +1,85 @@
+============================================================
+STATISTICS FOR TEST_TE - OVERALL
+============================================================
+
+Dataset size: 15 sequences
+
+=== SEQUENCE LENGTH STATISTICS ===
+Count:   15
+Mean:    490.67 bp
+Median:  500.00 bp
+Std Dev: 10.33 bp
+Min:     480 bp
+Max:     500 bp
+Q1:      480.00 bp
+Q3:      500.00 bp
+
+=== GC CONTENT STATISTICS ===
+Mean:    0.478 (47.8%)
+Median:  0.434 (43.4%)
+Std Dev: 0.065
+Min:     0.410 (41.0%)
+Max:     0.552 (55.2%)
+Q1:      0.419 (41.9%)
+Q3:      0.546 (54.6%)
+
+=== EXPRESSION DATA STATISTICS ===
+Number of expression columns: 4
+
+--- A1_siCTRL_r1 ---
+Mean:    34.83
+Median:  29.76
+Std Dev: 21.40
+Min:     7.80
+Max:     95.16
+Q1:      24.00
+Q3:      41.16
+Non-zero: 15 (100.0%)
+
+--- A1_siCTRL_r2 ---
+Mean:    39.64
+Median:  35.40
+Std Dev: 29.44
+Min:     2.32
+Max:     95.91
+Q1:      18.43
+Q3:      53.57
+Non-zero: 15 (100.0%)
+
+--- A1_siKD_r1 ---
+Mean:    19.34
+Median:  12.96
+Std Dev: 16.00
+Min:     0.62
+Max:     48.78
+Q1:      7.38
+Q3:      28.19
+Non-zero: 15 (100.0%)
+
+--- A1_siKD_r2 ---
+Mean:    25.12
+Median:  25.99
+Std Dev: 14.47
+Min:     5.12
+Max:     46.87
+Q1:      13.21
+Q3:      35.90
+Non-zero: 15 (100.0%)
+
+=== TOTAL EXPRESSION (sum across all columns) ===
+Mean:    118.93
+Median:  97.58
+Std Dev: 66.13
+Min:     43.33
+Max:     267.54
+
+=== EXPRESSION BY CONDITION ===
+--- siCTRL (2 replicates) ---
+Mean:    74.47
+Median:  65.46
+Std Dev: 42.92
+
+--- siKD (2 replicates) ---
+Mean:    44.46
+Median:  34.82
+Std Dev: 26.79

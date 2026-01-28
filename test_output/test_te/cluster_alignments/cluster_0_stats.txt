@@ -1,0 +1,9 @@
+=== CLUSTER 0 ALIGNMENT STATISTICS ===
+
+Number of sequences: 15
+Alignment length: 550
+Consensus length (no gaps): 550
+
+Average gaps per column: 1.62
+Columns with no gaps: 430
+Columns with >50% gaps: 50
