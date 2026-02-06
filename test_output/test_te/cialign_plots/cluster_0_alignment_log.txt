@@ -1,4 +1,4 @@
-2026-01-28 13:58:57,562 - __main__ - INFO - 
+2026-01-28 14:46:45,873 - __main__ - INFO - 
 Initial parameters:
 Command Line Args:   --infile test_output/test_te/cluster_alignments/cluster_0_aligned.fa --outfile_stem test_output/test_te/cialign_plots/cluster_0_alignment --remove_insertions --remove_divergent --remove_short --plot_input --plot_output --plot_markup
 Defaults:
@@ -47,76 +47,15 @@ Defaults:
   --make_simmatrix_keepgaps:0
   --duporder:        first
 
-2026-01-28 13:58:57,565 - __main__ - INFO - Nucleotide alignment detected
-2026-01-28 13:58:57,565 - __main__ - INFO - Removing divergent sequences
-2026-01-28 13:58:57,613 - __main__ - INFO - Removing divergent sequences row10|TEST_TE_element_11|cluster0, row14|TEST_TE_element_15|cluster0, row8|TEST_TE_element_9|cluster0, row9|TEST_TE_element_10|cluster0, row11|TEST_TE_element_12|cluster0, row12|TEST_TE_element_13|cluster0, row13|TEST_TE_element_14|cluster0
-2026-01-28 13:58:57,613 - __main__ - INFO - Removing gap only columns
-2026-01-28 13:58:57,613 - __main__ - INFO - Removing sites 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 104, 105, 106, 107, 108, 109, 110, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 391, 392, 393, 417, 418, 419
-2026-01-28 13:58:57,613 - __main__ - INFO - Removing insertions
-2026-01-28 13:58:57,613 - __main__ - INFO - Removing gap only columns
-2026-01-28 13:58:57,613 - __main__ - INFO - Removing short sequences
-2026-01-28 13:58:57,613 - __main__ - INFO - Removing gap only columns
-2026-01-28 13:58:57,614 - __main__ - INFO - Plotting mini alignment for input
-2026-01-28 13:58:57,719 - __main__ - INFO - Plotting mini alignment for output
-2026-01-28 13:58:57,825 - __main__ - INFO - Plotting mini alignment with markup
-2026-01-28 13:59:14,759 - __main__ - INFO - 
-Initial parameters:
-Command Line Args:   --infile test_output/test_te/cluster_alignments/cluster_0_aligned.fa --outfile_stem test_output/test_te/cialign_plots/cluster_0_alignment --remove_insertions --remove_divergent --remove_short --plot_input --plot_output --plot_markup
-Defaults:
-  --remove_divergent_minperc:0.65
-  --insertion_min_size:3
-  --insertion_max_size:200
-  --insertion_min_flank:5
-  --insertion_min_perc:0.5
-  --crop_ends_mingap_perc:0.05
-  --crop_ends_redefine_perc:0.1
-  --remove_min_length:50
-  --crop_divergent_min_prop_ident:0.5
-  --crop_divergent_min_prop_nongap:0.5
-  --crop_divergent_buffer_size:5
-  --consensus_type:  majority
-  --consensus_name:  consensus
-  --plot_dpi:        300
-  --plot_format:     png
-  --plot_width:      5
-  --plot_height:     3
-  --plot_sub_matrix_name:default
-  --plot_identity_palette:bone
-  --plot_identity_gap_col:white
-  --plot_similarity_palette:bone
-  --plot_similarity_gap_col:white
-  --palette:         CBS
-  --sequence_logo_type:bar
-  --sequence_logo_dpi:300
-  --sequence_logo_font:monospace
-  --sequence_logo_nt_per_row:50
-  --sequence_logo_filetype:png
-  --logo_start:      0
-  --logo_end:        0
-  --pwm_freqtype:    equal
-  --pwm_alphatype:   calc
-  --pwm_alphaval:    1.0
-  --plot_stats_dpi:  300
-  --plot_stats_height:3
-  --plot_stats_width:5
-  --plot_stats_height_bar:5
-  --plot_stats_width_bar:3
-  --plot_stats_colour:#007bf5
-  --plot_stats_filetype:png
-  --make_simmatrix_dp:4
-  --make_simmatrix_minoverlap:1
-  --make_simmatrix_keepgaps:0
-  --duporder:        first
-
-2026-01-28 13:59:14,762 - __main__ - INFO - Nucleotide alignment detected
-2026-01-28 13:59:14,762 - __main__ - INFO - Removing divergent sequences
-2026-01-28 13:59:14,812 - __main__ - INFO - Removing divergent sequences row12|TEST_TE_element_13|cluster0, row14|TEST_TE_element_15|cluster0, row9|TEST_TE_element_10|cluster0, row13|TEST_TE_element_14|cluster0, row10|TEST_TE_element_11|cluster0, row11|TEST_TE_element_12|cluster0, row8|TEST_TE_element_9|cluster0
-2026-01-28 13:59:14,812 - __main__ - INFO - Removing gap only columns
-2026-01-28 13:59:14,812 - __main__ - INFO - Removing sites 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 104, 105, 106, 107, 108, 109, 110, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 391, 392, 393, 417, 418, 419
-2026-01-28 13:59:14,812 - __main__ - INFO - Removing insertions
-2026-01-28 13:59:14,812 - __main__ - INFO - Removing gap only columns
-2026-01-28 13:59:14,812 - __main__ - INFO - Removing short sequences
-2026-01-28 13:59:14,812 - __main__ - INFO - Removing gap only columns
-2026-01-28 13:59:14,813 - __main__ - INFO - Plotting mini alignment for input
-2026-01-28 13:59:14,934 - __main__ - INFO - Plotting mini alignment for output
-2026-01-28 13:59:15,039 - __main__ - INFO - Plotting mini alignment with markup
+2026-01-28 14:46:45,875 - __main__ - INFO - Nucleotide alignment detected
+2026-01-28 14:46:45,876 - __main__ - INFO - Removing divergent sequences
+2026-01-28 14:46:45,925 - __main__ - INFO - Removing divergent sequences row12|TEST_TE_element_13|cluster0, row11|TEST_TE_element_12|cluster0, row9|TEST_TE_element_10|cluster0, row13|TEST_TE_element_14|cluster0, row10|TEST_TE_element_11|cluster0, row14|TEST_TE_element_15|cluster0, row8|TEST_TE_element_9|cluster0
+2026-01-28 14:46:45,926 - __main__ - INFO - Removing gap only columns
+2026-01-28 14:46:45,926 - __main__ - INFO - Removing sites 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 104, 105, 106, 107, 108, 109, 110, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 391, 392, 393, 417, 418, 419
+2026-01-28 14:46:45,926 - __main__ - INFO - Removing insertions
+2026-01-28 14:46:45,926 - __main__ - INFO - Removing gap only columns
+2026-01-28 14:46:45,926 - __main__ - INFO - Removing short sequences
+2026-01-28 14:46:45,926 - __main__ - INFO - Removing gap only columns
+2026-01-28 14:46:45,927 - __main__ - INFO - Plotting mini alignment for input
+2026-01-28 14:46:46,048 - __main__ - INFO - Plotting mini alignment for output
+2026-01-28 14:46:46,152 - __main__ - INFO - Plotting mini alignment with markup

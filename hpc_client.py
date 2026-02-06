@@ -1,12 +1,27 @@
 #!/usr/bin/env python3
 """
-HPC Client for TE Analysis Pipeline
+HPC Client for TE Analysis Pipeline (Batch Job Mode)
 
-An interactive client-side application that connects to an HPC cluster,
-sets parameters for query.py, previews results, and retrieves output.
+An interactive client that connects to an HPC cluster, submits analysis
+jobs via bsub, and allows you to monitor progress and retrieve results.
+
+Workflow:
+    1. Connect to HPC cluster
+    2. Configure parameters (family name, input files, primer timeout, etc.)
+    3. Submit batch job - job runs on HPC, outputs stay on cluster
+    4. Check job status or watch progress live
+    5. Retrieve results when job completes
+
+Key Features:
+    - Batch job submission via bsub (doesn't require active connection)
+    - Results stored on HPC cluster, downloaded on demand
+    - Primer timeout with random sampling fallback (default: 2 min)
+      If genome search takes too long, uses random chromosome sampling
+      to estimate hits instead of hanging indefinitely
 
 Usage:
     python hpc_client.py
+    python hpc_client.py --host cluster.edu --user myuser
 
 Requirements:
     pip install paramiko
@@ -31,7 +46,7 @@ except ImportError:
 
 
 class HPCClient:
-    """Interactive client for running TE analysis on HPC cluster."""
+    """Interactive client for running TE analysis on HPC cluster via batch jobs."""
 
     def __init__(self):
         self.ssh = None
@@ -43,11 +58,13 @@ class HPCClient:
             "FAMILY_NAME": "HERVK9",
             "HG38_FA": "/project/amodzlab/index/human/hg38/hg38.fa",
             "BASE_OUT_DIR": "collab_rna",
-            "K": 18,
+            "K": 18,  # K-mer size for clustering
+            "PRIMER_K": 18,  # K-mer size for primer design (e.g., 8, 12, 18)
             "TOP_N_GLOBAL": 8,
             "TOP_N_CLUSTER": 5,
             "TOP_N_FORWARD_PRIMERS": 3,
             "MIN_SEQUENCES_FOR_CLUSTERING": 10,
+            "PRIMER_TIMEOUT": 120,  # Timeout for primer genome search (seconds)
             "all_te_file": "",  # Path to CSV on HPC
             "te_counts": "",    # Path to CSV on HPC
         }
@@ -55,6 +72,8 @@ class HPCClient:
         self.local_output_dir = None
         self.remote_script_path = None
         self.remote_work_dir = None
+        self.remote_output_dir = None  # Where results are stored on HPC
+        self.current_job_id = None  # Track submitted job
         self._transport = None
         self._password = None
         self.use_sftp = False
@@ -138,8 +157,14 @@ class HPCClient:
         self.connected = False
         print("Disconnected from HPC.")
 
-    def run_command(self, command: str, timeout: int = 300) -> tuple:
-        """Execute a command on the remote server."""
+    def run_command(self, command: str, timeout: int = 300, stream_output: bool = False) -> tuple:
+        """Execute a command on the remote server.
+
+        Args:
+            command: The command to execute
+            timeout: Timeout in seconds
+            stream_output: If True, print output in real-time as it's received
+        """
         if not self.connected:
             raise RuntimeError("Not connected to HPC")
 
@@ -151,19 +176,62 @@ class HPCClient:
         out = b""
         err = b""
 
+        import time
+        last_output_time = time.time()
+
         while True:
+            # Check for stdout
             if channel.recv_ready():
-                out += channel.recv(4096)
+                chunk = channel.recv(4096)
+                out += chunk
+                if stream_output and chunk:
+                    try:
+                        print(chunk.decode(), end='', flush=True)
+                    except UnicodeDecodeError:
+                        pass
+                    last_output_time = time.time()
+
+            # Check for stderr
             if channel.recv_stderr_ready():
-                err += channel.recv_stderr(4096)
+                chunk = channel.recv_stderr(4096)
+                err += chunk
+                if stream_output and chunk:
+                    try:
+                        # Print stderr in a different color if possible
+                        print(chunk.decode(), end='', flush=True)
+                    except UnicodeDecodeError:
+                        pass
+                    last_output_time = time.time()
+
+            # Check if command is done
             if channel.exit_status_ready():
                 break
 
+            # Small sleep to prevent busy waiting
+            time.sleep(0.1)
+
+            # Print a heartbeat if no output for a while (only in stream mode)
+            if stream_output and (time.time() - last_output_time) > 30:
+                print(f"\n[Still running... {int(time.time() - last_output_time)}s since last output]", flush=True)
+                last_output_time = time.time()
+
         # Get any remaining data
         while channel.recv_ready():
-            out += channel.recv(4096)
+            chunk = channel.recv(4096)
+            out += chunk
+            if stream_output and chunk:
+                try:
+                    print(chunk.decode(), end='', flush=True)
+                except UnicodeDecodeError:
+                    pass
         while channel.recv_stderr_ready():
-            err += channel.recv_stderr(4096)
+            chunk = channel.recv_stderr(4096)
+            err += chunk
+            if stream_output and chunk:
+                try:
+                    print(chunk.decode(), end='', flush=True)
+                except UnicodeDecodeError:
+                    pass
 
         exit_code = channel.recv_exit_status()
         channel.close()
@@ -219,29 +287,35 @@ class HPCClient:
                 ("2", "HG38_FA", self.params["HG38_FA"]),
                 ("3", "BASE_OUT_DIR", self.params["BASE_OUT_DIR"]),
                 ("4", "K", self.params["K"]),
-                ("5", "TOP_N_GLOBAL", self.params["TOP_N_GLOBAL"]),
-                ("6", "TOP_N_CLUSTER", self.params["TOP_N_CLUSTER"]),
-                ("7", "TOP_N_FORWARD_PRIMERS", self.params["TOP_N_FORWARD_PRIMERS"]),
-                ("8", "MIN_SEQUENCES_FOR_CLUSTERING", self.params["MIN_SEQUENCES_FOR_CLUSTERING"]),
-                ("9", "all_te_file", self.params["all_te_file"] or "[NOT SET - REQUIRED]"),
-                ("10", "te_counts", self.params["te_counts"] or "[NOT SET - optional]"),
+                ("5", "PRIMER_K", self.params["PRIMER_K"]),
+                ("6", "TOP_N_GLOBAL", self.params["TOP_N_GLOBAL"]),
+                ("7", "TOP_N_CLUSTER", self.params["TOP_N_CLUSTER"]),
+                ("8", "TOP_N_FORWARD_PRIMERS", self.params["TOP_N_FORWARD_PRIMERS"]),
+                ("9", "MIN_SEQUENCES_FOR_CLUSTERING", self.params["MIN_SEQUENCES_FOR_CLUSTERING"]),
+                ("10", "PRIMER_TIMEOUT", self.params["PRIMER_TIMEOUT"]),
+                ("11", "all_te_file", self.params["all_te_file"] or "[NOT SET - REQUIRED]"),
+                ("12", "te_counts", self.params["te_counts"] or "[NOT SET - optional]"),
             ]
 
             # Add descriptions below the parameter list
             print("\n  Parameter descriptions:")
-            print("    [9]  all_te_file: TE annotations CSV with columns:")
+            print("    [4]  K: K-mer size for clustering analysis (default: 18)")
+            print("    [5]  PRIMER_K: K-mer size for primer design (e.g., 8, 12, 18)")
+            print("    [10] PRIMER_TIMEOUT: Timeout (seconds) for each primer search")
+            print("         If exceeded, uses random chromosome sampling instead")
+            print("    [11] all_te_file: TE annotations CSV with columns:")
             print("         chr, start, stop, TE_name, family, strand, + expression columns")
-            print("    [10] te_counts: Optional summary CSV (not required for analysis)")
+            print("    [12] te_counts: Optional summary CSV (not required for analysis)")
 
             for num, name, value in param_list:
                 print(f"  [{num:>2}] {name:<30} = {value}")
 
             print("\n  [p]  Preview family count")
-            print("  [r]  Run analysis")
+            print("  [r]  Run analysis (submit batch job)")
             print("  [q]  Quit")
             print("="*60)
 
-            choice = input("\nSelect option (1-10, p, r, q): ").strip().lower()
+            choice = input("\nSelect option (1-12, p, r, q): ").strip().lower()
 
             if choice == 'q':
                 return False
@@ -249,14 +323,14 @@ class HPCClient:
                 self.preview_family_count()
             elif choice == 'r':
                 return True
-            elif choice in ['1', '2', '3', '9', '10']:
+            elif choice in ['1', '2', '3', '11', '12']:
                 # String parameters
                 key = param_list[int(choice)-1][1].split()[0]  # Handle "all_te_file (CSV path)"
                 current = self.params[key]
                 new_val = input(f"Enter new value for {key} [{current}]: ").strip()
                 if new_val:
                     self.params[key] = new_val
-            elif choice in ['4', '5', '6', '7', '8']:
+            elif choice in ['4', '5', '6', '7', '8', '9', '10']:
                 # Integer parameters
                 key = param_list[int(choice)-1][1]
                 current = self.params[key]
@@ -288,11 +362,14 @@ class HPCClient:
 FAMILY_NAME = "{self.params['FAMILY_NAME']}"
 HG38_FA = "{self.params['HG38_FA']}"
 BASE_OUT_DIR = Path("{self.params['BASE_OUT_DIR']}")
-K = {self.params['K']}
+K = {self.params['K']}  # K-mer size for clustering
+PRIMER_K = {self.params['PRIMER_K']}  # K-mer size for primer design
 TOP_N_GLOBAL = {self.params['TOP_N_GLOBAL']}
 TOP_N_CLUSTER = {self.params['TOP_N_CLUSTER']}
 TOP_N_FORWARD_PRIMERS = {self.params['TOP_N_FORWARD_PRIMERS']}
 MIN_SEQUENCES_FOR_CLUSTERING = {self.params['MIN_SEQUENCES_FOR_CLUSTERING']}
+PRIMER_SEARCH_TIMEOUT_OVERRIDE = {self.params['PRIMER_TIMEOUT']}  # Timeout for primer search (uses random sampling if exceeded)
+DEBUG = True  # Enable progress output
 '''
 
         # Add data loading code
@@ -339,8 +416,8 @@ print(f"Loaded te_counts: {{len(df2)}} rows")
         print(f"Uploaded analysis script to {remote_script}")
         return True
 
-    def run_analysis(self):
-        """Run the analysis on HPC."""
+    def submit_batch_job(self):
+        """Submit the analysis as a batch job on HPC. Returns immediately after submission."""
         if not self.params["all_te_file"]:
             print("Error: all_te_file path must be set")
             return False
@@ -360,102 +437,413 @@ print(f"Loaded te_counts: {{len(df2)}} rows")
         if not self.upload_script():
             return False
 
-        print("\nStarting analysis on HPC...")
-        print("This may take a while depending on dataset size...\n")
+        # Set up output directory on HPC
+        family = self.params["FAMILY_NAME"].lower()
+        self.remote_output_dir = f"{self.remote_work_dir}/{self.params['BASE_OUT_DIR']}/{family}"
 
-        # Track installed packages to avoid infinite loops
-        installed_packages = set()
-        max_retries = 10  # Maximum number of packages to install
+        # Create bsub job script
+        job_name = f"te_analysis_{self.params['FAMILY_NAME']}"
+        job_script = f"{self.remote_work_dir}/te_analysis_job.sh"
+        job_out = f"{self.remote_work_dir}/te_analysis_job.out"
+        job_err = f"{self.remote_work_dir}/te_analysis_job.err"
+        job_done = f"{self.remote_work_dir}/te_analysis_job.done"
+        job_info = f"{self.remote_work_dir}/te_analysis_job.info"
 
-        while len(installed_packages) < max_retries:
-            # Run the script
-            cmd = f"cd {self.remote_work_dir} && python {self.remote_script_path}"
-            out, err, code = self.run_command(cmd, timeout=3600)  # 1 hour timeout
+        # Error log file
+        job_error_log = f"{self.remote_work_dir}/te_analysis_job.error.log"
 
-            # Check for missing module error
-            missing_module = None
-            for line in err.split('\n'):
-                if 'ModuleNotFoundError: No module named' in line:
-                    # Extract module name from error message
-                    match = re.search(r"No module named '([^']+)'", line)
-                    if match:
-                        missing_module = match.group(1).split('.')[0]  # Get base module
-                        break
+        # Build the bsub script content
+        bsub_script = f'''#!/bin/bash
+#BSUB -J {job_name}
+#BSUB -o {job_out}
+#BSUB -e {job_err}
+#BSUB -n 4
+#BSUB -M 32000
+#BSUB -W 04:00
+#BSUB -q normal
 
-            if missing_module and missing_module not in installed_packages:
-                print(f"\nMissing module detected: {missing_module}")
-                print(f"Installing {missing_module} via pip...")
+# TE Analysis Pipeline Job
+echo "Starting TE Analysis Pipeline"
+echo "Job ID: $LSB_JOBID"
+echo "Host: $(hostname)"
+echo "Date: $(date)"
+echo "Working directory: {self.remote_work_dir}"
+echo "Output directory: {self.remote_output_dir}"
+echo "Primer search timeout: {self.params['PRIMER_TIMEOUT']}s (will use random sampling if exceeded)"
+echo "Python version: $(python --version 2>&1)"
+echo "=========================================="
 
-                # Map common module names to pip package names
-                package_map = {
-                    'sklearn': 'scikit-learn',
-                    'cv2': 'opencv-python',
-                    'PIL': 'Pillow',
-                    'bs4': 'beautifulsoup4',
-                    'umap': 'umap-learn',
-                }
-                package_name = package_map.get(missing_module, missing_module)
+# Initialize error log
+ERROR_LOG="{job_error_log}"
+echo "=== TE Analysis Error Log ===" > $ERROR_LOG
+echo "Job ID: $LSB_JOBID" >> $ERROR_LOG
+echo "Host: $(hostname)" >> $ERROR_LOG
+echo "Started: $(date)" >> $ERROR_LOG
+echo "Working directory: {self.remote_work_dir}" >> $ERROR_LOG
+echo "Script: {self.remote_script_path}" >> $ERROR_LOG
+echo "" >> $ERROR_LOG
 
-                # Version constraints for systems with old GCC (avoid source compilation)
-                version_constraints = {
-                    'scikit-learn': 'scikit-learn<1.4',
-                    'numpy': 'numpy<2.0',
-                    'scipy': 'scipy<1.12',
-                    'pandas': 'pandas<2.2',
-                    'umap-learn': 'umap-learn<0.5.5',
-                }
+cd {self.remote_work_dir}
 
-                # Try installing with binary-only first (faster, avoids compilation issues)
-                install_cmd = f"pip install --user --only-binary :all: {package_name}"
-                print(f"Trying: {install_cmd}")
-                install_out, install_err, install_code = self.run_command(install_cmd, timeout=300)
+# Check if script exists
+if [ ! -f "{self.remote_script_path}" ]; then
+    echo "ERROR: Script not found: {self.remote_script_path}" | tee -a $ERROR_LOG
+    echo "1" > {job_done}
+    exit 1
+fi
 
-                # If binary-only fails, try with version constraints for problematic packages
-                if install_code != 0:
-                    print("Binary install failed, trying with compatible versions...")
-                    constrained_package = version_constraints.get(package_name, package_name)
-                    install_cmd = f"pip install --user --only-binary :all: {constrained_package}"
-                    print(f"Trying: {install_cmd}")
-                    install_out, install_err, install_code = self.run_command(install_cmd, timeout=300)
+# Check if input file exists
+if [ ! -f "{self.params['all_te_file']}" ]; then
+    echo "ERROR: Input file not found: {self.params['all_te_file']}" | tee -a $ERROR_LOG
+    echo "1" > {job_done}
+    exit 1
+fi
 
-                # Final fallback: try without binary restriction but with version constraints
-                if install_code != 0:
-                    print("Still failing, trying source build with version constraints...")
-                    constrained_package = version_constraints.get(package_name, package_name)
-                    install_cmd = f"pip install --user {constrained_package}"
-                    print(f"Trying: {install_cmd}")
-                    install_out, install_err, install_code = self.run_command(install_cmd, timeout=600)
+# Check if genome file exists
+if [ ! -f "{self.params['HG38_FA']}" ]; then
+    echo "WARNING: Genome file not found: {self.params['HG38_FA']}" | tee -a $ERROR_LOG
+    echo "Genome search will be skipped."
+fi
 
-                if install_code == 0:
-                    print(f"Successfully installed {package_name}")
-                    installed_packages.add(missing_module)
-                    print("Retrying analysis...\n")
-                    continue
+# Run the analysis with unbuffered output, capturing stderr
+echo "Running analysis..."
+python -u {self.remote_script_path} --primer-timeout {self.params['PRIMER_TIMEOUT']} 2>&1 | tee -a $ERROR_LOG
+EXIT_CODE=${{PIPESTATUS[0]}}
+
+echo "" >> $ERROR_LOG
+echo "=========================================="
+echo "Job completed with exit code: $EXIT_CODE"
+echo "Date: $(date)"
+
+if [ $EXIT_CODE -ne 0 ]; then
+    echo "" >> $ERROR_LOG
+    echo "=== JOB FAILED ===" >> $ERROR_LOG
+    echo "Exit code: $EXIT_CODE" >> $ERROR_LOG
+    echo "Ended: $(date)" >> $ERROR_LOG
+    echo ""
+    echo "*** JOB FAILED - Check error log: $ERROR_LOG ***"
+    echo "*** Also check stderr file: {job_err} ***"
+else
+    echo "Results available at: {self.remote_output_dir}"
+    echo "" >> $ERROR_LOG
+    echo "=== JOB SUCCEEDED ===" >> $ERROR_LOG
+    echo "Ended: $(date)" >> $ERROR_LOG
+fi
+
+# Create done marker file
+echo $EXIT_CODE > {job_done}
+
+exit $EXIT_CODE
+'''
+
+        # Upload the job script
+        print("\nCreating bsub job script...")
+        create_script_cmd = f"cat > {job_script} << 'BSUB_SCRIPT_EOF'\n{bsub_script}\nBSUB_SCRIPT_EOF"
+        out, err, code = self.run_command(create_script_cmd, timeout=30)
+        if code != 0:
+            print(f"Error creating job script: {err}")
+            return False
+
+        # Make executable
+        self.run_command(f"chmod +x {job_script}", timeout=10)
+
+        # Remove old output files if they exist
+        self.run_command(f"rm -f {job_out} {job_err} {job_done} {job_info}", timeout=10)
+
+        # Submit the job
+        print("\nSubmitting job to cluster via bsub...")
+        submit_cmd = f"bsub < {job_script}"
+        out, err, code = self.run_command(submit_cmd, timeout=30)
+
+        if code != 0:
+            print(f"Error submitting job: {err}")
+            return False
+
+        # Parse job ID from bsub output
+        job_id = None
+        match = re.search(r'Job <(\d+)>', out)
+        if match:
+            job_id = match.group(1)
+            self.current_job_id = job_id
+            print(f"Job submitted successfully! Job ID: {job_id}")
+        else:
+            print(f"Job submitted but could not parse job ID from: {out}")
+            job_id = "unknown"
+            self.current_job_id = None
+
+        # Save job info for later retrieval
+        job_info_content = f"JOB_ID={job_id}\nFAMILY={self.params['FAMILY_NAME']}\nOUTPUT_DIR={self.remote_output_dir}\nSUBMITTED=$(date)"
+        self.run_command(f"echo '{job_info_content}' > {job_info}", timeout=10)
+
+        print("\n" + "=" * 60)
+        print("BATCH JOB SUBMITTED SUCCESSFULLY")
+        print("=" * 60)
+        print(f"\nJob ID: {job_id}")
+        print(f"Job output: {job_out}")
+        print(f"Job errors: {job_err}")
+        print(f"Results will be at: {self.remote_output_dir}")
+        print("\nThe job is now running on the HPC cluster.")
+        print("Use 'Check job status' to monitor progress.")
+        print("Use 'Retrieve results' to download when complete.")
+        print("\nUseful HPC commands:")
+        print(f"  bjobs {job_id}        # Check job status")
+        print(f"  bpeek {job_id}        # View live output")
+        print(f"  bkill {job_id}        # Cancel job")
+        print("=" * 60)
+
+        return True
+
+    def check_job_status(self):
+        """Check the status of the submitted batch job."""
+        job_info_file = f"{self.remote_work_dir}/te_analysis_job.info"
+        job_done_file = f"{self.remote_work_dir}/te_analysis_job.done"
+        job_out_file = f"{self.remote_work_dir}/te_analysis_job.out"
+        job_err_file = f"{self.remote_work_dir}/te_analysis_job.err"
+        job_error_log = f"{self.remote_work_dir}/te_analysis_job.error.log"
+
+        # Try to get job info
+        out, err, code = self.run_command(f"cat {job_info_file} 2>/dev/null", timeout=10)
+        if code != 0 or not out.strip():
+            print("No job information found. Have you submitted a job?")
+            return None
+
+        # Parse job info
+        job_info = {}
+        for line in out.strip().split('\n'):
+            if '=' in line:
+                key, val = line.split('=', 1)
+                job_info[key] = val
+
+        job_id = job_info.get('JOB_ID', 'unknown')
+        family = job_info.get('FAMILY', 'unknown')
+        output_dir = job_info.get('OUTPUT_DIR', '')
+
+        print("\n" + "=" * 60)
+        print("JOB STATUS")
+        print("=" * 60)
+        print(f"Job ID: {job_id}")
+        print(f"Family: {family}")
+        print(f"Output dir: {output_dir}")
+
+        # Check if job is done
+        done_out, _, _ = self.run_command(f"cat {job_done_file} 2>/dev/null", timeout=10)
+        job_failed = False
+        if done_out.strip():
+            try:
+                exit_code = int(done_out.strip())
+                if exit_code == 0:
+                    print(f"\nStatus: COMPLETED SUCCESSFULLY")
                 else:
-                    print(f"Failed to install {package_name}:")
-                    print(install_err)
-                    break
+                    print(f"\nStatus: FAILED (exit code: {exit_code})")
+                    job_failed = True
+            except ValueError:
+                print(f"\nStatus: COMPLETED (exit code: {done_out.strip()})")
+
+            # Show output size
+            size_out, _, _ = self.run_command(f"du -sh {output_dir} 2>/dev/null || echo 'unknown'", timeout=10)
+            print(f"Results size: {size_out.strip()}")
+            if not job_failed:
+                print("\nResults are ready to retrieve!")
+        else:
+            # Check if job is still running
+            if job_id != 'unknown':
+                bjobs_out, _, _ = self.run_command(f"bjobs {job_id} 2>&1", timeout=10)
+                if 'not found' in bjobs_out.lower():
+                    # Job finished but no done marker - check output
+                    print("\nStatus: COMPLETED (checking results...)")
+                else:
+                    print(f"\nbjobs output:\n{bjobs_out}")
             else:
-                # No missing module or already tried installing it
+                print("\nStatus: UNKNOWN (no job ID available)")
+
+        # If job failed, show error information
+        if job_failed:
+            print("\n" + "-" * 60)
+            print("ERROR DETAILS")
+            print("-" * 60)
+
+            # Show last part of error log
+            err_log_out, _, _ = self.run_command(f"tail -100 {job_error_log} 2>/dev/null", timeout=30)
+            if err_log_out.strip():
+                print("\n--- Error Log (last 100 lines) ---")
+                print(err_log_out)
+                print("--- End Error Log ---")
+
+            # Show stderr
+            stderr_out, _, _ = self.run_command(f"tail -50 {job_err_file} 2>/dev/null", timeout=30)
+            if stderr_out.strip():
+                print("\n--- STDERR (last 50 lines) ---")
+                print(stderr_out)
+                print("--- End STDERR ---")
+
+            # Look for Python tracebacks in output
+            traceback_out, _, _ = self.run_command(
+                f"grep -A 20 'Traceback\\|Error:\\|Exception:' {job_out_file} 2>/dev/null | tail -50",
+                timeout=30
+            )
+            if traceback_out.strip():
+                print("\n--- Python Errors Found ---")
+                print(traceback_out)
+                print("--- End Python Errors ---")
+
+            print("\nFull logs available at:")
+            print(f"  Output: {job_out_file}")
+            print(f"  Stderr: {job_err_file}")
+            print(f"  Error log: {job_error_log}")
+
+        else:
+            # Optionally show recent output for non-failed jobs
+            show_output = input("\nShow recent job output? (y/n): ").strip().lower()
+            if show_output == 'y':
+                tail_out, _, _ = self.run_command(f"tail -50 {job_out_file} 2>/dev/null", timeout=30)
+                print("\n--- Recent Output ---")
+                print(tail_out if tail_out else "(no output yet)")
+                print("--- End Output ---")
+
+        # Check for pipeline error log in output directory
+        if output_dir:
+            family = job_info.get('FAMILY', 'unknown').lower()
+            pipeline_error_log = f"{output_dir}/pipeline_errors.log"
+            pipe_err_out, _, _ = self.run_command(f"cat {pipeline_error_log} 2>/dev/null", timeout=30)
+            if pipe_err_out.strip():
+                print("\n" + "-" * 60)
+                print("PIPELINE ERROR LOG")
+                print("-" * 60)
+                print(pipe_err_out)
+                print("-" * 60)
+
+        print("=" * 60)
+        return job_info
+
+    def download_error_logs(self, local_dir: str = None):
+        """Download just the error logs from the HPC for debugging."""
+        job_info_file = f"{self.remote_work_dir}/te_analysis_job.info"
+        job_out_file = f"{self.remote_work_dir}/te_analysis_job.out"
+        job_err_file = f"{self.remote_work_dir}/te_analysis_job.err"
+        job_error_log = f"{self.remote_work_dir}/te_analysis_job.error.log"
+
+        # Get job info
+        info_out, _, _ = self.run_command(f"cat {job_info_file} 2>/dev/null", timeout=10)
+        output_dir = None
+        if info_out.strip():
+            for line in info_out.strip().split('\n'):
+                if line.startswith('OUTPUT_DIR='):
+                    output_dir = line.split('=', 1)[1]
+                    break
+
+        if not local_dir:
+            local_dir = "./hpc_error_logs"
+
+        local_path = Path(local_dir).expanduser()
+        local_path.mkdir(parents=True, exist_ok=True)
+
+        print(f"\nDownloading error logs to {local_path}")
+        print("-" * 40)
+
+        # Download various log files
+        log_files = [
+            (job_out_file, "job_output.log"),
+            (job_err_file, "job_stderr.log"),
+            (job_error_log, "job_error.log"),
+        ]
+
+        # Add pipeline error log if output dir exists
+        if output_dir:
+            log_files.append((f"{output_dir}/pipeline_errors.log", "pipeline_errors.log"))
+            # Also try UCSC fetch errors
+            family = output_dir.split('/')[-1]
+            log_files.append((f"{output_dir}/01_data/ucsc_fetch_errors.log", "ucsc_fetch_errors.log"))
+
+        for remote_file, local_name in log_files:
+            out, err, code = self.run_command(f"cat '{remote_file}' 2>/dev/null", timeout=30)
+            if out.strip():
+                local_file = local_path / local_name
+                with open(local_file, 'w') as f:
+                    f.write(out)
+                print(f"  Downloaded: {local_name} ({len(out)} bytes)")
+            else:
+                print(f"  Skipped (empty/not found): {local_name}")
+
+        print("-" * 40)
+        print(f"Error logs saved to: {local_path}")
+        return local_path
+
+    def watch_job(self):
+        """Watch job progress in real-time (polling mode)."""
+        job_info_file = f"{self.remote_work_dir}/te_analysis_job.info"
+        job_done_file = f"{self.remote_work_dir}/te_analysis_job.done"
+        job_out_file = f"{self.remote_work_dir}/te_analysis_job.out"
+
+        # Get job info
+        out, err, code = self.run_command(f"cat {job_info_file} 2>/dev/null", timeout=10)
+        if code != 0 or not out.strip():
+            print("No job information found. Have you submitted a job?")
+            return False
+
+        job_id = "unknown"
+        for line in out.strip().split('\n'):
+            if line.startswith('JOB_ID='):
+                job_id = line.split('=', 1)[1]
                 break
 
-        print("="*60)
-        print("ANALYSIS OUTPUT")
-        print("="*60)
-        print(out)
+        print("\n" + "=" * 60)
+        print(f"WATCHING JOB {job_id} (polling every 10 seconds)")
+        print("Press Ctrl+C to stop watching (job will continue running)")
+        print("=" * 60 + "\n")
 
-        if err:
-            print("\nSTDERR:")
-            print(err)
+        import time
+        last_output_size = 0
+        poll_interval = 10
 
-        if code == 0:
-            print("\nAnalysis completed successfully!")
-            if installed_packages:
-                print(f"Packages installed during run: {', '.join(installed_packages)}")
-            return True
-        else:
-            print(f"\nAnalysis failed with exit code {code}")
+        try:
+            while True:
+                # Check if job is done
+                done_out, _, _ = self.run_command(f"cat {job_done_file} 2>/dev/null || echo 'running'", timeout=10)
+                if done_out.strip() != 'running':
+                    print(f"\n\nJob completed with exit code: {done_out.strip()}")
+                    break
+
+                # Check job status with bjobs
+                if job_id != 'unknown':
+                    status_out, _, _ = self.run_command(f"bjobs {job_id} 2>&1 | tail -1", timeout=10)
+                    if 'not found' in status_out.lower():
+                        time.sleep(2)
+                        done_out, _, _ = self.run_command(f"cat {job_done_file} 2>/dev/null || echo 'running'", timeout=10)
+                        if done_out.strip() != 'running':
+                            print(f"\n\nJob completed with exit code: {done_out.strip()}")
+                            break
+                        print("\nJob finished but no done marker found.")
+                        break
+
+                # Stream new output
+                size_out, _, _ = self.run_command(f"wc -c < {job_out_file} 2>/dev/null || echo 0", timeout=10)
+                try:
+                    current_size = int(size_out.strip())
+                except ValueError:
+                    current_size = 0
+
+                if current_size > last_output_size:
+                    skip_bytes = last_output_size
+                    new_out, _, _ = self.run_command(
+                        f"tail -c +{skip_bytes + 1} {job_out_file} 2>/dev/null",
+                        timeout=30
+                    )
+                    if new_out:
+                        print(new_out, end='', flush=True)
+                    last_output_size = current_size
+
+                time.sleep(poll_interval)
+
+        except KeyboardInterrupt:
+            print(f"\n\nStopped watching. Job {job_id} is still running on the cluster.")
+            print(f"Use 'Check job status' to check progress later.")
             return False
+
+        return True
+
+    def run_analysis(self):
+        """Run the analysis - just calls submit_batch_job for backwards compatibility."""
+        return self.submit_batch_job()
 
     def generate_clustering_plots(self):
         """Generate clustering plots after analysis."""
@@ -632,10 +1020,55 @@ except Exception as e:
 
     def retrieve_results(self, local_dir: str):
         """Download results from HPC to local directory."""
-        # Generate clustering plots and consensus sequences first
-        print("\nGenerating clustering plots and consensus sequences...")
-        if not self.generate_clustering_plots():
-            print("Warning: Failed to generate clustering plots. Continuing with available results...")
+        # First check if there's a completed job
+        job_info_file = f"{self.remote_work_dir}/te_analysis_job.info"
+        job_done_file = f"{self.remote_work_dir}/te_analysis_job.done"
+
+        # Check job completion status
+        done_out, _, _ = self.run_command(f"cat {job_done_file} 2>/dev/null", timeout=10)
+        if not done_out.strip():
+            print("\nWarning: Job may not be complete yet.")
+            confirm = input("Retrieve partial results anyway? (y/n): ").strip().lower()
+            if confirm != 'y':
+                return
+        else:
+            try:
+                exit_code = int(done_out.strip())
+                if exit_code != 0:
+                    print(f"\nWarning: Job completed with error (exit code: {exit_code})")
+                    confirm = input("Retrieve results anyway? (y/n): ").strip().lower()
+                    if confirm != 'y':
+                        return
+            except ValueError:
+                pass
+
+        # Try to get output directory from job info
+        remote_out = None
+        info_out, _, _ = self.run_command(f"cat {job_info_file} 2>/dev/null", timeout=10)
+        if info_out.strip():
+            for line in info_out.strip().split('\n'):
+                if line.startswith('OUTPUT_DIR='):
+                    remote_out = line.split('=', 1)[1]
+                    break
+
+        # Fall back to constructed path
+        if not remote_out:
+            family = self.params["FAMILY_NAME"].lower()
+            remote_out = f"{self.remote_work_dir}/{self.params['BASE_OUT_DIR']}/{family}"
+
+        # Verify remote directory exists
+        check_out, _, _ = self.run_command(f"test -d '{remote_out}' && echo 'exists'", timeout=10)
+        if 'exists' not in check_out:
+            print(f"\nError: Remote results directory not found: {remote_out}")
+            print("The job may not have completed successfully.")
+            return
+
+        # Optionally generate clustering plots
+        gen_plots = input("\nGenerate clustering plots before download? (y/n): ").strip().lower()
+        if gen_plots == 'y':
+            print("Generating clustering plots and consensus sequences...")
+            if not self.generate_clustering_plots():
+                print("Warning: Failed to generate clustering plots. Continuing with available results...")
 
         # Expand ~ and make path absolute
         local_path = Path(local_dir).expanduser()
@@ -653,10 +1086,6 @@ except Exception as e:
             print("Hint: Use '~' for home directory (e.g., ~/Documents/output)")
             print("      Or use relative path (e.g., ./output)")
             return
-
-        # Remote output directory
-        family = self.params["FAMILY_NAME"].lower()
-        remote_out = f"{self.remote_work_dir}/{self.params['BASE_OUT_DIR']}/{family}"
 
         print(f"\nRetrieving results from {remote_out}")
         print(f"Saving to {local_path}")
@@ -761,26 +1190,33 @@ except Exception as e:
         while True:
             try:
                 print("\n" + "="*60)
-                print("HPC TE ANALYSIS CLIENT")
+                print("HPC TE ANALYSIS CLIENT (Batch Job Mode)")
                 print("="*60)
                 print("  [1] Configure parameters")
                 print("  [2] Preview family count")
-                print("  [3] Run full analysis")
-                print("  [4] Retrieve results")
-                print("  [5] Disconnect and exit")
+                print("  [3] Submit batch job")
+                print("  [4] Check job status")
+                print("  [5] Watch job progress (live)")
+                print("  [6] Retrieve results")
+                print("  [7] Download error logs only")
+                print("  [8] Disconnect and exit")
                 print("="*60)
 
-                choice = input("\nSelect option (1-5): ").strip()
+                choice = input("\nSelect option (1-8): ").strip()
 
                 if choice == '1':
                     if self.set_parameter_interactive():
                         # User chose to run
-                        self.run_analysis()
+                        self.submit_batch_job()
                 elif choice == '2':
                     self.preview_family_count()
                 elif choice == '3':
-                    self.run_analysis()
+                    self.submit_batch_job()
                 elif choice == '4':
+                    self.check_job_status()
+                elif choice == '5':
+                    self.watch_job()
+                elif choice == '6':
                     if self.local_output_dir:
                         default_dir = str(self.local_output_dir)
                         local_dir = input(f"Enter local output directory [{default_dir}]: ").strip()
@@ -789,7 +1225,10 @@ except Exception as e:
                         local_dir = input("Enter local output directory (e.g., ~/Documents/output): ").strip()
                     if local_dir:
                         self.retrieve_results(local_dir)
-                elif choice == '5':
+                elif choice == '7':
+                    local_dir = input("Enter local directory for error logs [./hpc_error_logs]: ").strip()
+                    self.download_error_logs(local_dir if local_dir else None)
+                elif choice == '8':
                     break
                 else:
                     print("Invalid option")
