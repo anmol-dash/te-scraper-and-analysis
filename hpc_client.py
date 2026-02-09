@@ -404,13 +404,31 @@ print(f"Loaded te_counts: {{len(df2)}} rows")
             with self.sftp.file(remote_script, 'w') as f:
                 f.write(modified_script)
         else:
-            # Use shell command with base64 encoding to safely transfer the script
-            encoded = base64.b64encode(modified_script.encode()).decode()
-            cmd = f"echo '{encoded}' | base64 -d > {remote_script}"
-            out, err, code = self.run_command(cmd)
+            # Upload via chunked base64 to avoid "Argument list too long" errors.
+            # Shell argument limits are typically 128KB-2MB, and our script can exceed that
+            # after base64 encoding. We split into ~48KB raw chunks (~64KB base64).
+            encoded_full = base64.b64encode(modified_script.encode()).decode()
+            chunk_size = 65000  # base64 chars per chunk — safe for any shell
+            chunks = [encoded_full[i:i+chunk_size] for i in range(0, len(encoded_full), chunk_size)]
+
+            print(f"Uploading script ({len(modified_script)} bytes, {len(chunks)} chunks)...")
+
+            # First chunk: overwrite file
+            cmd = f"echo '{chunks[0]}' | base64 -d > {remote_script}"
+            out, err, code = self.run_command(cmd, timeout=30)
             if code != 0:
-                print(f"Failed to upload script: {err}")
+                print(f"Failed to upload script (chunk 1): {err}")
                 return False
+
+            # Remaining chunks: append
+            for i, chunk in enumerate(chunks[1:], 2):
+                cmd = f"echo '{chunk}' | base64 -d >> {remote_script}"
+                out, err, code = self.run_command(cmd, timeout=30)
+                if code != 0:
+                    print(f"Failed to upload script (chunk {i}/{len(chunks)}): {err}")
+                    return False
+
+            print(f"  Uploaded {len(chunks)} chunks successfully")
 
         self.remote_script_path = remote_script
         print(f"Uploaded analysis script to {remote_script}")
@@ -458,20 +476,24 @@ print(f"Loaded te_counts: {{len(df2)}} rows")
 #BSUB -o {job_out}
 #BSUB -e {job_err}
 #BSUB -n 4
-#BSUB -M 32000
+#BSUB -M 12000
 #BSUB -W 04:00
 #BSUB -q normal
 
-# TE Analysis Pipeline Job
-echo "Starting TE Analysis Pipeline"
-echo "Job ID: $LSB_JOBID"
-echo "Host: $(hostname)"
-echo "Date: $(date)"
-echo "Working directory: {self.remote_work_dir}"
-echo "Output directory: {self.remote_output_dir}"
-echo "Primer search timeout: {self.params['PRIMER_TIMEOUT']}s (will use random sampling if exceeded)"
-echo "Python version: $(python --version 2>&1)"
-echo "=========================================="
+echo "=========================================================="
+echo " TE Analysis Pipeline — Batch Mode"
+echo "=========================================================="
+echo " Job ID:      $LSB_JOBID"
+echo " Host:        $(hostname)"
+echo " Date:        $(date)"
+echo " CPUs:        $(nproc 2>/dev/null || echo N/A)"
+echo " Memory req:  12 GB"
+echo " Working dir: {self.remote_work_dir}"
+echo " Output dir:  {self.remote_output_dir}"
+echo " Family:      {self.params['FAMILY_NAME']}"
+echo " Timeout:     {self.params['PRIMER_TIMEOUT']}s"
+echo " Python:      $(python --version 2>&1)"
+echo "=========================================================="
 
 # Initialize error log
 ERROR_LOG="{job_error_log}"
@@ -479,56 +501,66 @@ echo "=== TE Analysis Error Log ===" > $ERROR_LOG
 echo "Job ID: $LSB_JOBID" >> $ERROR_LOG
 echo "Host: $(hostname)" >> $ERROR_LOG
 echo "Started: $(date)" >> $ERROR_LOG
-echo "Working directory: {self.remote_work_dir}" >> $ERROR_LOG
-echo "Script: {self.remote_script_path}" >> $ERROR_LOG
 echo "" >> $ERROR_LOG
 
 cd {self.remote_work_dir}
 
-# Check if script exists
+# Pre-flight checks
+echo ""
+echo "[$(date +%H:%M:%S)] Pre-flight checks..."
+
 if [ ! -f "{self.remote_script_path}" ]; then
-    echo "ERROR: Script not found: {self.remote_script_path}" | tee -a $ERROR_LOG
+    echo "FATAL: Script not found: {self.remote_script_path}" | tee -a $ERROR_LOG
     echo "1" > {job_done}
     exit 1
 fi
+echo "  Script:     OK"
 
-# Check if input file exists
 if [ ! -f "{self.params['all_te_file']}" ]; then
-    echo "ERROR: Input file not found: {self.params['all_te_file']}" | tee -a $ERROR_LOG
+    echo "FATAL: Input file not found: {self.params['all_te_file']}" | tee -a $ERROR_LOG
     echo "1" > {job_done}
     exit 1
 fi
+echo "  Input data: OK"
 
-# Check if genome file exists
-if [ ! -f "{self.params['HG38_FA']}" ]; then
-    echo "WARNING: Genome file not found: {self.params['HG38_FA']}" | tee -a $ERROR_LOG
-    echo "Genome search will be skipped."
+if [ -f "{self.params['HG38_FA']}" ]; then
+    echo "  Genome:     OK ($(du -sh "{self.params['HG38_FA']}" 2>/dev/null | cut -f1))"
+else
+    echo "  Genome:     NOT FOUND — will use UCSC API fallback" | tee -a $ERROR_LOG
 fi
 
-# Run the analysis with unbuffered output, capturing stderr
-echo "Running analysis..."
+echo ""
+echo "[$(date +%H:%M:%S)] Starting pipeline..."
+echo "=========================================================="
+
+SECONDS=0
 python -u {self.remote_script_path} --primer-timeout {self.params['PRIMER_TIMEOUT']} 2>&1 | tee -a $ERROR_LOG
 EXIT_CODE=${{PIPESTATUS[0]}}
 
-echo "" >> $ERROR_LOG
-echo "=========================================="
-echo "Job completed with exit code: $EXIT_CODE"
-echo "Date: $(date)"
+echo ""
+echo "=========================================================="
+echo " Pipeline finished"
+echo " Exit code:   $EXIT_CODE"
+echo " Runtime:     $((SECONDS / 60))m $((SECONDS % 60))s"
+echo " Date:        $(date)"
 
 if [ $EXIT_CODE -ne 0 ]; then
     echo "" >> $ERROR_LOG
-    echo "=== JOB FAILED ===" >> $ERROR_LOG
-    echo "Exit code: $EXIT_CODE" >> $ERROR_LOG
+    echo "=== JOB FAILED (exit code: $EXIT_CODE) ===" >> $ERROR_LOG
     echo "Ended: $(date)" >> $ERROR_LOG
     echo ""
-    echo "*** JOB FAILED - Check error log: $ERROR_LOG ***"
-    echo "*** Also check stderr file: {job_err} ***"
+    echo " *** JOB FAILED ***"
+    echo " Error log: $ERROR_LOG"
+    echo " Stderr:    {job_err}"
 else
-    echo "Results available at: {self.remote_output_dir}"
+    RESULT_SIZE=$(du -sh "{self.remote_output_dir}" 2>/dev/null | cut -f1)
+    echo " Results:     $RESULT_SIZE at {self.remote_output_dir}"
     echo "" >> $ERROR_LOG
     echo "=== JOB SUCCEEDED ===" >> $ERROR_LOG
     echo "Ended: $(date)" >> $ERROR_LOG
 fi
+
+echo "=========================================================="
 
 # Create done marker file
 echo $EXIT_CODE > {job_done}
@@ -592,6 +624,157 @@ exit $EXIT_CODE
         print("=" * 60)
 
         return True
+
+    def run_interactive_job(self):
+        """Run analysis interactively on a compute node via bsub -Is.
+
+        Uses 'bsub -M 12000 -n 4 -Is bash' to allocate a compute node,
+        then runs the pipeline with real-time output streaming.
+        This keeps the SSH connection active and streams all output back.
+        """
+        if not self.params["all_te_file"]:
+            print("Error: all_te_file path must be set")
+            return False
+
+        # Preview count
+        count = self.preview_family_count()
+        if count <= 0:
+            confirm = input("\nNo sequences found. Continue anyway? (y/n): ").strip().lower()
+            if confirm != 'y':
+                return False
+
+        confirm = input(f"\nProceed with interactive analysis for {count} sequences? (y/n): ").strip().lower()
+        if confirm != 'y':
+            return False
+
+        # Upload script
+        if not self.upload_script():
+            return False
+
+        # Set up output directory
+        family = self.params["FAMILY_NAME"].lower()
+        self.remote_output_dir = f"{self.remote_work_dir}/{self.params['BASE_OUT_DIR']}/{family}"
+
+        # Build runner script with comprehensive logging
+        runner_script = f"{self.remote_work_dir}/te_analysis_runner.sh"
+        runner_content = f'''#!/bin/bash
+set -e
+
+echo "=========================================================="
+echo " TE Analysis Pipeline — Interactive Mode"
+echo "=========================================================="
+echo " Host:        $(hostname)"
+echo " Date:        $(date)"
+echo " CPUs:        $(nproc 2>/dev/null || echo N/A)"
+echo " Memory req:  12 GB"
+echo " Working dir: {self.remote_work_dir}"
+echo " Output dir:  {self.remote_output_dir}"
+echo " Family:      {self.params['FAMILY_NAME']}"
+echo " Primer K:    {self.params['PRIMER_K']}"
+echo " Timeout:     {self.params['PRIMER_TIMEOUT']}s"
+echo "=========================================================="
+echo ""
+
+cd {self.remote_work_dir}
+
+# Verify files exist
+echo "[$(date +%H:%M:%S)] Checking prerequisites..."
+if [ ! -f "{self.remote_script_path}" ]; then
+    echo "FATAL: Script not found: {self.remote_script_path}"
+    exit 1
+fi
+echo "  Script:     OK ({self.remote_script_path})"
+
+if [ ! -f "{self.params['all_te_file']}" ]; then
+    echo "FATAL: Input file not found: {self.params['all_te_file']}"
+    exit 1
+fi
+echo "  Input data: OK ({self.params['all_te_file']})"
+
+if [ -f "{self.params['HG38_FA']}" ]; then
+    echo "  Genome:     OK ({self.params['HG38_FA']})"
+    GENOME_SIZE=$(du -sh "{self.params['HG38_FA']}" 2>/dev/null | cut -f1)
+    echo "              Size: $GENOME_SIZE"
+else
+    echo "  Genome:     NOT FOUND — will use UCSC API fallback"
+fi
+
+echo ""
+echo "[$(date +%H:%M:%S)] Python version: $(python --version 2>&1)"
+echo "[$(date +%H:%M:%S)] Starting pipeline..."
+echo "=========================================================="
+echo ""
+
+SECONDS=0
+python -u {self.remote_script_path} --primer-timeout {self.params['PRIMER_TIMEOUT']}
+EXIT_CODE=$?
+
+echo ""
+echo "=========================================================="
+echo " Pipeline finished"
+echo " Exit code:   $EXIT_CODE"
+echo " Runtime:     $((SECONDS / 60))m $((SECONDS % 60))s"
+echo " Date:        $(date)"
+if [ -d "{self.remote_output_dir}" ]; then
+    RESULT_SIZE=$(du -sh "{self.remote_output_dir}" 2>/dev/null | cut -f1)
+    echo " Results:     $RESULT_SIZE at {self.remote_output_dir}"
+fi
+echo "=========================================================="
+
+exit $EXIT_CODE
+'''
+
+        # Upload runner script
+        print("\nCreating runner script...")
+        create_cmd = f"cat > {runner_script} << 'RUNNER_EOF'\n{runner_content}\nRUNNER_EOF"
+        out, err, code = self.run_command(create_cmd, timeout=30)
+        if code != 0:
+            print(f"Error creating runner script: {err}")
+            return False
+        self.run_command(f"chmod +x {runner_script}", timeout=10)
+
+        # Build bsub command
+        bsub_cmd = (
+            f"bsub -M 12000 -n 4 -Is "
+            f"bash {runner_script}"
+        )
+
+        print("\n" + "=" * 60)
+        print("SUBMITTING INTERACTIVE JOB")
+        print("=" * 60)
+        print(f"  Command: {bsub_cmd}")
+        print(f"  Memory:  12 GB")
+        print(f"  Cores:   4")
+        print(f"  Mode:    Interactive (-Is) — output streams in real-time")
+        print("")
+        print("Waiting for compute node allocation...")
+        print("(This may take a few minutes depending on cluster load)")
+        print("Press Ctrl+C to cancel.")
+        print("=" * 60 + "\n")
+
+        # Run with streaming output — long timeout for the full pipeline
+        import time
+        start_time = time.time()
+        try:
+            out, err, code = self.run_command(bsub_cmd, timeout=14400, stream_output=True)
+        except KeyboardInterrupt:
+            print("\n\nInterrupted by user. Job may still be running on the cluster.")
+            print("Use 'bjobs' on the HPC to check.")
+            return False
+
+        elapsed = time.time() - start_time
+
+        print(f"\n{'=' * 60}")
+        if code == 0:
+            print(f"JOB COMPLETED SUCCESSFULLY ({elapsed/60:.1f} min)")
+            print(f"Results at: {self.remote_output_dir}")
+        else:
+            print(f"JOB FAILED (exit code: {code}, elapsed: {elapsed/60:.1f} min)")
+            if err:
+                print(f"\nStderr (last 500 chars):\n{err[-500:]}")
+        print("=" * 60)
+
+        return code == 0
 
     def check_job_status(self):
         """Check the status of the submitted batch job."""
@@ -993,13 +1176,21 @@ except Exception as e:
             with self.sftp.file(script_path, 'w') as f:
                 f.write(formatted_script)
         else:
-            # Use shell command with base64 encoding to safely transfer the script
-            encoded = base64.b64encode(formatted_script.encode()).decode()
-            cmd = f"echo '{encoded}' | base64 -d > {script_path}"
+            # Chunked base64 upload to avoid "Argument list too long"
+            encoded_full = base64.b64encode(formatted_script.encode()).decode()
+            chunk_size = 65000
+            chunks = [encoded_full[i:i+chunk_size] for i in range(0, len(encoded_full), chunk_size)]
+            cmd = f"echo '{chunks[0]}' | base64 -d > {script_path}"
             out, err, code = self.run_command(cmd)
             if code != 0:
                 print(f"Failed to upload clustering script: {err}")
                 return False
+            for chunk in chunks[1:]:
+                cmd = f"echo '{chunk}' | base64 -d >> {script_path}"
+                out, err, code = self.run_command(cmd)
+                if code != 0:
+                    print(f"Failed to upload clustering script chunk: {err}")
+                    return False
 
         # Make script executable
         self.run_command("chmod +x {}".format(script_path))
@@ -1190,33 +1381,42 @@ except Exception as e:
         while True:
             try:
                 print("\n" + "="*60)
-                print("HPC TE ANALYSIS CLIENT (Batch Job Mode)")
+                print("HPC TE ANALYSIS CLIENT")
                 print("="*60)
                 print("  [1] Configure parameters")
                 print("  [2] Preview family count")
-                print("  [3] Submit batch job")
-                print("  [4] Check job status")
-                print("  [5] Watch job progress (live)")
-                print("  [6] Retrieve results")
-                print("  [7] Download error logs only")
-                print("  [8] Disconnect and exit")
+                print("  --- Run Analysis ---")
+                print("  [3] Run interactively (bsub -Is, real-time output)")
+                print("  [4] Submit batch job  (bsub, runs in background)")
+                print("  --- Monitor & Retrieve ---")
+                print("  [5] Check batch job status")
+                print("  [6] Watch batch job progress (live)")
+                print("  [7] Retrieve results")
+                print("  [8] Download error logs only")
+                print("  [9] Disconnect and exit")
                 print("="*60)
 
-                choice = input("\nSelect option (1-8): ").strip()
+                choice = input("\nSelect option (1-9): ").strip()
 
                 if choice == '1':
                     if self.set_parameter_interactive():
-                        # User chose to run
-                        self.submit_batch_job()
+                        # User chose to run — offer interactive mode first
+                        mode = input("\nRun interactively (i) or submit batch job (b)? [i]: ").strip().lower()
+                        if mode == 'b':
+                            self.submit_batch_job()
+                        else:
+                            self.run_interactive_job()
                 elif choice == '2':
                     self.preview_family_count()
                 elif choice == '3':
-                    self.submit_batch_job()
+                    self.run_interactive_job()
                 elif choice == '4':
-                    self.check_job_status()
+                    self.submit_batch_job()
                 elif choice == '5':
-                    self.watch_job()
+                    self.check_job_status()
                 elif choice == '6':
+                    self.watch_job()
+                elif choice == '7':
                     if self.local_output_dir:
                         default_dir = str(self.local_output_dir)
                         local_dir = input(f"Enter local output directory [{default_dir}]: ").strip()
@@ -1225,10 +1425,10 @@ except Exception as e:
                         local_dir = input("Enter local output directory (e.g., ~/Documents/output): ").strip()
                     if local_dir:
                         self.retrieve_results(local_dir)
-                elif choice == '7':
+                elif choice == '8':
                     local_dir = input("Enter local directory for error logs [./hpc_error_logs]: ").strip()
                     self.download_error_logs(local_dir if local_dir else None)
-                elif choice == '8':
+                elif choice == '9':
                     break
                 else:
                     print("Invalid option")

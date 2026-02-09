@@ -109,6 +109,167 @@ def log_error(stage, error, context=None):
             print(f"Error details also written to: {error_log_path}", flush=True)
     except Exception:
         pass  # Don't fail if we can't write the error log
+
+def stage_timer(stage_name):
+    """Context manager to time pipeline stages."""
+    import time as _time
+    class _Timer:
+        def __init__(self):
+            self.start = None
+            self.elapsed = 0
+        def __enter__(self):
+            self.start = _time.time()
+            progress_print(f">>> STAGE START: {stage_name}")
+            return self
+        def __exit__(self, *args):
+            self.elapsed = _time.time() - self.start
+            progress_print(f"<<< STAGE DONE: {stage_name} ({self.elapsed:.1f}s)")
+    return _Timer()
+# ========================================================================
+
+# ==================== GENOME CACHE ====================
+class GenomeCache:
+    """Load reference genome into memory once, reuse for all operations.
+
+    Avoids re-reading the multi-GB FASTA for each primer search.
+    Caches parsed genome as pickle for faster loading on subsequent runs.
+    Also used for local sequence extraction (replacing UCSC API calls).
+    """
+
+    def __init__(self, fasta_path, cache_dir=None):
+        self.genomes = {}  # {chrom: sequence_string}
+        self.fasta_path = Path(fasta_path) if fasta_path else None
+        self._loaded = False
+        self._total_bp = 0
+
+        if self.fasta_path and self.fasta_path.exists():
+            cache_base = Path(cache_dir) if cache_dir else Path(".")
+            cache_base.mkdir(parents=True, exist_ok=True)
+            self.cache_path = cache_base / f"{self.fasta_path.stem}.genome_cache.pkl"
+        else:
+            self.cache_path = None
+
+    def load(self):
+        """Load genome into memory, using pickle cache if available."""
+        if self._loaded:
+            return
+
+        if not self.fasta_path or not self.fasta_path.exists():
+            progress_print(f"  WARNING: Genome file not found: {self.fasta_path}")
+            progress_print(f"  Genome-dependent features will be skipped or use UCSC API fallback")
+            self._loaded = True
+            return
+
+        import pickle
+        import time as _time
+
+        # Try loading from pickle cache first (much faster than parsing FASTA)
+        if self.cache_path and self.cache_path.exists():
+            try:
+                cache_mtime = self.cache_path.stat().st_mtime
+                fasta_mtime = self.fasta_path.stat().st_mtime
+                if cache_mtime > fasta_mtime:
+                    progress_print(f"  Loading genome from cache: {self.cache_path.name}")
+                    t0 = _time.time()
+                    with open(self.cache_path, 'rb') as f:
+                        self.genomes = pickle.load(f)
+                    self._total_bp = sum(len(s) for s in self.genomes.values())
+                    elapsed = _time.time() - t0
+                    progress_print(f"  Loaded {len(self.genomes)} chromosomes ({self._total_bp:,} bp) from cache in {elapsed:.1f}s")
+                    self._loaded = True
+                    return
+            except Exception as e:
+                progress_print(f"  Cache load failed ({e}), falling back to FASTA parsing")
+
+        # Parse from FASTA (first run or cache miss)
+        progress_print(f"  Loading genome from FASTA: {self.fasta_path.name}")
+        progress_print(f"  First-time load — will cache as pickle for future runs")
+        t0 = _time.time()
+        chrom = None
+        seq_buf = []
+        chrom_count = 0
+
+        with open(self.fasta_path) as fh:
+            for line in fh:
+                if line.startswith('>'):
+                    if chrom is not None:
+                        self.genomes[chrom] = ''.join(seq_buf).upper()
+                        self._total_bp += len(self.genomes[chrom])
+                        chrom_count += 1
+                        if chrom_count % 10 == 0:
+                            progress_print(f"    Loaded {chrom_count} chromosomes ({self._total_bp:,} bp)...")
+                    chrom = line[1:].strip().split()[0]
+                    seq_buf = []
+                else:
+                    seq_buf.append(line.strip())
+            if chrom is not None:
+                self.genomes[chrom] = ''.join(seq_buf).upper()
+                self._total_bp += len(self.genomes[chrom])
+
+        elapsed = _time.time() - t0
+        progress_print(f"  Loaded {len(self.genomes)} chromosomes ({self._total_bp:,} bp) in {elapsed:.1f}s")
+
+        # Save pickle cache for future runs
+        if self.cache_path:
+            try:
+                progress_print(f"  Caching genome as pickle for faster future loads...")
+                t0 = _time.time()
+                with open(self.cache_path, 'wb') as f:
+                    pickle.dump(self.genomes, f, protocol=pickle.HIGHEST_PROTOCOL)
+                cache_mb = self.cache_path.stat().st_size / 1024 / 1024
+                elapsed = _time.time() - t0
+                progress_print(f"  Cached to {self.cache_path.name} ({cache_mb:.0f} MB) in {elapsed:.1f}s")
+            except Exception as e:
+                progress_print(f"  WARNING: Could not write cache: {e}")
+
+        self._loaded = True
+
+    def extract_sequence(self, chrom, start, stop):
+        """Extract a sequence from the in-memory genome. Returns uppercase string or None."""
+        chrom_seq = self.genomes.get(chrom)
+        if chrom_seq is None:
+            return None
+        if start < 0 or stop < 0 or stop <= start:
+            return None
+        if stop > len(chrom_seq):
+            return None
+        return chrom_seq[start:stop]
+
+    def search_primer(self, primer, max_hits=None):
+        """Search all loaded chromosomes for exact matches of primer and its RC.
+        Returns list of (chrom, start, stop, strand) tuples.
+        Stops early if max_hits is reached (primer is non-specific).
+        """
+        if max_hits is None:
+            max_hits = globals().get('MAX_GENOME_HITS', 10000)
+        primer = primer.upper()
+        rc = reverse_complement(primer)
+        plen = len(primer)
+        hits = []
+        total_count = 0
+        capped = False
+        for i, (chrom, seq) in enumerate(self.genomes.items()):
+            chrom_hits, total_count = _search_single_chrom(
+                primer, rc, plen, chrom, seq,
+                max_hits=max_hits, current_count=total_count
+            )
+            hits.extend(chrom_hits)
+            if chrom_hits:
+                progress_print(f"    {chrom}: {len(chrom_hits)} hits (running total: {total_count:,})")
+            if max_hits and total_count >= max_hits:
+                remaining = len(self.genomes) - i - 1
+                progress_print(f"    HIT CAP ({max_hits:,}) reached — skipping {remaining} remaining chromosomes")
+                progress_print(f"    (Primer is non-specific; exact count not needed)")
+                capped = True
+                break
+        return hits
+
+    @property
+    def is_loaded(self):
+        return self._loaded and bool(self.genomes)
+
+# Global genome cache — initialized after config, reused across all stages
+genome_cache = None
 # ========================================================================
 
 # ==================== CONFIG ====================
@@ -243,6 +404,25 @@ print(f"\nOrganized directory structure:")
 for name, path in DIRS.items():
     print(f"  {name:15s}: {path.name}")
 
+# ==================== LOAD REFERENCE GENOME ====================
+print("\n=== LOADING REFERENCE GENOME ===")
+progress_print(f"Genome path: {HG38_FA}")
+genome_cache = GenomeCache(HG38_FA, cache_dir=str(OUT_DIR))
+genome_cache.load()
+if genome_cache.is_loaded:
+    progress_print("Genome loaded — local sequence extraction and fast primer searches enabled")
+else:
+    progress_print("Genome not available — will use UCSC API and skip genome primer searches")
+
+# ==================== PIPELINE TIMING ====================
+import time as _pipeline_time
+_pipeline_start = _pipeline_time.time()
+_stage_times = {}
+
+def _record_stage(name, elapsed):
+    _stage_times[name] = elapsed
+    progress_print(f"  [TIMING] {name}: {elapsed:.1f}s")
+
 # ==================== LOAD AND FILTER DATA ====================
 print("\n=== LOADING DATA ===")
 
@@ -306,8 +486,9 @@ except Exception as e:
     })
     sys.exit(1)
 
-# ==================== FETCH SEQUENCES FROM UCSC ====================
-print("\n=== FETCHING SEQUENCES FROM UCSC ===")
+# ==================== FETCH SEQUENCES ====================
+_stage_t0 = _pipeline_time.time()
+print("\n=== FETCHING SEQUENCES ===")
 
 try:
     # Check if sequences are already provided (e.g., test mode or pre-processed data)
@@ -317,55 +498,83 @@ try:
         df_family['Seq'] = df_family['Seq'].str.upper()
         failed_indices = []
     else:
-        # Validate required columns for UCSC fetch
+        # Validate required columns for sequence extraction
         ucsc_required = ['chr', 'start', 'stop']
         ucsc_missing = [c for c in ucsc_required if c not in df_family.columns]
         if ucsc_missing:
-            raise ValueError(f"Missing columns required for UCSC fetch: {ucsc_missing}. "
+            raise ValueError(f"Missing columns required for sequence fetch: {ucsc_missing}. "
                            f"Available: {list(df_family.columns)}")
 
         seqlist = []
         failed_indices = []
         fetch_errors = []  # Track detailed errors
 
-        for i in range(len(df_family)):
-            progress_bar(i+1, len(df_family), prefix="Fetching sequences")
-            try:
-                chrom = df_family['chr'].iloc[i]
-                start = int(df_family['start'].iloc[i])
-                stop = int(df_family['stop'].iloc[i])
+        # === FAST PATH: Extract from local genome (no network calls) ===
+        if genome_cache is not None and genome_cache.is_loaded:
+            import time as _time
+            t0 = _time.time()
+            progress_print(f"Extracting {len(df_family)} sequences from local genome (fast path)...")
+            for i in range(len(df_family)):
+                if (i+1) % max(1, len(df_family)//20) == 0 or i == len(df_family)-1:
+                    progress_bar(i+1, len(df_family), prefix="Extracting sequences")
+                try:
+                    chrom = df_family['chr'].iloc[i]
+                    start = int(df_family['start'].iloc[i])
+                    stop = int(df_family['stop'].iloc[i])
 
-                # Validate coordinates
-                if start < 0 or stop < 0:
-                    raise ValueError(f"Invalid coordinates: start={start}, stop={stop}")
-                if stop <= start:
-                    raise ValueError(f"stop ({stop}) must be > start ({start})")
+                    if start < 0 or stop < 0:
+                        raise ValueError(f"Invalid coordinates: start={start}, stop={stop}")
+                    if stop <= start:
+                        raise ValueError(f"stop ({stop}) must be > start ({start})")
 
-                # UCSC API uses semicolons as parameter separators
-                link = (f"https://api.genome.ucsc.edu/getData/sequence?"
-                        f"genome=hg38;chrom={chrom};"
-                        f"start={start};end={stop}")
-                r = requests.get(link, timeout=30)
-                r.raise_for_status()  # Raise an error for bad HTTP status codes
+                    seq = genome_cache.extract_sequence(chrom, start, stop)
+                    if seq is None:
+                        raise ValueError(f"Could not extract {chrom}:{start}-{stop} from genome")
+                    seqlist.append(seq)
+                except Exception as e:
+                    error_msg = f"Row {i}: {chrom}:{start}-{stop} - {type(e).__name__}: {str(e)}"
+                    fetch_errors.append(error_msg)
+                    seqlist.append("N" * 100)
+                    failed_indices.append(i)
+            elapsed = _time.time() - t0
+            progress_print(f"Extracted {len(df_family) - len(failed_indices)} sequences in {elapsed:.1f}s (local genome)")
 
-                # Parse JSON response directly (no BeautifulSoup needed)
-                res = r.json()
+        # === SLOW PATH: Fetch from UCSC API (network, ~1-2s per sequence) ===
+        else:
+            progress_print(f"Fetching {len(df_family)} sequences from UCSC API (slow path — no local genome)...")
+            progress_print(f"  TIP: Provide HG38_FA path to skip API calls in future runs")
+            for i in range(len(df_family)):
+                progress_bar(i+1, len(df_family), prefix="Fetching sequences")
+                try:
+                    chrom = df_family['chr'].iloc[i]
+                    start = int(df_family['start'].iloc[i])
+                    stop = int(df_family['stop'].iloc[i])
 
-                # Check for error in response
-                if 'error' in res:
-                    raise ValueError(f"API error: {res['error']}")
+                    if start < 0 or stop < 0:
+                        raise ValueError(f"Invalid coordinates: start={start}, stop={stop}")
+                    if stop <= start:
+                        raise ValueError(f"stop ({stop}) must be > start ({start})")
 
-                # Extract DNA sequence
-                if 'dna' in res:
-                    seqlist.append(res['dna'].upper())
-                else:
-                    # Some UCSC API versions return sequence differently
-                    raise KeyError(f"'dna' not in response. Keys: {list(res.keys())}")
-            except Exception as e:
-                error_msg = f"Row {i}: {chrom}:{start}-{stop} - {type(e).__name__}: {str(e)}"
-                fetch_errors.append(error_msg)
-                seqlist.append("N" * 100)  # placeholder for failed fetches
-                failed_indices.append(i)
+                    link = (f"https://api.genome.ucsc.edu/getData/sequence?"
+                            f"genome=hg38;chrom={chrom};"
+                            f"start={start};end={stop}")
+                    r = requests.get(link, timeout=30)
+                    r.raise_for_status()
+
+                    res = r.json()
+
+                    if 'error' in res:
+                        raise ValueError(f"API error: {res['error']}")
+
+                    if 'dna' in res:
+                        seqlist.append(res['dna'].upper())
+                    else:
+                        raise KeyError(f"'dna' not in response. Keys: {list(res.keys())}")
+                except Exception as e:
+                    error_msg = f"Row {i}: {chrom}:{start}-{stop} - {type(e).__name__}: {str(e)}"
+                    fetch_errors.append(error_msg)
+                    seqlist.append("N" * 100)
+                    failed_indices.append(i)
 
         df_family['Seq'] = seqlist
         print(f"\nSuccessfully fetched {len(df_family) - len(failed_indices)} sequences")
@@ -391,8 +600,10 @@ try:
     df_family.to_csv(save_path, index=False)
     print(f"Saved sequences to {save_path}")
 
+    _record_stage("Sequence Fetching", _pipeline_time.time() - _stage_t0)
+
 except Exception as e:
-    log_error("FETCH SEQUENCES FROM UCSC", e, {
+    log_error("FETCH SEQUENCES", e, {
         "FAMILY_NAME": FAMILY_NAME,
         "df_family_shape": df_family.shape if 'df_family' in dir() else "N/A",
         "sequences_fetched": len(seqlist) if 'seqlist' in dir() else 0,
@@ -401,6 +612,7 @@ except Exception as e:
     sys.exit(1)
 
 # ==================== BASIC STATISTICS ====================
+_stage_t0 = _pipeline_time.time()
 print("\n=== COMPUTING BASIC STATISTICS ===")
 
 def compute_basic_stats(df, label="", output_file=None):
@@ -503,8 +715,10 @@ def compute_basic_stats(df, label="", output_file=None):
 overall_stats_file = DIRS['stats'] / "overall_statistics.txt"
 expr_cols = compute_basic_stats(df_family, label=" - OVERALL", output_file=overall_stats_file)
 
+_record_stage("Basic Statistics", _pipeline_time.time() - _stage_t0)
+
 # ==================== CLUSTERING ANALYSIS ====================
-# ==================== CLUSTERING ANALYSIS ====================
+_stage_t0 = _pipeline_time.time()
 print("\n=== PERFORMING CLUSTERING ANALYSIS ===")
 
 try:
@@ -777,7 +991,10 @@ except Exception as e:
         log_error("CLUSTERING FALLBACK", e2, {})
         sys.exit(1)
 
+_record_stage("Clustering Analysis", _pipeline_time.time() - _stage_t0)
+
 # ==================== PER-CLUSTER STATISTICS ====================
+_stage_t0 = _pipeline_time.time()
 print("\n=== COMPUTING PER-CLUSTER STATISTICS ===")
 
 cluster_stats_dir = DIRS['stats'] / "per_cluster"
@@ -871,7 +1088,10 @@ with open(cluster_comparison_file, "w") as f:
 
 print(f"✓ Cluster comparison saved to {cluster_comparison_file}")
 
+_record_stage("Per-Cluster Statistics", _pipeline_time.time() - _stage_t0)
+
 # ==================== GENERATE VISUALIZATION DASHBOARD ====================
+_stage_t0 = _pipeline_time.time()
 print("\n=== GENERATING VISUALIZATION DASHBOARD ===")
 
 try:
@@ -1056,6 +1276,8 @@ except Exception as e:
     except Exception as e2:
         print(f"Warning: Could not create fallback visualization: {e2}")
 
+_record_stage("Visualization Dashboard", _pipeline_time.time() - _stage_t0)
+
 # ==================== GENERATE README ====================
 print("\n=== GENERATING README ===")
 
@@ -1203,6 +1425,7 @@ print(f"✓ README generated: {readme_file}")
 
 
 # ==================== PRIMER DESIGN ====================
+_stage_t0 = _pipeline_time.time()
 print("\n=== STARTING PRIMER DESIGN ===")
 
 # --- helper funcs ---
@@ -1222,23 +1445,34 @@ else:
 # Major chromosomes for sampling (excludes tiny scaffolds)
 MAJOR_CHROMS = [f"chr{i}" for i in range(1, 23)] + ["chrX", "chrY"]
 
-print(f"  Primer search settings: timeout={PRIMER_SEARCH_TIMEOUT}s")
+MAX_GENOME_HITS = 10000  # Stop searching after this many hits — primer is non-specific
 
-def _search_single_chrom(primer, rc, plen, chrom, seq):
-    """Search a single chromosome for primer hits. Returns list of (chrom, start, stop, strand) tuples."""
+print(f"  Primer search settings: timeout={PRIMER_SEARCH_TIMEOUT}s, max_hits={MAX_GENOME_HITS}")
+
+def _search_single_chrom(primer, rc, plen, chrom, seq, max_hits=0, current_count=0):
+    """Search a single chromosome for primer hits.
+    Returns (hits_list, total_count). Stops early if max_hits exceeded.
+    """
     hits = []
+    count = current_count
     seq = seq.upper()
     # forward
     idx = seq.find(primer)
     while idx != -1:
         hits.append((chrom, idx+1, idx+plen, "+"))
+        count += 1
+        if max_hits and count >= max_hits:
+            return hits, count
         idx = seq.find(primer, idx+1)
     # reverse
     idx = seq.find(rc)
     while idx != -1:
         hits.append((chrom, idx+1, idx+plen, "-"))
+        count += 1
+        if max_hits and count >= max_hits:
+            return hits, count
         idx = seq.find(rc, idx+1)
-    return hits
+    return hits, count
 
 def _search_genome_full(primer, fasta_path, stop_event=None):
     """
@@ -1249,27 +1483,37 @@ def _search_genome_full(primer, fasta_path, stop_event=None):
     rc = reverse_complement(primer)
     plen = len(primer)
     hits = []
+    total_count = 0
+    max_hits = globals().get('MAX_GENOME_HITS', 10000)
 
     with open(fasta_path, "r") as f:
         chrom = None
         seq_buf = []
         for line in f:
-            # Check if we should stop (timeout triggered)
             if stop_event and stop_event.is_set():
                 return None
 
             if line.startswith(">"):
                 if chrom is not None:
                     seq = "".join(seq_buf)
-                    hits.extend(_search_single_chrom(primer, rc, plen, chrom, seq))
+                    chrom_hits, total_count = _search_single_chrom(
+                        primer, rc, plen, chrom, seq,
+                        max_hits=max_hits, current_count=total_count
+                    )
+                    hits.extend(chrom_hits)
+                    if max_hits and total_count >= max_hits:
+                        return hits
                 chrom = line[1:].strip().split()[0]
                 seq_buf = []
             else:
                 seq_buf.append(line.strip())
-        # last chrom
         if chrom is not None and (not stop_event or not stop_event.is_set()):
             seq = "".join(seq_buf)
-            hits.extend(_search_single_chrom(primer, rc, plen, chrom, seq))
+            chrom_hits, total_count = _search_single_chrom(
+                primer, rc, plen, chrom, seq,
+                max_hits=max_hits, current_count=total_count
+            )
+            hits.extend(chrom_hits)
 
     return hits
 
@@ -1347,7 +1591,7 @@ def _estimate_genome_hits_by_sampling(primer, fasta_path, sample_chroms=5, seed=
             data = f.read(end_pos - start_pos)
             seq = "".join(line for line in data.split('\n') if not line.startswith('>'))
             total_sampled_length += len(seq)
-            chrom_hits = _search_single_chrom(primer, rc, plen, chrom, seq)
+            chrom_hits, _ = _search_single_chrom(primer, rc, plen, chrom, seq)
             hits.extend(chrom_hits)
             print(f" {len(chrom_hits)} hits ({len(seq):,} bp)")
 
@@ -1372,21 +1616,32 @@ def _estimate_genome_hits_by_sampling(primer, fasta_path, sample_chroms=5, seed=
     dfh["sampling_note"] = f"Estimated from {sample_size} chromosomes (seed={seed})"
     return dfh, True  # True indicates this was estimated
 
-def search_seq_chromosomal(primer, fasta=HG38_FA, timeout=PRIMER_SEARCH_TIMEOUT):
+def search_seq_chromosomal(primer, fasta=HG38_FA, timeout=PRIMER_SEARCH_TIMEOUT, _gcache=None):
     """
-    Search hg38.fa for exact matches of primer and its RC.
+    Search hg38 for exact matches of primer and its RC.
     Returns DataFrame of hits columns [chrom, start, stop, strand].
 
-    Uses threading with timeout. If search takes longer than timeout (default 2 minutes),
-    falls back to random chromosome sampling to estimate coverage. This ensures the
-    pipeline never hangs indefinitely on primer searches.
-
-    Note: This runs directly on compute node since the whole pipeline is submitted via bsub.
+    If _gcache (GenomeCache) is provided and loaded, uses fast in-memory search.
+    Otherwise falls back to file-based search with timeout + random sampling fallback.
     """
     primer = primer.upper()
+
+    # === FAST PATH: In-memory genome search ===
+    if _gcache is not None and _gcache.is_loaded:
+        import time as _time
+        t0 = _time.time()
+        rc = reverse_complement(primer)
+        progress_print(f"  Searching in-memory genome for {primer} (rc: {rc})...")
+        hits = _gcache.search_primer(primer)
+        elapsed = _time.time() - t0
+        dfh = pd.DataFrame(hits, columns=["chrom", "start", "stop", "strand"]) if hits else \
+              pd.DataFrame(columns=["chrom", "start", "stop", "strand"])
+        progress_print(f"  -> {len(dfh):,} genomic hits in {elapsed:.1f}s (in-memory)")
+        return dfh
+
+    # === SLOW PATH: File-based search with timeout ===
     fasta_path = Path(fasta) if fasta else None
 
-    # Check if genome file exists
     if fasta_path is None or not fasta_path.exists():
         debug_print(f"Genome file not found: {fasta}. Skipping genome search.")
         return pd.DataFrame(columns=["chrom", "start", "stop", "strand"])
@@ -1396,7 +1651,6 @@ def search_seq_chromosomal(primer, fasta=HG38_FA, timeout=PRIMER_SEARCH_TIMEOUT)
     print(f"  Genome: {fasta_path.name}")
     print(f"  Timeout: {timeout}s (will use random sampling if exceeded)")
 
-    # Use threading with timeout for the search
     stop_event = threading.Event()
     search_start_time = None
 
@@ -1414,20 +1668,15 @@ def search_seq_chromosomal(primer, fasta=HG38_FA, timeout=PRIMER_SEARCH_TIMEOUT)
             hits = future.result(timeout=timeout)
             elapsed = time.time() - start_time
             if hits is None:
-                # Search was cancelled
                 raise FuturesTimeoutError("Search cancelled")
             dfh = pd.DataFrame(hits, columns=["chrom", "start", "stop", "strand"])
             print(f"  -> COMPLETE: Found {len(dfh):,} genomic hits in {elapsed:.1f}s")
             return dfh
         except FuturesTimeoutError:
-            # Signal the search thread to stop
             stop_event.set()
             elapsed = time.time() - start_time
             print(f"\n  *** TIMEOUT after {elapsed:.1f}s ***")
-            print(f"  Full genome search exceeded {timeout}s limit.")
             print(f"  Falling back to random chromosome sampling for estimation...")
-
-            # Fall back to sampling-based estimation
             dfh, _ = _estimate_genome_hits_by_sampling(primer, fasta_path)
             return dfh
 
@@ -1517,8 +1766,10 @@ try:
 
     primer_hits = {}
     if selected_primers:
-        for pr in selected_primers:
-            df_hits = search_seq_chromosomal(pr, fasta=HG38_FA)
+        progress_print(f"Searching genome for {len(selected_primers)} selected primers...")
+        for pidx, pr in enumerate(selected_primers):
+            progress_print(f"  Primer {pidx+1}/{len(selected_primers)}: {pr}")
+            df_hits = search_seq_chromosomal(pr, fasta=HG38_FA, _gcache=genome_cache)
             primer_hits[pr] = df_hits
             fn = DIRS['primers'] / f"{pr}_genome_hits.csv"
             df_hits.to_csv(fn, index=False)
@@ -1619,7 +1870,7 @@ try:
         # find genome hits for these primers
         for p in top5["primer"].tolist():
             if p not in primer_hits:
-                primer_hits[p] = search_seq_chromosomal(p, fasta=HG38_FA)
+                primer_hits[p] = search_seq_chromosomal(p, fasta=HG38_FA, _gcache=genome_cache)
                 primer_hits[p].to_csv(DIRS['primers'] / f"{p}_genome_hits.csv", index=False)
 
     # save cluster results
@@ -1663,7 +1914,10 @@ except Exception as e:
     primer_hits = {}
     selected_primers = []
 
+_record_stage("Primer Design", _pipeline_time.time() - _stage_t0)
+
 # ==================== MULTIPLE SEQUENCE ALIGNMENT ====================
+_stage_t0 = _pipeline_time.time()
 print("\n=== PERFORMING MULTIPLE SEQUENCE ALIGNMENT ===")
 
 try:
@@ -2130,9 +2384,13 @@ if primer_hits:
     primer_hits_summary_df = pd.DataFrame(primer_hits_summary).sort_values("genome_hits", ascending=False)
     primer_hits_summary_df.to_csv(DIRS['primers'] / "primer_genome_hits_summary.csv", index=False)
 
+_record_stage("Alignment & CIAlign", _pipeline_time.time() - _stage_t0)
+
 # Check for any errors that occurred
 error_log_path = OUT_DIR / "pipeline_errors.log"
 errors_occurred = error_log_path.exists() and error_log_path.stat().st_size > 0
+
+_total_elapsed = _pipeline_time.time() - _pipeline_start
 
 print("\n" + "="*60)
 if errors_occurred:
@@ -2151,14 +2409,23 @@ except:
 print(f" - Unique {K}-mers found: {len(kmer_to_rows) if 'kmer_to_rows' in dir() else 'N/A'}")
 print(f" - Top primers selected: {len(selected_primers) if 'selected_primers' in dir() else 'N/A'}")
 
+# ==================== TIMING SUMMARY ====================
+print(f"\n{'='*60}")
+print(f"TIMING SUMMARY (total: {_total_elapsed:.1f}s = {_total_elapsed/60:.1f}min)")
+print(f"{'='*60}")
+for stage_name, elapsed in _stage_times.items():
+    pct = (elapsed / _total_elapsed * 100) if _total_elapsed > 0 else 0
+    bar_len = int(pct / 2)
+    bar = '#' * bar_len + '.' * (50 - bar_len)
+    print(f"  {stage_name:<25s} {elapsed:7.1f}s ({pct:5.1f}%) |{bar}|")
+print(f"{'='*60}")
+
 if errors_occurred:
     print("\n*** WARNINGS/ERRORS OCCURRED ***")
     print(f"Check error log: {error_log_path}")
-    # Show last few error entries
     try:
         with open(error_log_path, "r") as f:
             error_content = f.read()
-            # Show the stages that had errors
             import re
             error_stages = re.findall(r'ERROR in stage: (.+)', error_content)
             if error_stages:
