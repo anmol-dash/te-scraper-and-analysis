@@ -1036,147 +1036,105 @@ exit $EXIT_CODE
 
         family = self.params["FAMILY_NAME"].lower()
         base_dir = self.params['BASE_OUT_DIR']
-        
-        # Using string formatting with double curly braces
-        remote_script = """
-import os
-import sys
-import pandas as pd
-import numpy as np
-import matplotlib
-matplotlib.use('Agg')  # Set the backend to non-interactive
-import matplotlib.pyplot as plt
-from pathlib import Path
-from sklearn.cluster import AgglomerativeClustering
-from scipy.cluster.hierarchy import dendrogram, linkage
-import seaborn as sns
 
-def plot_dendrogram(model, **kwargs):
-    # Create linkage matrix and then plot the dendrogram.
-    counts = np.zeros(model.children_.shape[0])
-    n_samples = len(model.labels_)
-    for i, merge in enumerate(model.children_):
-        current_count = 0
-        for child_idx in merge:
-            if child_idx < n_samples:
-                current_count += 1  # leaf node
-            else:
-                current_count += counts[child_idx - n_samples]
-        counts[i] = current_count
+        # Build script line-by-line — no nested .format() escaping nightmares.
+        # BASEDIR_PH and FAMILY_PH are replaced via str.replace() at the end.
+        script_lines = [
+            "import os, sys",
+            "import pandas as pd",
+            "import numpy as np",
+            "import matplotlib; matplotlib.use('Agg')",
+            "import matplotlib.pyplot as plt",
+            "from pathlib import Path",
+            "from sklearn.cluster import AgglomerativeClustering",
+            "from scipy.cluster.hierarchy import dendrogram, linkage",
+            "",
+            "def plot_dendrogram(model, **kwargs):",
+            "    counts = np.zeros(model.children_.shape[0])",
+            "    n_samples = len(model.labels_)",
+            "    for i, merge in enumerate(model.children_):",
+            "        current_count = 0",
+            "        for child_idx in merge:",
+            "            if child_idx < n_samples:",
+            "                current_count += 1",
+            "            else:",
+            "                current_count += counts[child_idx - n_samples]",
+            "        counts[i] = current_count",
+            "    linkage_matrix = np.column_stack([model.children_, model.distances_, counts]).astype(float)",
+            "    dendrogram(linkage_matrix, **kwargs)",
+            "",
+            "base_dir = Path('BASEDIR_PH')",
+            "family = 'FAMILY_PH'",
+            "output_dir = base_dir / family",
+            "output_dir.mkdir(parents=True, exist_ok=True)",
+            "",
+            "try:",
+            "    data_path = output_dir / (family + '_clustering_data.csv')",
+            "    if not data_path.exists():",
+            "        print('Error: Clustering data not found at ' + str(data_path))",
+            "        sys.exit(1)",
+            "    df = pd.read_csv(data_path)",
+            "    print('Loaded clustering data with ' + str(len(df)) + ' sequences')",
+            "    sequences = df['sequence'].values",
+            "    X = df.drop(columns=['sequence']).values",
+            "    print('Performing hierarchical clustering...')",
+            "    n_clusters = min(10, len(sequences))",
+            "    model = AgglomerativeClustering(",
+            "        n_clusters=n_clusters, affinity='euclidean',",
+            "        linkage='ward', compute_distances=True)",
+            "    clusters = model.fit_predict(X)",
+            "    print('Generating dendrogram...')",
+            "    plt.figure(figsize=(12, 8))",
+            "    plot_dendrogram(model, truncate_mode='level', p=5)",
+            "    plt.title('Hierarchical Clustering Dendrogram - ' + family)",
+            "    plt.xlabel('Sample index or (cluster size)')",
+            "    plt.ylabel('Distance')",
+            "    plt.tight_layout()",
+            "    plot_path = output_dir / (family + '_dendrogram.png')",
+            "    plt.savefig(plot_path, dpi=300, bbox_inches='tight')",
+            "    print('Saved dendrogram to ' + str(plot_path))",
+            "    print('Generating consensus sequences...')",
+            "    df['cluster'] = clusters",
+            "    for cluster_id in range(n_clusters):",
+            "        cluster_seqs = df[df['cluster'] == cluster_id]['sequence'].tolist()",
+            "        if not cluster_seqs: continue",
+            "        consensus = []",
+            "        max_len = max(len(seq) for seq in cluster_seqs)",
+            "        for i in range(max_len):",
+            "            bases = {}",
+            "            for seq in cluster_seqs:",
+            "                if i < len(seq):",
+            "                    base = seq[i].upper()",
+            "                    bases[base] = bases.get(base, 0) + 1",
+            "            if bases:",
+            "                consensus.append(max(bases.items(), key=lambda x: x[1])[0])",
+            "            else:",
+            "                consensus.append('-')",
+            "        consensus_seq = ''.join(consensus)",
+            "        cpath = output_dir / (family + '_cluster_' + str(cluster_id+1) + '_consensus.txt')",
+            "        with open(cpath, 'w') as fout:",
+            "            fout.write('>consensus_cluster_' + str(cluster_id+1) + '\\n' + consensus_seq + '\\n')",
+            "        gap_reduced = ''.join(b for b in consensus if b != '-')",
+            "        grpath = output_dir / (family + '_cluster_' + str(cluster_id+1) + '_consensus_gap_reduced.txt')",
+            "        with open(grpath, 'w') as fout:",
+            "            fout.write('>consensus_cluster_' + str(cluster_id+1) + '_gap_reduced\\n' + gap_reduced + '\\n')",
+            "    print('Consensus sequences generated successfully!')",
+            "except Exception as e:",
+            "    print('Error generating clustering plots: ' + str(e), file=sys.stderr)",
+            "    sys.exit(1)",
+        ]
 
-    linkage_matrix = np.column_stack([model.children_, model.distances_, counts]).astype(float)
-    dendrogram(linkage_matrix, **kwargs)
+        formatted_script = "\n".join(script_lines)
+        formatted_script = formatted_script.replace("BASEDIR_PH", base_dir.replace("'", "\\'"))
+        formatted_script = formatted_script.replace("FAMILY_PH", family.replace("'", "\\'"))
 
-# Set up paths
-base_dir = Path('{{base_dir}}')
-family = '{{family}}'
-output_dir = base_dir / family
-output_dir.mkdir(parents=True, exist_ok=True)
-
-# Load data
-try:
-    # Try to load the preprocessed data
-    data_path = output_dir / "{{family}}_clustering_data.csv"
-    if not data_path.exists():
-        print("Error: Clustering data not found at {{}}".format(str(data_path)))
-        sys.exit(1)
-        
-    df = pd.read_csv(data_path)
-    print("Loaded clustering data with {{}} sequences".format(len(df)))
-    
-    # Prepare data for clustering
-    sequences = df['sequence'].values
-    X = df.drop(columns=['sequence']).values
-    
-    # Perform hierarchical clustering
-    print("Performing hierarchical clustering...")
-    n_clusters = min(10, len(sequences))  # Cap at 10 clusters
-    model = AgglomerativeClustering(
-        n_clusters=n_clusters,
-        affinity='euclidean',
-        linkage='ward',
-        compute_distances=True
-    )
-    clusters = model.fit_predict(X)
-    
-    # Plot dendrogram
-    print("Generating dendrogram...")
-    plt.figure(figsize=(12, 8))
-    plot_dendrogram(model, truncate_mode='level', p=5)
-    plt.title('Hierarchical Clustering Dendrogram - {{family}}'.format(family=family))
-    plt.xlabel('Sample index or (cluster size)')
-    plt.ylabel('Distance')
-    plt.tight_layout()
-    
-    # Save the plot
-    plot_path = output_dir / "{{family}}_dendrogram.png".format(family=family)
-    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-    print("Saved dendrogram to {{}}".format(str(plot_path)))
-    
-    # Generate consensus sequences
-    print("Generating consensus sequences...")
-    df['cluster'] = clusters
-    
-    # For each cluster, generate consensus
-    for cluster_id in range(n_clusters):
-        cluster_seqs = df[df['cluster'] == cluster_id]['sequence'].tolist()
-        if not cluster_seqs:
-            continue
-            
-        # Generate consensus (simple majority voting)
-        consensus = []
-        max_len = max(len(seq) for seq in cluster_seqs)
-        
-        for i in range(max_len):
-            # Count bases at position i
-            bases = {{}}
-            for seq in cluster_seqs:
-                if i < len(seq):
-                    base = seq[i].upper()
-                    bases[base] = bases.get(base, 0) + 1
-            
-            # Get most common base (or gap if no clear consensus)
-            if bases:
-                consensus_base = max(bases.items(), key=lambda x: x[1])[0]
-                consensus.append(consensus_base)
-            else:
-                consensus.append('-')
-        
-        # Save consensus sequence (with gaps)
-        consensus_seq = ''.join(consensus)
-        consensus_path = output_dir / ("{{}}_cluster_{{}}_consensus.txt".format(family, cluster_id+1))
-        with open(consensus_path, 'w') as f:
-            f.write(">consensus_cluster_{{}}\n{{}}\n".format(cluster_id+1, consensus_seq))
-        
-        # Generate gap-reduced consensus
-        gap_reduced = [base for base in consensus if base != '-']
-        gap_reduced_seq = ''.join(gap_reduced)
-        gap_reduced_path = output_dir / ("{{}}_cluster_{{}}_consensus_gap_reduced.txt".format(family, cluster_id+1))
-        with open(gap_reduced_path, 'w') as f:
-            f.write(">consensus_cluster_{{}}_gap_reduced\n{{}}\n".format(cluster_id+1, gap_reduced_seq))
-    
-    print("Consensus sequences generated successfully!")
-    
-except Exception as e:
-    print("Error generating clustering plots: {{}}".format(str(e)), file=sys.stderr)
-    sys.exit(1)
-""".format(
-            base_dir=self.params['BASE_OUT_DIR'],
-            family=family
-        )
-
-        # Format the script with the actual values
-        formatted_script = remote_script.replace('{{base_dir}}', base_dir.replace("'", "\\'")) \
-                                       .replace('{{family}}', family.replace("'", "\\'"))
-
-        # Save script to a temporary file
-        script_path = "/tmp/generate_plots_{}.py".format(os.getpid())
+        # Save script to a temporary file on the remote
+        script_path = f"{self.remote_work_dir}/generate_plots_{os.getpid()}.py"
 
         if self.use_sftp and self.sftp:
             with self.sftp.file(script_path, 'w') as f:
                 f.write(formatted_script)
         else:
-            # Chunked base64 upload to avoid "Argument list too long"
             encoded_full = base64.b64encode(formatted_script.encode()).decode()
             chunk_size = 65000
             chunks = [encoded_full[i:i+chunk_size] for i in range(0, len(encoded_full), chunk_size)]
@@ -1192,18 +1150,15 @@ except Exception as e:
                     print(f"Failed to upload clustering script chunk: {err}")
                     return False
 
-        # Make script executable
-        self.run_command("chmod +x {}".format(script_path))
+        self.run_command(f"chmod +x {script_path}")
 
-        # Run the script
         print("Generating clustering plots and consensus sequences...")
-        out, err, code = self.run_command("python {}".format(script_path), timeout=600)
+        out, err, code = self.run_command(f"python {script_path}", timeout=600)
 
-        # Clean up
-        self.run_command("rm -f {}".format(script_path))
+        self.run_command(f"rm -f {script_path}")
 
         if code != 0:
-            print("Error generating plots: {}".format(err))
+            print(f"Error generating plots: {err}")
             return False
 
         print(out)
