@@ -1258,8 +1258,8 @@ exit $EXIT_CODE
 
             download_recursive(remote_out, local_path)
         else:
-            # Use tar + direct binary transfer through SSH channel
-            print("Packaging results (this may take a moment)...")
+            # Stream tar directly through SSH channel (no temp files, no compression)
+            print("Streaming results from remote...")
 
             # Check if directory exists
             out, err, code = self.run_command(f"test -d '{remote_out}' && echo 'exists'")
@@ -1267,65 +1267,32 @@ exit $EXIT_CODE
                 print(f"Error: Remote directory not found: {remote_out}")
                 return
 
-            # Create tar archive on remote
-            remote_tar = f"/tmp/te_results_{os.getpid()}.tar.gz"
-            cmd = f"cd '{remote_out}' && tar -czf {remote_tar} ."
-            print("Creating archive on remote...")
-            out, err, code = self.run_command(cmd, timeout=600)
-
-            if code != 0:
-                print(f"Error creating archive: {err}")
-                return
-
-            # Get file size
-            out, err, code = self.run_command(f"stat -c%s {remote_tar} 2>/dev/null || stat -f%z {remote_tar}")
-            try:
-                file_size = int(out.strip())
-                print(f"Archive size: {file_size / 1024 / 1024:.2f} MB")
-            except:
-                file_size = 0
-
-            # Transfer binary file directly through SSH channel
-            print("Transferring archive...")
-            local_tar = local_path / "results.tar.gz"
-
             try:
                 channel = self._transport.open_session()
-                channel.exec_command(f"cat {remote_tar}")
+                channel.exec_command(f"cd '{remote_out}' && tar -cf - .")
 
-                with open(local_tar, 'wb') as f:
-                    bytes_received = 0
-                    while True:
-                        data = channel.recv(65536)  # 64KB buffer
-                        if not data:
-                            break
-                        f.write(data)
-                        bytes_received += len(data)
-                        if file_size > 0:
-                            pct = min(100, bytes_received * 100 / file_size)
-                            print(f"  Progress: {pct:.1f}% ({bytes_received / 1024 / 1024:.1f} MB)", end='\r')
+                # Read tar stream into memory buffer and extract
+                buf = io.BytesIO()
+                bytes_received = 0
+                while True:
+                    data = channel.recv(262144)  # 256KB buffer
+                    if not data:
+                        break
+                    buf.write(data)
+                    bytes_received += len(data)
+                    print(f"  Received: {bytes_received / 1024 / 1024:.1f} MB", end='\r')
 
                 channel.close()
-                print(f"\n  Received {bytes_received / 1024 / 1024:.2f} MB")
+                print(f"\n  Total: {bytes_received / 1024 / 1024:.2f} MB")
 
-            except Exception as e:
-                print(f"\nError during transfer: {e}")
-                return
-
-            # Clean up remote tar
-            self.run_command(f"rm -f {remote_tar}")
-
-            print("Extracting files...")
-
-            # Extract locally
-            try:
-                tar_file = tarfile.open(local_tar, mode='r:gz')
+                # Extract from memory buffer
+                buf.seek(0)
+                tar_file = tarfile.open(fileobj=buf, mode='r:')
                 tar_file.extractall(local_path)
                 tar_file.close()
-                os.remove(local_tar)  # Clean up local tar
+
             except Exception as e:
-                print(f"Error extracting: {e}")
-                print(f"Archive saved at: {local_tar}")
+                print(f"\nError during streaming transfer: {e}")
                 return
 
         print(f"\nResults saved to {local_path}")
