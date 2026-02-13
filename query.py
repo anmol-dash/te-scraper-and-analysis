@@ -1958,20 +1958,15 @@ try:
     from io import StringIO
     import subprocess
 
-    # Check if MAFFT is available
+    # Check if MAFFT is available (should be pre-installed via venv setup)
     progress_print("Checking for MAFFT installation...")
     try:
         subprocess.run(["mafft", "--version"], capture_output=True, check=True)
         mafft_available = True
         progress_print("  ✓ MAFFT found")
     except:
-        progress_print("  MAFFT not found. Attempting to install...")
-        try:
-            subprocess.run(["conda", "install", "-y", "-c", "bioconda", "mafft"], check=True)
-            mafft_available = True
-        except:
-            progress_print("  ✗ Could not install MAFFT. Skipping alignment.")
-            mafft_available = False
+        progress_print("  ✗ MAFFT not found. Skipping alignment.")
+        mafft_available = False
 
     if mafft_available:
         # ----------------- Global alignment -----------------
@@ -2135,21 +2130,15 @@ try:
     print("\n=== GENERATING CIALIGN PLOTS ===")
 
     try:
-        # Check if CIAlign is available
+        # Check if CIAlign is available (should be pre-installed via venv setup)
         progress_print("Checking for CIAlign installation...")
         cialign_check = subprocess.run(["CIAlign", "--version"],
                                       capture_output=True, text=True)
         cialign_available = True
         progress_print("  ✓ CIAlign found")
     except FileNotFoundError:
-        progress_print("  CIAlign not found. Attempting installation...")
-        try:
-            subprocess.run(["pip", "install", "cialign"], check=True)
-            cialign_available = True
-            progress_print("  ✓ CIAlign installed successfully")
-        except:
-            progress_print("  ✗ Could not install CIAlign. Skipping CIAlign plots.")
-            cialign_available = False
+        progress_print("  ✗ CIAlign not found. Skipping CIAlign plots.")
+        cialign_available = False
 
     if cialign_available and mafft_available:
         # Create CIAlign output directory

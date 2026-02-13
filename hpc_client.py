@@ -432,6 +432,26 @@ print(f"Loaded te_counts: {{len(df2)}} rows")
 
         self.remote_script_path = remote_script
         print(f"Uploaded analysis script to {remote_script}")
+
+        # Upload requirements.txt for venv setup
+        local_reqs = Path(__file__).parent / "requirements.txt"
+        if local_reqs.exists():
+            remote_reqs = f"{self.remote_work_dir}/requirements.txt"
+            with open(local_reqs, 'r') as f:
+                reqs_content = f.read()
+
+            if self.use_sftp and self.sftp:
+                with self.sftp.file(remote_reqs, 'w') as f:
+                    f.write(reqs_content)
+            else:
+                encoded = base64.b64encode(reqs_content.encode()).decode()
+                cmd = f"echo '{encoded}' | base64 -d > {remote_reqs}"
+                out, err, code = self.run_command(cmd, timeout=30)
+                if code != 0:
+                    print(f"Warning: Failed to upload requirements.txt: {err}")
+
+            print(f"Uploaded requirements.txt to {remote_reqs}")
+
         return True
 
     def submit_batch_job(self):
@@ -482,6 +502,23 @@ print(f"Loaded te_counts: {{len(df2)}} rows")
 
 module load /appl/Modules/CentOS7/gcc/12.2.0
 module load /appl/Modules/CentOS7/python/3.11
+
+# --- Virtual environment setup ---
+VENV_DIR="$HOME/te_analysis_venv"
+if [ ! -d "$VENV_DIR" ]; then
+    echo "[$(date +%H:%M:%S)] Creating virtual environment at $VENV_DIR ..."
+    python -m venv "$VENV_DIR"
+fi
+source "$VENV_DIR/bin/activate"
+echo "[$(date +%H:%M:%S)] Installing/verifying dependencies ..."
+pip install --quiet --upgrade pip
+pip install --quiet -r {self.remote_work_dir}/requirements.txt
+
+# Install MAFFT if not available
+if ! command -v mafft &>/dev/null; then
+    echo "[$(date +%H:%M:%S)] Installing MAFFT via conda ..."
+    conda install -y -c bioconda mafft 2>/dev/null || echo "  (MAFFT install skipped — conda not available)"
+fi
 
 echo "=========================================================="
 echo " TE Analysis Pipeline — Batch Mode"
@@ -665,6 +702,23 @@ set -e
 
 module load /appl/Modules/CentOS7/gcc/12.2.0
 module load /appl/Modules/CentOS7/python/3.11
+
+# --- Virtual environment setup ---
+VENV_DIR="$HOME/te_analysis_venv"
+if [ ! -d "$VENV_DIR" ]; then
+    echo "[$(date +%H:%M:%S)] Creating virtual environment at $VENV_DIR ..."
+    python -m venv "$VENV_DIR"
+fi
+source "$VENV_DIR/bin/activate"
+echo "[$(date +%H:%M:%S)] Installing/verifying dependencies ..."
+pip install --quiet --upgrade pip
+pip install --quiet -r {self.remote_work_dir}/requirements.txt
+
+# Install MAFFT if not available
+if ! command -v mafft &>/dev/null; then
+    echo "[$(date +%H:%M:%S)] Installing MAFFT via conda ..."
+    conda install -y -c bioconda mafft 2>/dev/null || echo "  (MAFFT install skipped — conda not available)"
+fi
 
 echo "=========================================================="
 echo " TE Analysis Pipeline — Interactive Mode"
