@@ -480,6 +480,9 @@ print(f"Loaded te_counts: {{len(df2)}} rows")
 #BSUB -W 04:00
 #BSUB -q normal
 
+module load /appl/Modules/CentOS7/gcc/12.2.0
+module load /appl/Modules/CentOS7/python/3.11
+
 echo "=========================================================="
 echo " TE Analysis Pipeline — Batch Mode"
 echo "=========================================================="
@@ -659,6 +662,9 @@ exit $EXIT_CODE
         runner_script = f"{self.remote_work_dir}/te_analysis_runner.sh"
         runner_content = f'''#!/bin/bash
 set -e
+
+module load /appl/Modules/CentOS7/gcc/12.2.0
+module load /appl/Modules/CentOS7/python/3.11
 
 echo "=========================================================="
 echo " TE Analysis Pipeline — Interactive Mode"

@@ -907,16 +907,19 @@ try:
                 subplot_titles=[f"PCA (k={K})", f"UMAP (k={K})", f"t-SNE (k={K})"]
             )
 
-            def add_panel(emb, col, labels, method_name):
+            def add_panel(emb, col, labels, method_name, df):
                 # Create color map for clusters with clear labeling
                 unique_clusters = sorted(set(labels))
                 cluster_colors = {c: i for i, c in enumerate(unique_clusters)}
 
-                # Create hover text with cluster information
+                # Create hover text with cluster information and coordinates
                 hover_texts = []
                 for i, l in enumerate(labels):
+                    row = df.iloc[i]
+                    coord = f"{row.get('chr','?')}:{row.get('start','?')}-{row.get('stop','?')}"
                     hover_texts.append(
                         f"<b>Row {i}</b><br>"
+                        f"{coord}<br>"
                         f"Cluster: {l}<br>"
                         f"Method: {method_name}<br>"
                         f"x: %{{x:.2f}}<br>"
@@ -945,9 +948,9 @@ try:
                     row=1, col=col
                 )
 
-            add_panel(pca_emb, 1, pca_labels, "PCA")
-            add_panel(umap_emb, 2, umap_labels, "UMAP")
-            add_panel(tsne_emb, 3, tsne_labels, "t-SNE")
+            add_panel(pca_emb, 1, pca_labels, "PCA", df)
+            add_panel(umap_emb, 2, umap_labels, "UMAP", df)
+            add_panel(tsne_emb, 3, tsne_labels, "t-SNE", df)
 
             fig.update_layout(
                 width=1500,
@@ -959,6 +962,24 @@ try:
             # Save figure
             fig.write_html(DIRS['clustering'] / "clustering_visualization.html")
             print(f"Saved clustering visualization to {DIRS['clustering'] / 'clustering_visualization.html'}")
+
+            # Save coordinates CSV with embeddings and cluster assignments
+            coord_rows = []
+            for i in range(len(df)):
+                row = df.iloc[i]
+                coord_rows.append({
+                    "row": i,
+                    "chr": row.get("chr", ""),
+                    "start": row.get("start", ""),
+                    "stop": row.get("stop", ""),
+                    "strand": row.get("strand", ""),
+                    "cluster": int(umap_labels[i]),
+                    "pca_x": pca_emb[i, 0], "pca_y": pca_emb[i, 1],
+                    "umap_x": umap_emb[i, 0], "umap_y": umap_emb[i, 1],
+                    "tsne_x": tsne_emb[i, 0], "tsne_y": tsne_emb[i, 1],
+                })
+            pd.DataFrame(coord_rows).to_csv(DIRS['clustering'] / "clustering_coordinates.csv", index=False)
+            print(f"Saved clustering coordinates to {DIRS['clustering'] / 'clustering_coordinates.csv'}")
 
             # Use UMAP labels as primary clustering (most common in literature)
             return umap_labels, umap_emb
@@ -1779,9 +1800,17 @@ try:
     def rows_set_to_str(rows_set):
         return ",".join(map(str, sorted(rows_set)))
 
+    def rows_set_to_coords(rows_set, df):
+        coords = []
+        for r in sorted(rows_set):
+            row = df.loc[r]
+            coords.append(f"{row.get('chr','?')}:{row.get('start','?')}-{row.get('stop','?')}")
+        return ",".join(coords)
+
     if len(kmer_df) > 0:
         all_primers_df = kmer_df.copy()
         all_primers_df["rows_covered"] = all_primers_df["rows"].apply(rows_set_to_str)
+        all_primers_df["rows_coordinates"] = all_primers_df["rows"].apply(lambda rs: rows_set_to_coords(rs, df2))
         all_primers_df.sort_values(["coverage","total_expr"], ascending=[False,False])\
                       .to_csv(DIRS['primers'] / f"all_{PRIMER_K}mer_candidates_metrics.csv", index=False)
         print(f"Saved all candidates to {DIRS['primers'] / f'all_{PRIMER_K}mer_candidates_metrics.csv'}")
@@ -1792,6 +1821,8 @@ try:
             "primer": selected_primers,
             "coverage": [kmer_df.loc[kmer_df["primer"]==p,"coverage"].values[0] for p in selected_primers],
             "total_expr": [kmer_df.loc[kmer_df["primer"]==p,"total_expr"].values[0] for p in selected_primers],
+            "rows_covered": [rows_set_to_str(kmer_df.loc[kmer_df["primer"]==p,"rows"].values[0]) for p in selected_primers],
+            "rows_coordinates": [rows_set_to_coords(kmer_df.loc[kmer_df["primer"]==p,"rows"].values[0], df2) for p in selected_primers],
             "strategy": ["cov_then_expr" if p in set(top_by_cov_expr["primer"]) else "expr_then_cov"
                          for p in selected_primers]
         })
@@ -2366,6 +2397,7 @@ except ImportError as e:
 if 'kmer_df' in dir() and len(kmer_df) > 0:
     kmer_out = kmer_df.copy()
     kmer_out["rows_covered"] = kmer_out["rows"].apply(rows_set_to_str)
+    kmer_out["rows_coordinates"] = kmer_out["rows"].apply(lambda rs: rows_set_to_coords(rs, df2))
     kmer_out.drop(columns=["rows"], inplace=True)
     kmer_out.to_csv(DIRS['primers'] / "kmer_candidate_metrics_full.csv", index=False)
 
