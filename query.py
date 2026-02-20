@@ -1953,7 +1953,6 @@ print("\n=== PERFORMING MULTIPLE SEQUENCE ALIGNMENT ===")
 
 try:
     from Bio import AlignIO
-    from Bio.Align import AlignInfo
     from Bio import SeqIO
     from io import StringIO
     import subprocess
@@ -1986,14 +1985,27 @@ try:
             # Generate consensus sequence
             progress_print("  Generating global consensus sequence...")
             alignment = AlignIO.read(output_aligned, "fasta")
-            summary_align = AlignInfo.SummaryInfo(alignment)
-            consensus = summary_align.dumb_consensus(threshold=0.5, ambiguous='N')
+            aln_len = alignment.get_alignment_length()
+            consensus_chars = []
+            for i in range(aln_len):
+                column = alignment[:, i]
+                counts = {}
+                for ch in column.upper():
+                    if ch != '-':
+                        counts[ch] = counts.get(ch, 0) + 1
+                total = sum(counts.values())
+                if total == 0:
+                    consensus_chars.append('N')
+                else:
+                    best = max(counts, key=counts.get)
+                    consensus_chars.append(best if counts[best] / total >= 0.5 else 'N')
+            consensus = ''.join(consensus_chars)
             
             # Save consensus
             consensus_file = DIRS['consensus'] / f"{FAMILY_NAME.lower()}_consensus.fa"
             with open(consensus_file, "w") as f:
                 f.write(f">{FAMILY_NAME}_consensus\n")
-                consensus_str = str(consensus)
+                consensus_str = consensus
                 for i in range(0, len(consensus_str), 80):
                     f.write(consensus_str[i:i+80] + "\n")
             print(f"Global consensus saved to {consensus_file}")
@@ -2061,12 +2073,25 @@ try:
                 # Generate consensus for this cluster
                 try:
                     alignment = AlignIO.read(cluster_aligned, "fasta")
-                    summary_align = AlignInfo.SummaryInfo(alignment)
-                    consensus = summary_align.dumb_consensus(threshold=0.5, ambiguous='N')
-                    
+                    _aln_len = alignment.get_alignment_length()
+                    _chars = []
+                    for _i in range(_aln_len):
+                        _col = alignment[:, _i]
+                        _counts = {}
+                        for _ch in _col.upper():
+                            if _ch != '-':
+                                _counts[_ch] = _counts.get(_ch, 0) + 1
+                        _total = sum(_counts.values())
+                        if _total == 0:
+                            _chars.append('N')
+                        else:
+                            _best = max(_counts, key=_counts.get)
+                            _chars.append(_best if _counts[_best] / _total >= 0.5 else 'N')
+                    consensus = ''.join(_chars)
+
                     # Save cluster consensus
                     cluster_consensus_file = cluster_alignment_dir / f"cluster_{cluster}_consensus.fa"
-                    consensus_str = str(consensus)
+                    consensus_str = consensus
                     with open(cluster_consensus_file, "w") as f:
                         f.write(f">{FAMILY_NAME}_cluster{cluster}_consensus\n")
                         for i in range(0, len(consensus_str), 80):
@@ -2301,16 +2326,27 @@ try:
             """Generate consensus from CIAlign cleaned alignment"""
             try:
                 from Bio import AlignIO
-                from Bio.Align import AlignInfo
-                
+
                 if not cleaned_fasta.exists():
                     print(f"  ⚠ Cleaned alignment not found: {cleaned_fasta.name}")
                     return None
                 
                 alignment = AlignIO.read(cleaned_fasta, "fasta")
-                summary_align = AlignInfo.SummaryInfo(alignment)
-                consensus = summary_align.dumb_consensus(threshold=0.5, ambiguous='N')
-                consensus_str = str(consensus)
+                _aln_len = alignment.get_alignment_length()
+                _chars = []
+                for _i in range(_aln_len):
+                    _col = alignment[:, _i]
+                    _counts = {}
+                    for _ch in _col.upper():
+                        if _ch != '-':
+                            _counts[_ch] = _counts.get(_ch, 0) + 1
+                    _total = sum(_counts.values())
+                    if _total == 0:
+                        _chars.append('N')
+                    else:
+                        _best = max(_counts, key=_counts.get)
+                        _chars.append(_best if _counts[_best] / _total >= 0.5 else 'N')
+                consensus_str = ''.join(_chars)
                 
                 # Save consensus
                 with open(output_fasta, "w") as f:

@@ -512,7 +512,7 @@ fi
 source "$VENV_DIR/bin/activate"
 echo "[$(date +%H:%M:%S)] Installing/verifying dependencies ..."
 pip install --quiet --upgrade pip
-pip install --quiet -r {self.remote_work_dir}/requirements.txt
+pip install --quiet --prefer-binary -r {self.remote_work_dir}/requirements.txt
 
 # Install MAFFT if not available
 if ! command -v mafft &>/dev/null; then
@@ -712,7 +712,7 @@ fi
 source "$VENV_DIR/bin/activate"
 echo "[$(date +%H:%M:%S)] Installing/verifying dependencies ..."
 pip install --quiet --upgrade pip
-pip install --quiet -r {self.remote_work_dir}/requirements.txt
+pip install --quiet --prefer-binary -r {self.remote_work_dir}/requirements.txt
 
 # Install MAFFT if not available
 if ! command -v mafft &>/dev/null; then
