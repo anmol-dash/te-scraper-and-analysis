@@ -1,27 +1,23 @@
 #!/usr/bin/env python3
 """
-HPC Client for TE Analysis Pipeline (Batch Job Mode)
+HPC Client for TE Analysis Pipeline
 
-An interactive client that connects to an HPC cluster, submits analysis
-jobs via bsub, and allows you to monitor progress and retrieve results.
+Interactive client that connects to an HPC cluster, submits analysis
+jobs, and allows you to monitor progress and retrieve results.
+
+Supports both LSF (bsub) and Slurm (sbatch) schedulers — auto-detected
+on connect or selectable with --scheduler.
 
 Workflow:
-    1. Connect to HPC cluster
-    2. Configure parameters (family name, input files, primer timeout, etc.)
-    3. Submit batch job - job runs on HPC, outputs stay on cluster
-    4. Check job status or watch progress live
-    5. Retrieve results when job completes
-
-Key Features:
-    - Batch job submission via bsub (doesn't require active connection)
-    - Results stored on HPC cluster, downloaded on demand
-    - Primer timeout with random sampling fallback (default: 2 min)
-      If genome search takes too long, uses random chromosome sampling
-      to estimate hits instead of hanging indefinitely
+    1. Connect to HPC cluster (SSH)
+    2. Configure parameters (family name, input files, genome path, …)
+    3. Submit batch or interactive job
+    4. Monitor progress / retrieve results
 
 Usage:
     python hpc_client.py
-    python hpc_client.py --host cluster.edu --user myuser
+    python hpc_client.py --host cluster.university.edu --user myuser
+    python hpc_client.py --host cluster.edu --scheduler slurm
 
 Requirements:
     pip install paramiko
@@ -52,21 +48,29 @@ class HPCClient:
         self.ssh = None
         self.sftp = None
         self.connected = False
+        self.scheduler = None  # 'lsf' or 'slurm', auto-detected on connect
 
         # Default parameters
         self.params = {
             "FAMILY_NAME": "HERVK9",
-            "HG38_FA": "/project/amodzlab/index/human/hg38/hg38.fa",
-            "BASE_OUT_DIR": "collab_rna",
-            "K": 18,  # K-mer size for clustering
-            "PRIMER_K": 18,  # K-mer size for primer design (e.g., 8, 12, 18)
+            "HG38_FA": "",           # Path to genome FASTA on HPC (set after connect)
+            "BASE_OUT_DIR": "results",
+            "K": 18,
+            "PRIMER_K": 18,
             "TOP_N_GLOBAL": 8,
             "TOP_N_CLUSTER": 5,
             "TOP_N_FORWARD_PRIMERS": 3,
             "MIN_SEQUENCES_FOR_CLUSTERING": 10,
-            "PRIMER_TIMEOUT": 120,  # Timeout for primer genome search (seconds)
-            "all_te_file": "",  # Path to CSV on HPC
-            "te_counts": "",    # Path to CSV on HPC
+            "PRIMER_TIMEOUT": 120,
+            "all_te_file": "",       # Path to input CSV on HPC
+            "te_counts": "",
+            # Scheduler resources (used for both LSF and Slurm)
+            "MEM_MB": 12000,
+            "CPUS": 4,
+            "WALLTIME": "04:00",     # HH:MM
+            "QUEUE": "normal",       # LSF queue / Slurm partition
+            # Optional module loads (space-separated, e.g. "python/3.11 gcc/12")
+            "MODULES": "",
         }
 
         self.local_output_dir = None
@@ -137,6 +141,10 @@ class HPCClient:
             channel.close()
             print(f"Remote home directory: {self.remote_work_dir}")
 
+            # Auto-detect scheduler
+            self.scheduler = self._detect_scheduler()
+            print(f"Scheduler detected: {self.scheduler.upper()}")
+
             return True
 
         except paramiko.ssh_exception.AuthenticationException as e:
@@ -156,6 +164,89 @@ class HPCClient:
             self._transport.close()
         self.connected = False
         print("Disconnected from HPC.")
+
+    def _detect_scheduler(self):
+        """Auto-detect LSF (bsub) or Slurm (sbatch) on the remote host."""
+        for sched, cmd in [("lsf", "command -v bsub"), ("slurm", "command -v sbatch")]:
+            out, _, code = self.run_command(cmd, timeout=10)
+            if code == 0 and out.strip():
+                return sched
+        return "lsf"  # default fallback
+
+    def _job_script_header(self, job_name, job_out, job_err, mem_mb=None, cpus=None,
+                            walltime=None, queue=None):
+        """Return scheduler-specific directives for the job script."""
+        mem_mb   = mem_mb   or self.params["MEM_MB"]
+        cpus     = cpus     or self.params["CPUS"]
+        walltime = walltime or self.params["WALLTIME"]
+        queue    = queue    or self.params["QUEUE"]
+
+        if self.scheduler == "slurm":
+            mem_gb = max(1, mem_mb // 1000)
+            return (
+                f"#SBATCH --job-name={job_name}\n"
+                f"#SBATCH --output={job_out}\n"
+                f"#SBATCH --error={job_err}\n"
+                f"#SBATCH --cpus-per-task={cpus}\n"
+                f"#SBATCH --mem={mem_gb}G\n"
+                f"#SBATCH --time={walltime}:00\n"
+                f"#SBATCH --partition={queue}\n"
+            )
+        else:  # lsf
+            return (
+                f"#BSUB -J {job_name}\n"
+                f"#BSUB -o {job_out}\n"
+                f"#BSUB -e {job_err}\n"
+                f"#BSUB -n {cpus}\n"
+                f"#BSUB -M {mem_mb}\n"
+                f"#BSUB -W {walltime}\n"
+                f"#BSUB -q {queue}\n"
+            )
+
+    def _module_load_block(self):
+        """Return module load commands if MODULES param is set."""
+        mods = self.params.get("MODULES", "").strip()
+        if not mods:
+            return "# No modules configured (set MODULES parameter if needed)"
+        lines = "\n".join(f"module load {m}" for m in mods.split())
+        return lines
+
+    def _submit_job_cmd(self, job_script):
+        """Return the scheduler command to submit a job script."""
+        if self.scheduler == "slurm":
+            return f"sbatch {job_script}"
+        return f"bsub < {job_script}"
+
+    def _parse_job_id(self, submit_output):
+        """Extract job ID from scheduler submission output."""
+        if self.scheduler == "slurm":
+            m = re.search(r"Submitted batch job (\d+)", submit_output)
+            return m.group(1) if m else None
+        else:
+            m = re.search(r"Job <(\d+)>", submit_output)
+            return m.group(1) if m else None
+
+    def _check_running_cmd(self, job_id):
+        """Return command to check if job is still running."""
+        if self.scheduler == "slurm":
+            return f"squeue -j {job_id} --noheader 2>&1"
+        return f"bjobs {job_id} 2>&1"
+
+    def _cancel_job_cmd(self, job_id):
+        """Return command to cancel a job."""
+        if self.scheduler == "slurm":
+            return f"scancel {job_id}"
+        return f"bkill {job_id}"
+
+    def _interactive_alloc_cmd(self, runner_script, mem_mb, cpus, queue):
+        """Return the command to allocate a node and run interactively."""
+        if self.scheduler == "slurm":
+            mem_gb = max(1, mem_mb // 1000)
+            return (
+                f"srun --mem={mem_gb}G --cpus-per-task={cpus} "
+                f"--partition={queue} --pty bash {runner_script}"
+            )
+        return f"bsub -M {mem_mb} -n {cpus} -q {queue} -Is bash {runner_script}"
 
     def run_command(self, command: str, timeout: int = 300, stream_output: bool = False) -> tuple:
         """Execute a command on the remote server.
@@ -277,71 +368,71 @@ class HPCClient:
 
     def set_parameter_interactive(self):
         """Interactive menu to set parameters."""
+        str_params = {
+            "1": "FAMILY_NAME", "2": "HG38_FA", "3": "BASE_OUT_DIR",
+            "11": "all_te_file", "12": "te_counts",
+            "13": "QUEUE", "14": "WALLTIME", "15": "MODULES",
+        }
+        int_params = {
+            "4": "K", "5": "PRIMER_K", "6": "TOP_N_GLOBAL",
+            "7": "TOP_N_CLUSTER", "8": "MIN_SEQUENCES_FOR_CLUSTERING",
+            "9": "PRIMER_TIMEOUT", "10": "MEM_MB", "16": "CPUS",
+        }
+
         while True:
-            print("\n" + "="*60)
+            print("\n" + "="*65)
             print("CURRENT PARAMETERS")
-            print("="*60)
+            print("="*65)
+            sched = getattr(self, "scheduler", "auto") or "auto"
+            print(f"  Scheduler: {sched.upper()}")
+            print()
+            for num, key in sorted(str_params.items(), key=lambda x: int(x[0])):
+                val = self.params.get(key, "") or "[NOT SET]"
+                print(f"  [{num:>2}] {key:<35} = {val}")
+            print()
+            for num, key in sorted(int_params.items(), key=lambda x: int(x[0])):
+                val = self.params.get(key, "")
+                print(f"  [{num:>2}] {key:<35} = {val}")
+            print()
+            print("  Descriptions:")
+            print("    [2]  HG38_FA: Path to genome FASTA on HPC (enables local extraction)")
+            print("    [4]  K: K-mer size for clustering (default: 18)")
+            print("    [9]  PRIMER_TIMEOUT: Seconds before random-sampling fallback")
+            print("    [10] MEM_MB: Memory request in MB (12000 = 12 GB)")
+            print("    [11] all_te_file: Input CSV — chr/start/stop/TE_name/strand columns")
+            print("    [14] WALLTIME: Job time limit HH:MM")
+            print("    [15] MODULES: Space-separated module names to load (e.g. python/3.11)")
+            print()
+            print("  [p]  Preview family count")
+            print("  [r]  Run analysis")
+            print("  [q]  Back")
+            print("="*65)
 
-            param_list = [
-                ("1", "FAMILY_NAME", self.params["FAMILY_NAME"]),
-                ("2", "HG38_FA", self.params["HG38_FA"]),
-                ("3", "BASE_OUT_DIR", self.params["BASE_OUT_DIR"]),
-                ("4", "K", self.params["K"]),
-                ("5", "PRIMER_K", self.params["PRIMER_K"]),
-                ("6", "TOP_N_GLOBAL", self.params["TOP_N_GLOBAL"]),
-                ("7", "TOP_N_CLUSTER", self.params["TOP_N_CLUSTER"]),
-                ("8", "TOP_N_FORWARD_PRIMERS", self.params["TOP_N_FORWARD_PRIMERS"]),
-                ("9", "MIN_SEQUENCES_FOR_CLUSTERING", self.params["MIN_SEQUENCES_FOR_CLUSTERING"]),
-                ("10", "PRIMER_TIMEOUT", self.params["PRIMER_TIMEOUT"]),
-                ("11", "all_te_file", self.params["all_te_file"] or "[NOT SET - REQUIRED]"),
-                ("12", "te_counts", self.params["te_counts"] or "[NOT SET - optional]"),
-            ]
+            choice = input("\nSelect option: ").strip().lower()
 
-            # Add descriptions below the parameter list
-            print("\n  Parameter descriptions:")
-            print("    [4]  K: K-mer size for clustering analysis (default: 18)")
-            print("    [5]  PRIMER_K: K-mer size for primer design (e.g., 8, 12, 18)")
-            print("    [10] PRIMER_TIMEOUT: Timeout (seconds) for each primer search")
-            print("         If exceeded, uses random chromosome sampling instead")
-            print("    [11] all_te_file: TE annotations CSV with columns:")
-            print("         chr, start, stop, TE_name, family, strand, + expression columns")
-            print("    [12] te_counts: Optional summary CSV (not required for analysis)")
-
-            for num, name, value in param_list:
-                print(f"  [{num:>2}] {name:<30} = {value}")
-
-            print("\n  [p]  Preview family count")
-            print("  [r]  Run analysis (submit batch job)")
-            print("  [q]  Quit")
-            print("="*60)
-
-            choice = input("\nSelect option (1-12, p, r, q): ").strip().lower()
-
-            if choice == 'q':
+            if choice == "q":
                 return False
-            elif choice == 'p':
+            elif choice == "p":
                 self.preview_family_count()
-            elif choice == 'r':
+            elif choice == "r":
                 return True
-            elif choice in ['1', '2', '3', '11', '12']:
-                # String parameters
-                key = param_list[int(choice)-1][1].split()[0]  # Handle "all_te_file (CSV path)"
-                current = self.params[key]
-                new_val = input(f"Enter new value for {key} [{current}]: ").strip()
-                if new_val:
-                    self.params[key] = new_val
-            elif choice in ['4', '5', '6', '7', '8', '9', '10']:
-                # Integer parameters
-                key = param_list[int(choice)-1][1]
-                current = self.params[key]
-                new_val = input(f"Enter new value for {key} [{current}]: ").strip()
-                if new_val:
+            elif choice in str_params:
+                key = str_params[choice]
+                cur = self.params.get(key, "")
+                val = input(f"  {key} [{cur}]: ").strip()
+                if val:
+                    self.params[key] = val
+            elif choice in int_params:
+                key = int_params[choice]
+                cur = self.params.get(key, "")
+                val = input(f"  {key} [{cur}]: ").strip()
+                if val:
                     try:
-                        self.params[key] = int(new_val)
+                        self.params[key] = int(val)
                     except ValueError:
-                        print("Invalid integer value")
+                        print("  Must be an integer.")
             else:
-                print("Invalid option")
+                print("  Invalid option")
 
         return False
 
@@ -490,18 +581,13 @@ print(f"Loaded te_counts: {{len(df2)}} rows")
         # Error log file
         job_error_log = f"{self.remote_work_dir}/te_analysis_job.error.log"
 
-        # Build the bsub script content
-        bsub_script = f'''#!/bin/bash
-#BSUB -J {job_name}
-#BSUB -o {job_out}
-#BSUB -e {job_err}
-#BSUB -n 4
-#BSUB -M 12000
-#BSUB -W 04:00
-#BSUB -q normal
+        # Build the scheduler-agnostic job script
+        sched_header = self._job_script_header(job_name, job_out, job_err)
+        module_block = self._module_load_block()
 
-module load /appl/Modules/CentOS7/gcc/12.2.0
-module load /appl/Modules/CentOS7/python/3.11
+        bsub_script = f'''#!/bin/bash
+{sched_header}
+{module_block}
 
 # --- Virtual environment setup ---
 VENV_DIR="$HOME/te_analysis_venv"
@@ -623,19 +709,18 @@ exit $EXIT_CODE
         self.run_command(f"rm -f {job_out} {job_err} {job_done} {job_info}", timeout=10)
 
         # Submit the job
-        print("\nSubmitting job to cluster via bsub...")
-        submit_cmd = f"bsub < {job_script}"
+        sched_label = getattr(self, "scheduler", "lsf").upper()
+        print(f"\nSubmitting job via {sched_label}...")
+        submit_cmd = self._submit_job_cmd(job_script)
         out, err, code = self.run_command(submit_cmd, timeout=30)
 
         if code != 0:
             print(f"Error submitting job: {err}")
             return False
 
-        # Parse job ID from bsub output
-        job_id = None
-        match = re.search(r'Job <(\d+)>', out)
-        if match:
-            job_id = match.group(1)
+        # Parse job ID
+        job_id = self._parse_job_id(out)
+        if job_id:
             self.current_job_id = job_id
             print(f"Job submitted successfully! Job ID: {job_id}")
         else:
@@ -657,10 +742,16 @@ exit $EXIT_CODE
         print("\nThe job is now running on the HPC cluster.")
         print("Use 'Check job status' to monitor progress.")
         print("Use 'Retrieve results' to download when complete.")
+        sched = getattr(self, "scheduler", "lsf")
         print("\nUseful HPC commands:")
-        print(f"  bjobs {job_id}        # Check job status")
-        print(f"  bpeek {job_id}        # View live output")
-        print(f"  bkill {job_id}        # Cancel job")
+        if sched == "slurm":
+            print(f"  squeue -j {job_id}     # Check job status")
+            print(f"  tail -f {job_out}       # View live output")
+            print(f"  scancel {job_id}        # Cancel job")
+        else:
+            print(f"  bjobs {job_id}          # Check job status")
+            print(f"  bpeek {job_id}          # View live output")
+            print(f"  bkill {job_id}          # Cancel job")
         print("=" * 60)
 
         return True
@@ -697,11 +788,11 @@ exit $EXIT_CODE
 
         # Build runner script with comprehensive logging
         runner_script = f"{self.remote_work_dir}/te_analysis_runner.sh"
+        module_block = self._module_load_block()
         runner_content = f'''#!/bin/bash
 set -e
 
-module load /appl/Modules/CentOS7/gcc/12.2.0
-module load /appl/Modules/CentOS7/python/3.11
+{module_block}
 
 # --- Virtual environment setup ---
 VENV_DIR="$HOME/te_analysis_venv"
@@ -793,14 +884,15 @@ exit $EXIT_CODE
             return False
         self.run_command(f"chmod +x {runner_script}", timeout=10)
 
-        # Build bsub command
-        bsub_cmd = (
-            f"bsub -M 12000 -n 4 -Is "
-            f"bash {runner_script}"
-        )
+        # Build scheduler interactive command
+        mem_mb = self.params["MEM_MB"]
+        cpus   = self.params["CPUS"]
+        queue  = self.params["QUEUE"]
+        bsub_cmd = self._interactive_alloc_cmd(runner_script, mem_mb, cpus, queue)
+        sched_label = getattr(self, "scheduler", "lsf").upper()
 
         print("\n" + "=" * 60)
-        print("SUBMITTING INTERACTIVE JOB")
+        print(f"SUBMITTING INTERACTIVE JOB  ({sched_label})")
         print("=" * 60)
         print(f"  Command: {bsub_cmd}")
         print(f"  Memory:  12 GB")
@@ -890,12 +982,12 @@ exit $EXIT_CODE
         else:
             # Check if job is still running
             if job_id != 'unknown':
-                bjobs_out, _, _ = self.run_command(f"bjobs {job_id} 2>&1", timeout=10)
-                if 'not found' in bjobs_out.lower():
-                    # Job finished but no done marker - check output
+                check_cmd = self._check_running_cmd(job_id)
+                status_out, _, _ = self.run_command(check_cmd, timeout=10)
+                if not status_out.strip() or 'not found' in status_out.lower():
                     print("\nStatus: COMPLETED (checking results...)")
                 else:
-                    print(f"\nbjobs output:\n{bjobs_out}")
+                    print(f"\nScheduler output:\n{status_out}")
             else:
                 print("\nStatus: UNKNOWN (no job ID available)")
 
@@ -1046,10 +1138,11 @@ exit $EXIT_CODE
                     print(f"\n\nJob completed with exit code: {done_out.strip()}")
                     break
 
-                # Check job status with bjobs
+                # Check job status with scheduler-specific command
                 if job_id != 'unknown':
-                    status_out, _, _ = self.run_command(f"bjobs {job_id} 2>&1 | tail -1", timeout=10)
-                    if 'not found' in status_out.lower():
+                    check_cmd = self._check_running_cmd(job_id)
+                    status_out, _, _ = self.run_command(f"{check_cmd} 2>&1 | tail -1", timeout=10)
+                    if not status_out.strip() or 'not found' in status_out.lower():
                         time.sleep(2)
                         done_out, _, _ = self.run_command(f"cat {job_done_file} 2>/dev/null || echo 'running'", timeout=10)
                         if done_out.strip() != 'running':
@@ -1087,6 +1180,58 @@ exit $EXIT_CODE
     def run_analysis(self):
         """Run the analysis - just calls submit_batch_job for backwards compatibility."""
         return self.submit_batch_job()
+
+    # ── te_prep / te_enrichment remote launchers ────────────────────────────
+
+    def _run_te_prep_interactive(self):
+        """Interactively configure and run te_prep on the cluster."""
+        print("\n" + "=" * 60)
+        print("te_prep — Download rmsk / Extract TE sequences")
+        print("=" * 60)
+        build   = input("Genome build [hg38]: ").strip() or "hg38"
+        family  = input("TE family name (e.g. HERVK): ").strip()
+        out_dir = input(f"Remote output dir [{self.remote_work_dir}]: ").strip() or self.remote_work_dir
+        extra   = input("Extra te_prep args (or blank): ").strip()
+
+        fam_arg = f"--family {family}" if family else ""
+        cmd = (
+            f"cd {self.remote_work_dir} && "
+            f"python te_prep.py --build {build} {fam_arg} --out-dir {out_dir} {extra}"
+        )
+        print(f"\nRunning: {cmd}\n")
+        out, err, code = self.run_command(cmd, timeout=600)
+        print(out)
+        if err:
+            print("[stderr]", err[:500])
+        print("Exit code:", code)
+
+    def _run_te_enrichment_interactive(self):
+        """Interactively configure and run te_enrichment on the cluster."""
+        print("\n" + "=" * 60)
+        print("te_enrichment — UMAP / JASPAR motifs / Fisher / GO")
+        print("=" * 60)
+        clustered = input("Path to clustered CSV on cluster: ").strip()
+        if not clustered:
+            print("Clustered CSV path required.")
+            return
+        build    = input("Genome build [hg38]: ").strip() or "hg38"
+        family   = input("TE family name [FAMILY]: ").strip() or "FAMILY"
+        out_dir  = input(f"Remote output dir [{self.remote_work_dir}]: ").strip() or self.remote_work_dir
+        jaspar   = input("JASPAR BED path (blank = auto-download): ").strip()
+        extra    = input("Extra te_enrichment args (or blank): ").strip()
+
+        jaspar_arg = f"--jaspar-bed {jaspar}" if jaspar else ""
+        cmd = (
+            f"cd {self.remote_work_dir} && "
+            f"python te_enrichment.py --input {clustered} --build {build} "
+            f"--family {family} --out-dir {out_dir} {jaspar_arg} {extra}"
+        )
+        print(f"\nRunning: {cmd}\n")
+        out, err, code = self.run_command(cmd, timeout=1800)
+        print(out)
+        if err:
+            print("[stderr]", err[:500])
+        print("Exit code:", code)
 
     def generate_clustering_plots(self):
         """Generate clustering plots after analysis."""
@@ -1365,24 +1510,29 @@ exit $EXIT_CODE
                 print("\n" + "="*60)
                 print("HPC TE ANALYSIS CLIENT")
                 print("="*60)
-                print("  [1] Configure parameters")
-                print("  [2] Preview family count")
-                print("  --- Run Analysis ---")
-                print("  [3] Run interactively (bsub -Is, real-time output)")
-                print("  [4] Submit batch job  (bsub, runs in background)")
+                sched = getattr(self, "scheduler", None) or "lsf"
+                sched_label = sched.upper()
+                print("  [1]  Configure parameters")
+                print("  [2]  Preview family count")
+                print("  --- Prepare & Fetch Data ---")
+                print("  [3]  Run te_prep  (download rmsk / extract sequences)")
+                print("  --- Core Analysis ---")
+                print(f"  [4]  Run interactively ({sched_label} interactive, real-time output)")
+                print(f"  [5]  Submit batch job  ({sched_label}, runs in background)")
+                print("  --- Enrichment & Motifs ---")
+                print("  [6]  Run te_enrichment (UMAP / JASPAR / Fisher / GO)")
                 print("  --- Monitor & Retrieve ---")
-                print("  [5] Check batch job status")
-                print("  [6] Watch batch job progress (live)")
-                print("  [7] Retrieve results")
-                print("  [8] Download error logs only")
-                print("  [9] Disconnect and exit")
+                print("  [7]  Check batch job status")
+                print("  [8]  Watch batch job progress (live)")
+                print("  [9]  Retrieve results")
+                print("  [10] Download error logs only")
+                print("  [11] Disconnect and exit")
                 print("="*60)
 
-                choice = input("\nSelect option (1-9): ").strip()
+                choice = input("\nSelect option (1-11): ").strip()
 
                 if choice == '1':
                     if self.set_parameter_interactive():
-                        # User chose to run — offer interactive mode first
                         mode = input("\nRun interactively (i) or submit batch job (b)? [i]: ").strip().lower()
                         if mode == 'b':
                             self.submit_batch_job()
@@ -1391,14 +1541,18 @@ exit $EXIT_CODE
                 elif choice == '2':
                     self.preview_family_count()
                 elif choice == '3':
-                    self.run_interactive_job()
+                    self._run_te_prep_interactive()
                 elif choice == '4':
-                    self.submit_batch_job()
+                    self.run_interactive_job()
                 elif choice == '5':
-                    self.check_job_status()
+                    self.submit_batch_job()
                 elif choice == '6':
-                    self.watch_job()
+                    self._run_te_enrichment_interactive()
                 elif choice == '7':
+                    self.check_job_status()
+                elif choice == '8':
+                    self.watch_job()
+                elif choice == '9':
                     if self.local_output_dir:
                         default_dir = str(self.local_output_dir)
                         local_dir = input(f"Enter local output directory [{default_dir}]: ").strip()
@@ -1407,10 +1561,10 @@ exit $EXIT_CODE
                         local_dir = input("Enter local output directory (e.g., ~/Documents/output): ").strip()
                     if local_dir:
                         self.retrieve_results(local_dir)
-                elif choice == '8':
+                elif choice == '10':
                     local_dir = input("Enter local directory for error logs [./hpc_error_logs]: ").strip()
                     self.download_error_logs(local_dir if local_dir else None)
-                elif choice == '9':
+                elif choice == '11':
                     break
                 else:
                     print("Invalid option")
