@@ -26,6 +26,68 @@ te_prep.py ──→ te_clustering.py ──→ te_alignment.py
                      └──→ te_expression.py
 ```
 
+---
+
+## Parallelization
+
+The pipeline is structured as a **DAG** with well-defined fan-out and join points, enabling significant wall-clock speedups when run with a DAG scheduler (Snakemake, Nextflow, or Python `concurrent.futures`).
+
+### Execution Groups
+
+After **Stage 1** (sequence retrieval) completes, four branches fan out simultaneously:
+
+| Group | Branch | Steps | Dependency |
+|---|---|---|---|
+| **1** | Alignment & Structure | MAFFT → CIAlign → AlphaFold consensus | Only needs sequences |
+| **2** | Clustering | k-mer vectorization → UMAP → HDBSCAN → stability QC | Only needs sequences |
+| **3** | Motif Analysis | JASPAR BED check → bedtools/FIMO overlap | Needs sequences + JASPAR BED |
+| **4** | Expression Collation | Parse RNA-seq / scRNA-seq TPM matrices | Only needs sequences |
+
+### Join Barriers
+
+Two synchronization points exist before gRNA generation:
+
+- **Cluster expression analysis** — waits for Group 2 (clustering) **and** Group 4 (expression collation)
+- **Motif expression analysis** — waits for Group 3 (motif overlap) **and** Group 4 (expression collation)
+
+After both analyses complete, **gRNA generation** fans out again to two fully independent sub-branches:
+
+- Off-target scoring (Cas-OFFinder / bowtie)
+- gRNA stability / thermodynamic QC
+
+### Critical Path
+
+```
+Get Sequences → MAFFT → CIAlign → AlphaFold
+```
+
+AlphaFold structural prediction is the dominant wall-clock bottleneck. All other branches should complete well before it finishes, meaning the pipeline's total runtime is effectively gated by Branch A.
+
+### Recommended Scheduler
+
+```python
+# Conceptual concurrent.futures DAG
+with ThreadPoolExecutor() as pool:
+    seqs   = pool.submit(get_sequences, coords)          # Stage 1
+
+    branch_a = pool.submit(run_alignment_structure, seqs)  # ─┐
+    branch_b = pool.submit(run_clustering,          seqs)  #  ├ parallel fan-out
+    branch_c = pool.submit(run_motif_analysis,      seqs)  #  │
+    branch_d = pool.submit(collate_expression,      seqs)  # ─┘
+
+    # join barriers
+    cluster_expr = pool.submit(analyze_clusters, branch_b, branch_d)
+    motif_expr   = pool.submit(analyze_motifs,   branch_c, branch_d)
+
+    grnas = pool.submit(generate_grnas, cluster_expr, motif_expr)
+
+    # final parallel QC
+    pool.submit(offtarget_scoring,  grnas)
+    pool.submit(stability_scoring,  grnas)
+```
+
+For HPC use, submit each group as a separate job array and use scheduler dependencies (`#BSUB -w done(jobA) && done(jobB)` for LSF, `--dependency=afterok:` for Slurm) to enforce the join barriers automatically.
+
 ## Script Overview
 
 | Script | GAMECA step | Input → Output |
