@@ -14,7 +14,7 @@ that reads from and writes to CSV files, so steps can be run independently,
 rerun in isolation, or swapped out. Supports **LSF** and **Slurm** HPC clusters.
 
 ---
-![alt text](https://github.com/adam-p/markdown-here/raw/master/src/common/images/icon48.png "Logo Title Text 1")
+![alt text](https://github.com/anmol-dash/te-scraper-and-analysis/blob/main/ERD_TES.png)
 
 ## Pipeline
 
