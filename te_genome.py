@@ -3,6 +3,10 @@
 te_genome.py
 Shared genome utilities: GenomeCache for in-memory FASTA access and primer search.
 Imported by query.py, te_primers.py, and te_prep.py.
+
+Speed path:
+  - te_fast (Cython) is used when compiled; falls back to pure Python otherwise.
+  - search_primer_parallel() uses ProcessPoolExecutor for per-chromosome tasks.
 """
 
 import os
@@ -19,12 +23,24 @@ def progress_print(msg, newline=True):
         print(f"[{ts}] {msg}", end="", flush=True)
 
 
+# ── Cython fast-path (optional) ─────────────────────────────────────────────
+try:
+    import te_fast as _tf
+    _HAS_CYTHON = True
+except ImportError:
+    _HAS_CYTHON = False
+
+
 def reverse_complement(seq: str) -> str:
+    if _HAS_CYTHON:
+        return _tf.reverse_complement(seq)
     return seq.translate(str.maketrans("ACGTacgt", "TGCAtgca"))[::-1]
 
 
+# ── Module-level worker function (must be picklable) ────────────────────────
+
 def _search_single_chrom(primer, rc, plen, chrom, seq, max_hits=0, current_count=0):
-    """Search a single chromosome sequence for primer (forward + RC) hits."""
+    """Search one chromosome for exact primer matches (forward + RC)."""
     hits = []
     count = current_count
     seq = seq.upper()
@@ -45,12 +61,21 @@ def _search_single_chrom(primer, rc, plen, chrom, seq, max_hits=0, current_count
     return hits, count
 
 
+def _parallel_chrom_worker(args):
+    """Top-level picklable worker for ProcessPoolExecutor."""
+    primer, rc, plen, chrom, seq, max_hits = args
+    hits, total = _search_single_chrom(primer, rc, plen, chrom, seq, max_hits, 0)
+    return hits, total
+
+
+# ── GenomeCache ─────────────────────────────────────────────────────────────
+
 class GenomeCache:
     """Load a reference genome FASTA into memory once, reuse for all operations.
 
     Supports:
     - Local sequence extraction (replaces UCSC API calls)
-    - Fast exact-match primer search (no re-reading the file)
+    - Fast exact-match primer search, optionally parallelized across chromosomes
     - Pickle cache for fast subsequent loads
 
     Usage:
@@ -58,9 +83,10 @@ class GenomeCache:
         gc.load()
         seq = gc.extract_sequence("chr1", 1000, 2000)
         hits = gc.search_primer("ATCGATCG")
+        hits = gc.search_primer("ATCGATCG", parallel=True)   # parallel search
     """
 
-    MAX_GENOME_HITS = 10_000  # stop searching once this many hits are found
+    MAX_GENOME_HITS = 10_000
 
     def __init__(self, fasta_path, cache_dir=None):
         self.genomes = {}
@@ -75,7 +101,6 @@ class GenomeCache:
         else:
             self.cache_path = None
 
-    # ------------------------------------------------------------------
     def load(self):
         """Load genome into memory (pickle cache speeds up subsequent runs)."""
         if self._loaded:
@@ -90,7 +115,6 @@ class GenomeCache:
         import pickle
         import time as _t
 
-        # Try pickle cache
         if self.cache_path and self.cache_path.exists():
             try:
                 if self.cache_path.stat().st_mtime > self.fasta_path.stat().st_mtime:
@@ -108,7 +132,6 @@ class GenomeCache:
             except Exception as e:
                 progress_print(f"  Cache load failed ({e}), falling back to FASTA parsing")
 
-        # Parse FASTA
         progress_print(f"  Loading genome from FASTA: {self.fasta_path.name}")
         progress_print("  First-time load — will cache as pickle for future runs")
         t0 = _t.time()
@@ -140,7 +163,6 @@ class GenomeCache:
             f"  Loaded {len(self.genomes)} chromosomes ({self._total_bp:,} bp) in {elapsed:.1f}s"
         )
 
-        # Write pickle cache
         if self.cache_path:
             try:
                 progress_print("  Caching genome as pickle for faster future loads...")
@@ -156,7 +178,6 @@ class GenomeCache:
 
         self._loaded = True
 
-    # ------------------------------------------------------------------
     def extract_sequence(self, chrom, start, stop):
         """Return uppercase sequence string for chrom:start-stop (0-based), or None."""
         seq = self.genomes.get(chrom)
@@ -166,18 +187,27 @@ class GenomeCache:
             return None
         return seq[start:stop]
 
-    # ------------------------------------------------------------------
-    def search_primer(self, primer, max_hits=None):
+    def search_primer(self, primer, max_hits=None, parallel=False, n_workers=None):
         """Search all chromosomes for exact forward + RC matches of *primer*.
 
+        Args:
+            primer   : primer sequence (str)
+            max_hits : stop early when this many hits found (default MAX_GENOME_HITS)
+            parallel : use ProcessPoolExecutor for per-chromosome parallelism
+            n_workers: worker count for parallel mode (default: cpu_count, capped at 8)
+
         Returns list of (chrom, start, stop, strand) tuples.
-        Stops early when max_hits is reached (primer deemed non-specific).
         """
         if max_hits is None:
             max_hits = self.MAX_GENOME_HITS
+
         primer = primer.upper()
         rc = reverse_complement(primer)
         plen = len(primer)
+
+        if parallel and len(self.genomes) > 1:
+            return self._search_primer_parallel(primer, rc, plen, max_hits, n_workers)
+
         hits = []
         total = 0
         for i, (chrom, seq) in enumerate(self.genomes.items()):
@@ -195,7 +225,49 @@ class GenomeCache:
                 break
         return hits
 
-    # ------------------------------------------------------------------
+    def _search_primer_parallel(self, primer, rc, plen, max_hits, n_workers):
+        """Per-chromosome parallel search using ProcessPoolExecutor.
+
+        Each chromosome is sent to a worker process as a separate task.
+        Serialization overhead is real (~0.5s per large chromosome) but the
+        per-chromosome parallelism provides ~N_WORKERS× speedup on the search itself.
+        """
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        import multiprocessing as mp
+
+        if n_workers is None:
+            n_workers = min(mp.cpu_count() or 4, 8, len(self.genomes))
+
+        tasks = [
+            (primer, rc, plen, chrom, seq, max_hits)
+            for chrom, seq in self.genomes.items()
+        ]
+
+        all_hits = []
+        total = 0
+
+        with ProcessPoolExecutor(max_workers=n_workers) as exe:
+            futures = {exe.submit(_parallel_chrom_worker, t): t[3] for t in tasks}
+            for fut in as_completed(futures):
+                chrom_name = futures[fut]
+                try:
+                    chrom_hits, chrom_total = fut.result()
+                    all_hits.extend(chrom_hits)
+                    total += chrom_total
+                    if chrom_hits:
+                        progress_print(
+                            f"    {chrom_name}: {chrom_total} hits (running total: {total:,})"
+                        )
+                    if max_hits and total >= max_hits:
+                        # Cancel remaining futures
+                        for f in futures:
+                            f.cancel()
+                        break
+                except Exception as e:
+                    progress_print(f"    WARNING: worker failed for {chrom_name}: {e}")
+
+        return all_hits[:max_hits] if max_hits else all_hits
+
     @property
     def is_loaded(self):
         return self._loaded and bool(self.genomes)

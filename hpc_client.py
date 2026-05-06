@@ -31,7 +31,9 @@ import argparse
 import base64
 import io
 import re
+import shlex
 import tarfile
+import datetime
 from pathlib import Path
 
 try:
@@ -39,6 +41,11 @@ try:
 except ImportError:
     print("Error: paramiko is required. Install with: pip install paramiko")
     sys.exit(1)
+
+
+def _log(message: str):
+    ts = datetime.datetime.now().strftime("%H:%M:%S")
+    print(f"[{ts}] {message}", flush=True)
 
 
 class HPCClient:
@@ -53,15 +60,22 @@ class HPCClient:
         # Default parameters
         self.params = {
             "FAMILY_NAME": "HERVK9",
-            "HG38_FA": "",           # Path to genome FASTA on HPC (set after connect)
+            "SPECIES": "human",
+            "ASSEMBLY": "hg38",      # UCSC assembly/build used for automatic loading
+            "LOCAL_ASSEMBLY_PATH": "",  # Optional genome FASTA path on HPC
             "BASE_OUT_DIR": "results",
-            "K": 18,
+            "K": 6,
+            "PCA_DIMS": 40,
+            "N_EPOCHS": 120,
+            "RANDOM_STATE": 0,       # 0 => multicore UMAP
+            "SKIP_TSNE": 1,
             "PRIMER_K": 18,
             "TOP_N_GLOBAL": 8,
             "TOP_N_CLUSTER": 5,
             "TOP_N_FORWARD_PRIMERS": 3,
             "MIN_SEQUENCES_FOR_CLUSTERING": 10,
             "PRIMER_TIMEOUT": 120,
+            "FETCH_WORKERS": 10,
             "all_te_file": "",       # Path to input CSV on HPC
             "te_counts": "",
             # Scheduler resources (used for both LSF and Slurm)
@@ -91,10 +105,24 @@ class HPCClient:
         self._transport = None
 
         def keyboard_interactive_handler(title, instructions, prompt_list):
-            """Handle keyboard-interactive authentication."""
+            """Handle keyboard-interactive authentication (supports Duo 2FA).
+
+            First prompt is always the password.  If a second prompt arrives
+            (Duo passcode / option), send "1" to trigger a Duo Push — the user
+            must approve on their phone before the SSH handshake completes.
+            """
             responses = []
-            for prompt, show_input in prompt_list:
-                responses.append(self._password)
+            for i, (prompt, show_input) in enumerate(prompt_list):
+                p = prompt.lower()
+                if i == 0 or "password" in p:
+                    responses.append(self._password)
+                elif "passcode" in p or "option" in p or "duo" in p or "factor" in p:
+                    # Send "1" to select Duo Push; change to a TOTP code if preferred
+                    print("  [Duo] Sending push request (approve on your phone)…")
+                    responses.append("1")
+                else:
+                    # Unknown additional prompt — send password as a safe fallback
+                    responses.append(self._password)
             return responses
 
         # Use Transport directly for more control
@@ -211,6 +239,102 @@ class HPCClient:
         lines = "\n".join(f"module load {m}" for m in mods.split())
         return lines
 
+    def _venv_setup_block(self):
+        """Return robust virtualenv setup for login/compute node differences."""
+        return f'''# --- Virtual environment setup ---
+echo "[$(date +%H:%M:%S)] Host diagnostics before venv:"
+echo "  hostname=$(hostname)"
+echo "  pwd=$(pwd)"
+echo "  user=$(whoami)"
+echo "  shell=$SHELL"
+echo "  scheduler={self.scheduler or 'unknown'}"
+echo "  SLURM_JOB_ID=${{SLURM_JOB_ID:-}} LSB_JOBID=${{LSB_JOBID:-}}"
+echo "  SLURM_CPUS_PER_TASK=${{SLURM_CPUS_PER_TASK:-}} LSB_DJOB_NUMPROC=${{LSB_DJOB_NUMPROC:-}}"
+echo "  nproc=$(nproc 2>/dev/null || echo N/A)"
+echo "  TMPDIR=${{TMPDIR:-/tmp}}"
+echo "  PATH=$PATH"
+VENV_DIR="$HOME/te_analysis_venv"
+PYTHON_BIN="${{TE_PYTHON:-python3}}"
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+    PYTHON_BIN=python
+fi
+
+if [ -x "$VENV_DIR/bin/python" ]; then
+    "$VENV_DIR/bin/python" -c "import sys; print(sys.version)" >/dev/null 2>&1 || {{
+        echo "[$(date +%H:%M:%S)] Existing venv is not usable on this node; recreating $VENV_DIR ..."
+        rm -rf "$VENV_DIR"
+    }}
+fi
+
+if [ ! -d "$VENV_DIR" ]; then
+    echo "[$(date +%H:%M:%S)] Creating virtual environment at $VENV_DIR with $PYTHON_BIN ..."
+    "$PYTHON_BIN" -m venv "$VENV_DIR"
+fi
+
+source "$VENV_DIR/bin/activate"
+export NUMBA_CACHE_DIR="${{TMPDIR:-/tmp}}/gameca_numba_cache_$USER"
+mkdir -p "$NUMBA_CACHE_DIR"
+THREADS="{self.params['CPUS']}"
+if [ -n "${{SLURM_CPUS_PER_TASK:-}}" ]; then
+    THREADS="$SLURM_CPUS_PER_TASK"
+elif [ -n "${{LSB_DJOB_NUMPROC:-}}" ]; then
+    THREADS="$LSB_DJOB_NUMPROC"
+fi
+export OMP_NUM_THREADS="$THREADS"
+export MKL_NUM_THREADS="$THREADS"
+export OPENBLAS_NUM_THREADS="$THREADS"
+export NUMEXPR_NUM_THREADS="$THREADS"
+export NUMBA_NUM_THREADS="$THREADS"
+export VECLIB_MAXIMUM_THREADS="$THREADS"
+echo "[$(date +%H:%M:%S)] NUMBA_CACHE_DIR: $NUMBA_CACHE_DIR"
+echo "[$(date +%H:%M:%S)] Thread env: OMP=$OMP_NUM_THREADS MKL=$MKL_NUM_THREADS OPENBLAS=$OPENBLAS_NUM_THREADS NUMBA=$NUMBA_NUM_THREADS"
+echo "[$(date +%H:%M:%S)] Python: $(python --version 2>&1)"
+echo "[$(date +%H:%M:%S)] Pip: $(python -m pip --version 2>&1)"
+REQ_FILE="{self.remote_work_dir}/requirements.txt"
+REQ_HASH_FILE="$VENV_DIR/.gameca_requirements.sha256"
+REQ_HASH=$(python - "$REQ_FILE" <<'PYHASH'
+import hashlib, pathlib, sys
+p = pathlib.Path(sys.argv[1])
+print(hashlib.sha256(p.read_bytes()).hexdigest() if p.exists() else "missing")
+PYHASH
+)
+PIP_START=$SECONDS
+if [ ! -f "$REQ_HASH_FILE" ] || [ "$(cat "$REQ_HASH_FILE" 2>/dev/null)" != "$REQ_HASH" ]; then
+    echo "[$(date +%H:%M:%S)] Requirements changed or first run; installing dependencies ..."
+    python -m pip install --quiet --upgrade pip
+    python -m pip install --quiet --prefer-binary -r "$REQ_FILE"
+    echo "$REQ_HASH" > "$REQ_HASH_FILE"
+    echo "[$(date +%H:%M:%S)] Dependency install took $((SECONDS - PIP_START))s"
+else
+    echo "[$(date +%H:%M:%S)] Requirements unchanged; skipping pip install"
+fi
+python - <<'PYINFO'
+import importlib, os, sys
+print(f"[PYINFO] executable={{sys.executable}}")
+print(f"[PYINFO] version={{sys.version.split()[0]}}")
+print(f"[PYINFO] NUMBA_CACHE_DIR={{os.environ.get('NUMBA_CACHE_DIR')}}")
+for name in ["numpy", "pandas", "sklearn", "umap", "hdbscan", "numba"]:
+    try:
+        mod = importlib.import_module(name)
+        print(f"[PYINFO] {{name}}={{getattr(mod, '__version__', 'unknown')}}")
+    except Exception as exc:
+        print(f"[PYINFO] {{name}}=IMPORT_FAILED {{type(exc).__name__}}: {{exc}}")
+PYINFO
+'''
+
+    def _mafft_setup_block(self):
+        """Return MAFFT setup that does not fail on broken conda installations."""
+        return '''# Install MAFFT if not available
+if ! command -v mafft >/dev/null 2>&1; then
+    if command -v conda >/dev/null 2>&1; then
+        echo "[$(date +%H:%M:%S)] Installing MAFFT via conda ..."
+        conda install -y -c bioconda mafft 2>/dev/null || echo "  (MAFFT install skipped — conda failed)"
+    else
+        echo "  (MAFFT not found and conda is unavailable; alignment may fail if MAFFT is required)"
+    fi
+fi
+'''
+
     def _submit_job_cmd(self, job_script):
         """Return the scheduler command to submit a job script."""
         if self.scheduler == "slurm":
@@ -259,6 +383,7 @@ class HPCClient:
         if not self.connected:
             raise RuntimeError("Not connected to HPC")
 
+        _log(f"Remote command start (timeout={timeout}s, stream={stream_output}): {command[:240]}")
         channel = self._transport.open_session()
         channel.settimeout(timeout)
         channel.exec_command(command)
@@ -268,6 +393,7 @@ class HPCClient:
         err = b""
 
         import time
+        start_time = time.time()
         last_output_time = time.time()
 
         while True:
@@ -326,13 +452,24 @@ class HPCClient:
 
         exit_code = channel.recv_exit_status()
         channel.close()
+        elapsed = time.time() - start_time
+        _log(
+            f"Remote command done exit={exit_code} elapsed={elapsed:.1f}s "
+            f"stdout={len(out):,}B stderr={len(err):,}B"
+        )
 
         return out.decode(), err.decode(), exit_code
 
     def preview_family_count(self) -> int:
         """Preview the number of sequences matching the family name."""
         if not self.params["all_te_file"]:
-            print("Error: all_te_file path not set")
+            print("\nNo all_te_file set.")
+            print(
+                f"HPC auto-load mode will parse RepeatMasker for "
+                f"family '{self.params['FAMILY_NAME']}' for "
+                f"{self.params['SPECIES']} ({self.params['ASSEMBLY']}) "
+                "when the job runs."
+            )
             return -1
 
         family = self.params["FAMILY_NAME"]
@@ -369,14 +506,19 @@ class HPCClient:
     def set_parameter_interactive(self):
         """Interactive menu to set parameters."""
         str_params = {
-            "1": "FAMILY_NAME", "2": "HG38_FA", "3": "BASE_OUT_DIR",
+            "1": "FAMILY_NAME", "2": "SPECIES", "3": "BASE_OUT_DIR",
             "11": "all_te_file", "12": "te_counts",
             "13": "QUEUE", "14": "WALLTIME", "15": "MODULES",
+            "17": "ASSEMBLY",
+            "19": "LOCAL_ASSEMBLY_PATH",
         }
         int_params = {
             "4": "K", "5": "PRIMER_K", "6": "TOP_N_GLOBAL",
             "7": "TOP_N_CLUSTER", "8": "MIN_SEQUENCES_FOR_CLUSTERING",
             "9": "PRIMER_TIMEOUT", "10": "MEM_MB", "16": "CPUS",
+            "18": "FETCH_WORKERS",
+            "20": "PCA_DIMS", "21": "N_EPOCHS", "22": "RANDOM_STATE",
+            "23": "SKIP_TSNE",
         }
 
         while True:
@@ -395,13 +537,21 @@ class HPCClient:
                 print(f"  [{num:>2}] {key:<35} = {val}")
             print()
             print("  Descriptions:")
-            print("    [2]  HG38_FA: Path to genome FASTA on HPC (enables local extraction)")
-            print("    [4]  K: K-mer size for clustering (default: 18)")
+            print("    [1]  FAMILY_NAME: TE family repName to analyse")
+            print("    [2]  SPECIES: human or mouse")
+            print("    [4]  K: K-mer size for clustering")
+            print("    [20] PCA_DIMS: SVD dimensions before UMAP (40 is faster, 50 default quality)")
+            print("    [21] N_EPOCHS: UMAP epochs (120 fast, 200 more thorough)")
+            print("    [22] RANDOM_STATE: 0 enables multicore UMAP; nonzero is reproducible but slower")
+            print("    [23] SKIP_TSNE: 1 skips t-SNE for speed; UMAP/PCA outputs remain")
             print("    [9]  PRIMER_TIMEOUT: Seconds before random-sampling fallback")
             print("    [10] MEM_MB: Memory request in MB (12000 = 12 GB)")
-            print("    [11] all_te_file: Input CSV — chr/start/stop/TE_name/strand columns")
+            print("    [11] all_te_file: Optional input CSV. Leave blank to auto-load by family name.")
             print("    [14] WALLTIME: Job time limit HH:MM")
             print("    [15] MODULES: Space-separated module names to load (e.g. python/3.11)")
+            print("    [17] ASSEMBLY: UCSC assembly/build (human: hg38/hg19; mouse: mm10/mm39)")
+            print("    [18] FETCH_WORKERS: UCSC fetch workers for automatic loading")
+            print("    [19] LOCAL_ASSEMBLY_PATH: Optional local FASTA on the cluster")
             print()
             print("  [p]  Preview family count")
             print("  [r]  Run analysis")
@@ -422,6 +572,12 @@ class HPCClient:
                 val = input(f"  {key} [{cur}]: ").strip()
                 if val:
                     self.params[key] = val
+                    if key == "SPECIES":
+                        species = val.strip().lower()
+                        if species in {"human", "homo sapiens"} and self.params.get("ASSEMBLY") in {"mm10", "mm39", ""}:
+                            self.params["ASSEMBLY"] = "hg38"
+                        elif species in {"mouse", "mus musculus"} and self.params.get("ASSEMBLY") in {"hg38", "hg19", ""}:
+                            self.params["ASSEMBLY"] = "mm10"
             elif choice in int_params:
                 key = int_params[choice]
                 cur = self.params.get(key, "")
@@ -436,6 +592,107 @@ class HPCClient:
 
         return False
 
+    def _using_auto_family_load(self):
+        """Return True when the pipeline should build input data from family/build."""
+        return not bool(str(self.params.get("all_te_file", "")).strip())
+
+    def _pipeline_cli_args(self):
+        """Build shell-safe query.py CLI args for explicit CSV or auto-load mode."""
+        args = [
+            "--family", self.params["FAMILY_NAME"],
+            "--output", self.params["BASE_OUT_DIR"],
+            "--kmer", str(self.params["K"]),
+            "--pca-dims", str(self.params["PCA_DIMS"]),
+            "--n-epochs", str(self.params["N_EPOCHS"]),
+            "--random-state", str(self.params["RANDOM_STATE"]),
+            "--primer-kmer", str(self.params["PRIMER_K"]),
+            "--top-global", str(self.params["TOP_N_GLOBAL"]),
+            "--top-cluster", str(self.params["TOP_N_CLUSTER"]),
+            "--min-sequences", str(self.params["MIN_SEQUENCES_FOR_CLUSTERING"]),
+            "--primer-timeout", str(self.params["PRIMER_TIMEOUT"]),
+        ]
+
+        genome = str(self.params.get("LOCAL_ASSEMBLY_PATH", "")).strip()
+        input_csv = str(self.params.get("all_te_file", "")).strip()
+
+        if input_csv:
+            args += ["--input", input_csv]
+        else:
+            args += [
+                "--local",
+                "--assembly", self.params["ASSEMBLY"],
+                "--fetch-workers", str(self.params["FETCH_WORKERS"]),
+            ]
+
+        if genome:
+            args += ["--genome", genome]
+        else:
+            args.append("--skip-genome")
+
+        if int(self.params.get("SKIP_TSNE", 1)):
+            args.append("--skip-tsne")
+
+        cli = " ".join(shlex.quote(str(arg)) for arg in args)
+        _log(f"Pipeline CLI args: {cli}")
+        return cli
+
+    def _input_preflight_block(self, error_log=None):
+        """Return bash pre-flight checks for the selected data-loading mode."""
+        input_csv = str(self.params.get("all_te_file", "")).strip()
+        if input_csv:
+            quoted = input_csv.replace('"', '\\"')
+            if error_log:
+                return f'''if [ ! -f "{quoted}" ]; then
+    echo "FATAL: Input file not found: {quoted}" | tee -a $ERROR_LOG
+    echo "1" > {error_log}
+    exit 1
+fi
+echo "  Input data: OK ({quoted})"'''
+            return f'''if [ ! -f "{quoted}" ]; then
+    echo "FATAL: Input file not found: {quoted}"
+    exit 1
+fi
+echo "  Input data: OK ({quoted})"'''
+
+        species = self.params["SPECIES"]
+        assembly = self.params["ASSEMBLY"]
+        family = self.params["FAMILY_NAME"]
+        return (
+            f'echo "  Input data: AUTO from RepeatMasker '
+            f'(family={family}, species={species}, assembly={assembly})"'
+        )
+
+    def _upload_text_file(self, local_path: Path, remote_path: str, label: str):
+        """Upload a text file through SFTP or chunked base64 shell commands."""
+        with open(local_path, 'r') as f:
+            content = f.read()
+
+        if self.use_sftp and self.sftp:
+            _log(f"Uploading {label} via SFTP ({len(content):,} bytes)")
+            with self.sftp.file(remote_path, 'w') as f:
+                f.write(content)
+        else:
+            encoded_full = base64.b64encode(content.encode()).decode()
+            chunk_size = 65000
+            chunks = [encoded_full[i:i+chunk_size] for i in range(0, len(encoded_full), chunk_size)]
+            _log(f"Uploading {label} via shell base64 ({len(content):,} bytes, {len(chunks)} chunk(s))")
+
+            cmd = f"echo '{chunks[0]}' | base64 -d > {remote_path}"
+            out, err, code = self.run_command(cmd, timeout=30)
+            if code != 0:
+                print(f"Failed to upload {label} (chunk 1): {err}")
+                return False
+
+            for i, chunk in enumerate(chunks[1:], 2):
+                cmd = f"echo '{chunk}' | base64 -d >> {remote_path}"
+                out, err, code = self.run_command(cmd, timeout=30)
+                if code != 0:
+                    print(f"Failed to upload {label} (chunk {i}/{len(chunks)}): {err}")
+                    return False
+
+        _log(f"Uploaded {label} to {remote_path}")
+        return True
+
     def upload_script(self):
         """Upload the analysis script to HPC with current parameters."""
         # Read local query.py
@@ -445,120 +702,86 @@ class HPCClient:
             print(f"Error: query.py not found at {local_script}")
             return False
 
-        with open(local_script, 'r') as f:
-            script_content = f.read()
-
-        # Create modified script with parameters injected
-        param_block = f'''# ==================== CONFIG ====================
-FAMILY_NAME = "{self.params['FAMILY_NAME']}"
-HG38_FA = "{self.params['HG38_FA']}"
-BASE_OUT_DIR = Path("{self.params['BASE_OUT_DIR']}")
-K = {self.params['K']}  # K-mer size for clustering
-PRIMER_K = {self.params['PRIMER_K']}  # K-mer size for primer design
-TOP_N_GLOBAL = {self.params['TOP_N_GLOBAL']}
-TOP_N_CLUSTER = {self.params['TOP_N_CLUSTER']}
-TOP_N_FORWARD_PRIMERS = {self.params['TOP_N_FORWARD_PRIMERS']}
-MIN_SEQUENCES_FOR_CLUSTERING = {self.params['MIN_SEQUENCES_FOR_CLUSTERING']}
-PRIMER_SEARCH_TIMEOUT_OVERRIDE = {self.params['PRIMER_TIMEOUT']}  # Timeout for primer search (uses random sampling if exceeded)
-DEBUG = True  # Enable progress output
-'''
-
-        # Add data loading code
-        data_load_block = f'''
-# ==================== LOAD INPUT DATA ====================
-import pandas as pd
-print("Loading input data...")
-df = pd.read_csv("{self.params['all_te_file']}")
-print(f"Loaded all_te_file: {{len(df)}} rows")
-'''
-
-        if self.params['te_counts']:
-            data_load_block += f'''
-df2 = pd.read_csv("{self.params['te_counts']}")
-print(f"Loaded te_counts: {{len(df2)}} rows")
-'''
-
-        # Find and replace the config section
-        # Replace the config block
-        config_pattern = r'# ==================== CONFIG ====================.*?# ================================================'
-        modified_script = re.sub(config_pattern, param_block + '\n# ================================================',
-                                 script_content, flags=re.DOTALL)
-
-        # Insert data loading before "# ==================== LOAD AND FILTER DATA ===================="
-        load_marker = "# ==================== LOAD AND FILTER DATA ===================="
-        modified_script = modified_script.replace(load_marker, data_load_block + "\n" + load_marker)
-
+        _log("Uploading pipeline scripts and requirements to cluster")
         # Upload to remote
         remote_script = f"{self.remote_work_dir}/te_analysis_run.py"
-
-        if self.use_sftp and self.sftp:
-            with self.sftp.file(remote_script, 'w') as f:
-                f.write(modified_script)
-        else:
-            # Upload via chunked base64 to avoid "Argument list too long" errors.
-            # Shell argument limits are typically 128KB-2MB, and our script can exceed that
-            # after base64 encoding. We split into ~48KB raw chunks (~64KB base64).
-            encoded_full = base64.b64encode(modified_script.encode()).decode()
-            chunk_size = 65000  # base64 chars per chunk — safe for any shell
-            chunks = [encoded_full[i:i+chunk_size] for i in range(0, len(encoded_full), chunk_size)]
-
-            print(f"Uploading script ({len(modified_script)} bytes, {len(chunks)} chunks)...")
-
-            # First chunk: overwrite file
-            cmd = f"echo '{chunks[0]}' | base64 -d > {remote_script}"
-            out, err, code = self.run_command(cmd, timeout=30)
-            if code != 0:
-                print(f"Failed to upload script (chunk 1): {err}")
-                return False
-
-            # Remaining chunks: append
-            for i, chunk in enumerate(chunks[1:], 2):
-                cmd = f"echo '{chunk}' | base64 -d >> {remote_script}"
-                out, err, code = self.run_command(cmd, timeout=30)
-                if code != 0:
-                    print(f"Failed to upload script (chunk {i}/{len(chunks)}): {err}")
-                    return False
-
-            print(f"  Uploaded {len(chunks)} chunks successfully")
+        if not self._upload_text_file(local_script, remote_script, "query.py"):
+            return False
 
         self.remote_script_path = remote_script
-        print(f"Uploaded analysis script to {remote_script}")
+
+        # Keep the cluster copy in sync with local modules imported by query.py.
+        module_names = [
+            "te_prep.py",
+            "te_genome.py",
+            "te_clustering.py",
+            "te_primers.py",
+            "te_alignment.py",
+            "te_motif.py",
+            "te_go.py",
+            "te_expression.py",
+            "te_enrichment.py",
+            "te_fast.pyx",
+            "setup_cython.py",
+            "ui.py",
+        ]
+        for name in module_names:
+            local_module = Path(__file__).parent / name
+            if local_module.exists():
+                remote_module = f"{self.remote_work_dir}/{name}"
+                if not self._upload_text_file(local_module, remote_module, name):
+                    return False
+            else:
+                _log(f"Optional module not found locally, skipping: {name}")
 
         # Upload requirements.txt for venv setup
         local_reqs = Path(__file__).parent / "requirements.txt"
         if local_reqs.exists():
             remote_reqs = f"{self.remote_work_dir}/requirements.txt"
-            with open(local_reqs, 'r') as f:
-                reqs_content = f.read()
+            if not self._upload_text_file(local_reqs, remote_reqs, "requirements.txt"):
+                print("Warning: Failed to upload requirements.txt")
 
-            if self.use_sftp and self.sftp:
-                with self.sftp.file(remote_reqs, 'w') as f:
-                    f.write(reqs_content)
-            else:
-                encoded = base64.b64encode(reqs_content.encode()).decode()
-                cmd = f"echo '{encoded}' | base64 -d > {remote_reqs}"
-                out, err, code = self.run_command(cmd, timeout=30)
-                if code != 0:
-                    print(f"Warning: Failed to upload requirements.txt: {err}")
-
-            print(f"Uploaded requirements.txt to {remote_reqs}")
-
+        _log("Pipeline upload complete")
         return True
+
+    def _log_run_configuration(self, mode: str):
+        input_mode = (
+            f"input_csv={self.params.get('all_te_file')}"
+            if not self._using_auto_family_load()
+            else f"auto family load ({self.params['SPECIES']}, {self.params['ASSEMBLY']})"
+        )
+        genome = self.params.get("LOCAL_ASSEMBLY_PATH") or "(none)"
+        _log(
+            f"{mode} configuration: family={self.params['FAMILY_NAME']}, "
+            f"{input_mode}, local_assembly_path={genome}, "
+            f"out={self.params['BASE_OUT_DIR']}, k={self.params['K']}, "
+            f"pca_dims={self.params['PCA_DIMS']}, n_epochs={self.params['N_EPOCHS']}, "
+            f"random_state={self.params['RANDOM_STATE']}, skip_tsne={self.params['SKIP_TSNE']}, "
+            f"primer_k={self.params['PRIMER_K']}, mem={self.params['MEM_MB']}MB, "
+            f"cpus={self.params['CPUS']}, walltime={self.params['WALLTIME']}, "
+            f"queue={self.params['QUEUE']}"
+        )
 
     def submit_batch_job(self):
         """Submit the analysis as a batch job on HPC. Returns immediately after submission."""
-        if not self.params["all_te_file"]:
-            print("Error: all_te_file path must be set")
-            return False
+        self._log_run_configuration("Batch")
+        if self._using_auto_family_load():
+            print(
+                "\nNo all_te_file set. The job will automatically load loci "
+                f"for family '{self.params['FAMILY_NAME']}' from "
+                f"RepeatMasker for {self.params['SPECIES']} ({self.params['ASSEMBLY']})."
+            )
+            confirm_msg = "Proceed with automatic family loading? (y/n): "
+        else:
+            # Preview count first
+            count = self.preview_family_count()
+            if count <= 0:
+                confirm = input("\nNo sequences found. Continue anyway? (y/n): ").strip().lower()
+                if confirm != 'y':
+                    return False
+            confirm_msg = f"\nProceed with analysis for {count} sequences? (y/n): "
 
-        # Preview count first
-        count = self.preview_family_count()
-        if count <= 0:
-            confirm = input("\nNo sequences found. Continue anyway? (y/n): ").strip().lower()
-            if confirm != 'y':
-                return False
-
-        confirm = input(f"\nProceed with analysis for {count} sequences? (y/n): ").strip().lower()
+        confirm = input(confirm_msg).strip().lower()
         if confirm != 'y':
             return False
 
@@ -584,27 +807,18 @@ print(f"Loaded te_counts: {{len(df2)}} rows")
         # Build the scheduler-agnostic job script
         sched_header = self._job_script_header(job_name, job_out, job_err)
         module_block = self._module_load_block()
+        venv_block = self._venv_setup_block()
+        mafft_block = self._mafft_setup_block()
+        input_preflight = self._input_preflight_block(error_log=job_done)
+        pipeline_args = self._pipeline_cli_args()
+        _log(f"Creating batch job script at {job_script}")
 
         bsub_script = f'''#!/bin/bash
 {sched_header}
 {module_block}
 
-# --- Virtual environment setup ---
-VENV_DIR="$HOME/te_analysis_venv"
-if [ ! -d "$VENV_DIR" ]; then
-    echo "[$(date +%H:%M:%S)] Creating virtual environment at $VENV_DIR ..."
-    python -m venv "$VENV_DIR"
-fi
-source "$VENV_DIR/bin/activate"
-echo "[$(date +%H:%M:%S)] Installing/verifying dependencies ..."
-pip install --quiet --upgrade pip
-pip install --quiet --prefer-binary -r {self.remote_work_dir}/requirements.txt
-
-# Install MAFFT if not available
-if ! command -v mafft &>/dev/null; then
-    echo "[$(date +%H:%M:%S)] Installing MAFFT via conda ..."
-    conda install -y -c bioconda mafft 2>/dev/null || echo "  (MAFFT install skipped — conda not available)"
-fi
+{venv_block}
+{mafft_block}
 
 echo "=========================================================="
 echo " TE Analysis Pipeline — Batch Mode"
@@ -617,6 +831,15 @@ echo " Memory req:  12 GB"
 echo " Working dir: {self.remote_work_dir}"
 echo " Output dir:  {self.remote_output_dir}"
 echo " Family:      {self.params['FAMILY_NAME']}"
+echo " Species:     {self.params['SPECIES']}"
+echo " Assembly:    {self.params['ASSEMBLY']}"
+echo " Input mode:  {'auto RepeatMasker/UCSC' if self._using_auto_family_load() else 'provided CSV'}"
+echo " Pipeline:    {pipeline_args}"
+echo " K-mer:       {self.params['K']}"
+echo " PCA dims:    {self.params['PCA_DIMS']}"
+echo " UMAP epochs: {self.params['N_EPOCHS']}"
+echo " Rand state:  {self.params['RANDOM_STATE']} (0 means multicore UMAP)"
+echo " Skip t-SNE:  {self.params['SKIP_TSNE']}"
 echo " Timeout:     {self.params['PRIMER_TIMEOUT']}s"
 echo " Python:      $(python --version 2>&1)"
 echo "=========================================================="
@@ -634,6 +857,12 @@ cd {self.remote_work_dir}
 # Pre-flight checks
 echo ""
 echo "[$(date +%H:%M:%S)] Pre-flight checks..."
+echo "[$(date +%H:%M:%S)] Job script: {job_script}"
+echo "[$(date +%H:%M:%S)] Error log:  $ERROR_LOG"
+echo "[$(date +%H:%M:%S)] Disk space:"
+df -h . "${{TMPDIR:-/tmp}}" 2>/dev/null || true
+echo "[$(date +%H:%M:%S)] Working directory files:"
+ls -lh {self.remote_work_dir}/te_analysis_run.py {self.remote_work_dir}/te_clustering.py {self.remote_work_dir}/requirements.txt 2>/dev/null || true
 
 if [ ! -f "{self.remote_script_path}" ]; then
     echo "FATAL: Script not found: {self.remote_script_path}" | tee -a $ERROR_LOG
@@ -642,32 +871,29 @@ if [ ! -f "{self.remote_script_path}" ]; then
 fi
 echo "  Script:     OK"
 
-if [ ! -f "{self.params['all_te_file']}" ]; then
-    echo "FATAL: Input file not found: {self.params['all_te_file']}" | tee -a $ERROR_LOG
-    echo "1" > {job_done}
-    exit 1
-fi
-echo "  Input data: OK"
+{input_preflight}
 
-if [ -f "{self.params['HG38_FA']}" ]; then
-    echo "  Genome:     OK ($(du -sh "{self.params['HG38_FA']}" 2>/dev/null | cut -f1))"
+if [ -n "{self.params['LOCAL_ASSEMBLY_PATH']}" ] && [ -f "{self.params['LOCAL_ASSEMBLY_PATH']}" ]; then
+    echo "  Genome:     OK ($(du -sh "{self.params['LOCAL_ASSEMBLY_PATH']}" 2>/dev/null | cut -f1))"
 else
-    echo "  Genome:     NOT FOUND — will use UCSC API fallback" | tee -a $ERROR_LOG
+    echo "  Genome:     not provided — will use UCSC API fallback and skip genome-wide primer search" | tee -a $ERROR_LOG
 fi
 
 echo ""
 echo "[$(date +%H:%M:%S)] Starting pipeline..."
+echo "[$(date +%H:%M:%S)] Command: python -u {self.remote_script_path} {pipeline_args}"
 echo "=========================================================="
 
 SECONDS=0
-python -u {self.remote_script_path} --primer-timeout {self.params['PRIMER_TIMEOUT']} 2>&1 | tee -a $ERROR_LOG
+python -u {self.remote_script_path} {pipeline_args} 2>&1 | tee -a $ERROR_LOG
 EXIT_CODE=${{PIPESTATUS[0]}}
+PIPELINE_SECONDS=$SECONDS
 
 echo ""
 echo "=========================================================="
 echo " Pipeline finished"
 echo " Exit code:   $EXIT_CODE"
-echo " Runtime:     $((SECONDS / 60))m $((SECONDS % 60))s"
+echo " Runtime:     $((PIPELINE_SECONDS / 60))m $((PIPELINE_SECONDS % 60))s"
 echo " Date:        $(date)"
 
 if [ $EXIT_CODE -ne 0 ]; then
@@ -711,6 +937,7 @@ exit $EXIT_CODE
         # Submit the job
         sched_label = getattr(self, "scheduler", "lsf").upper()
         print(f"\nSubmitting job via {sched_label}...")
+        _log(f"Submitting scheduler command: {self._submit_job_cmd(job_script)}")
         submit_cmd = self._submit_job_cmd(job_script)
         out, err, code = self.run_command(submit_cmd, timeout=30)
 
@@ -763,18 +990,24 @@ exit $EXIT_CODE
         then runs the pipeline with real-time output streaming.
         This keeps the SSH connection active and streams all output back.
         """
-        if not self.params["all_te_file"]:
-            print("Error: all_te_file path must be set")
-            return False
+        self._log_run_configuration("Interactive")
+        if self._using_auto_family_load():
+            print(
+                "\nNo all_te_file set. The interactive job will automatically "
+                f"load loci for family '{self.params['FAMILY_NAME']}' from "
+                f"RepeatMasker for {self.params['SPECIES']} ({self.params['ASSEMBLY']})."
+            )
+            confirm_msg = "Proceed with automatic family loading? (y/n): "
+        else:
+            # Preview count
+            count = self.preview_family_count()
+            if count <= 0:
+                confirm = input("\nNo sequences found. Continue anyway? (y/n): ").strip().lower()
+                if confirm != 'y':
+                    return False
+            confirm_msg = f"\nProceed with interactive analysis for {count} sequences? (y/n): "
 
-        # Preview count
-        count = self.preview_family_count()
-        if count <= 0:
-            confirm = input("\nNo sequences found. Continue anyway? (y/n): ").strip().lower()
-            if confirm != 'y':
-                return False
-
-        confirm = input(f"\nProceed with interactive analysis for {count} sequences? (y/n): ").strip().lower()
+        confirm = input(confirm_msg).strip().lower()
         if confirm != 'y':
             return False
 
@@ -789,27 +1022,18 @@ exit $EXIT_CODE
         # Build runner script with comprehensive logging
         runner_script = f"{self.remote_work_dir}/te_analysis_runner.sh"
         module_block = self._module_load_block()
+        venv_block = self._venv_setup_block()
+        mafft_block = self._mafft_setup_block()
+        input_preflight = self._input_preflight_block()
+        pipeline_args = self._pipeline_cli_args()
+        _log(f"Creating interactive runner script at {runner_script}")
         runner_content = f'''#!/bin/bash
 set -e
 
 {module_block}
 
-# --- Virtual environment setup ---
-VENV_DIR="$HOME/te_analysis_venv"
-if [ ! -d "$VENV_DIR" ]; then
-    echo "[$(date +%H:%M:%S)] Creating virtual environment at $VENV_DIR ..."
-    python -m venv "$VENV_DIR"
-fi
-source "$VENV_DIR/bin/activate"
-echo "[$(date +%H:%M:%S)] Installing/verifying dependencies ..."
-pip install --quiet --upgrade pip
-pip install --quiet --prefer-binary -r {self.remote_work_dir}/requirements.txt
-
-# Install MAFFT if not available
-if ! command -v mafft &>/dev/null; then
-    echo "[$(date +%H:%M:%S)] Installing MAFFT via conda ..."
-    conda install -y -c bioconda mafft 2>/dev/null || echo "  (MAFFT install skipped — conda not available)"
-fi
+{venv_block}
+{mafft_block}
 
 echo "=========================================================="
 echo " TE Analysis Pipeline — Interactive Mode"
@@ -821,7 +1045,16 @@ echo " Memory req:  12 GB"
 echo " Working dir: {self.remote_work_dir}"
 echo " Output dir:  {self.remote_output_dir}"
 echo " Family:      {self.params['FAMILY_NAME']}"
+echo " Species:     {self.params['SPECIES']}"
+echo " Assembly:    {self.params['ASSEMBLY']}"
+echo " Input mode:  {'auto RepeatMasker/UCSC' if self._using_auto_family_load() else 'provided CSV'}"
+echo " Pipeline:    {pipeline_args}"
 echo " Primer K:    {self.params['PRIMER_K']}"
+echo " K-mer:       {self.params['K']}"
+echo " PCA dims:    {self.params['PCA_DIMS']}"
+echo " UMAP epochs: {self.params['N_EPOCHS']}"
+echo " Rand state:  {self.params['RANDOM_STATE']} (0 means multicore UMAP)"
+echo " Skip t-SNE:  {self.params['SKIP_TSNE']}"
 echo " Timeout:     {self.params['PRIMER_TIMEOUT']}s"
 echo "=========================================================="
 echo ""
@@ -830,41 +1063,44 @@ cd {self.remote_work_dir}
 
 # Verify files exist
 echo "[$(date +%H:%M:%S)] Checking prerequisites..."
+echo "[$(date +%H:%M:%S)] Runner: {runner_script}"
+echo "[$(date +%H:%M:%S)] Disk space:"
+df -h . "${{TMPDIR:-/tmp}}" 2>/dev/null || true
+echo "[$(date +%H:%M:%S)] Working directory files:"
+ls -lh {self.remote_work_dir}/te_analysis_run.py {self.remote_work_dir}/te_clustering.py {self.remote_work_dir}/requirements.txt 2>/dev/null || true
 if [ ! -f "{self.remote_script_path}" ]; then
     echo "FATAL: Script not found: {self.remote_script_path}"
     exit 1
 fi
 echo "  Script:     OK ({self.remote_script_path})"
 
-if [ ! -f "{self.params['all_te_file']}" ]; then
-    echo "FATAL: Input file not found: {self.params['all_te_file']}"
-    exit 1
-fi
-echo "  Input data: OK ({self.params['all_te_file']})"
+{input_preflight}
 
-if [ -f "{self.params['HG38_FA']}" ]; then
-    echo "  Genome:     OK ({self.params['HG38_FA']})"
-    GENOME_SIZE=$(du -sh "{self.params['HG38_FA']}" 2>/dev/null | cut -f1)
+if [ -n "{self.params['LOCAL_ASSEMBLY_PATH']}" ] && [ -f "{self.params['LOCAL_ASSEMBLY_PATH']}" ]; then
+    echo "  Genome:     OK ({self.params['LOCAL_ASSEMBLY_PATH']})"
+    GENOME_SIZE=$(du -sh "{self.params['LOCAL_ASSEMBLY_PATH']}" 2>/dev/null | cut -f1)
     echo "              Size: $GENOME_SIZE"
 else
-    echo "  Genome:     NOT FOUND — will use UCSC API fallback"
+    echo "  Genome:     not provided — will use UCSC API fallback and skip genome-wide primer search"
 fi
 
 echo ""
 echo "[$(date +%H:%M:%S)] Python version: $(python --version 2>&1)"
 echo "[$(date +%H:%M:%S)] Starting pipeline..."
+echo "[$(date +%H:%M:%S)] Command: python -u {self.remote_script_path} {pipeline_args}"
 echo "=========================================================="
 echo ""
 
 SECONDS=0
-python -u {self.remote_script_path} --primer-timeout {self.params['PRIMER_TIMEOUT']}
+python -u {self.remote_script_path} {pipeline_args}
 EXIT_CODE=$?
+PIPELINE_SECONDS=$SECONDS
 
 echo ""
 echo "=========================================================="
 echo " Pipeline finished"
 echo " Exit code:   $EXIT_CODE"
-echo " Runtime:     $((SECONDS / 60))m $((SECONDS % 60))s"
+echo " Runtime:     $((PIPELINE_SECONDS / 60))m $((PIPELINE_SECONDS % 60))s"
 echo " Date:        $(date)"
 if [ -d "{self.remote_output_dir}" ]; then
     RESULT_SIZE=$(du -sh "{self.remote_output_dir}" 2>/dev/null | cut -f1)
@@ -890,6 +1126,7 @@ exit $EXIT_CODE
         queue  = self.params["QUEUE"]
         bsub_cmd = self._interactive_alloc_cmd(runner_script, mem_mb, cpus, queue)
         sched_label = getattr(self, "scheduler", "lsf").upper()
+        _log(f"Interactive scheduler command: {bsub_cmd}")
 
         print("\n" + "=" * 60)
         print(f"SUBMITTING INTERACTIVE JOB  ({sched_label})")
@@ -1188,15 +1425,19 @@ exit $EXIT_CODE
         print("\n" + "=" * 60)
         print("te_prep — Download rmsk / Extract TE sequences")
         print("=" * 60)
-        build   = input("Genome build [hg38]: ").strip() or "hg38"
+        species = input("Species (human/mouse) [human]: ").strip().lower() or "human"
+        default_build = "mm10" if species in {"mouse", "mus musculus"} else "hg38"
+        build   = input(f"Assembly/build [{default_build}]: ").strip() or default_build
         family  = input("TE family name (e.g. HERVK): ").strip()
+        genome  = input("Local assembly FASTA path on cluster (blank = none): ").strip()
         out_dir = input(f"Remote output dir [{self.remote_work_dir}]: ").strip() or self.remote_work_dir
         extra   = input("Extra te_prep args (or blank): ").strip()
 
         fam_arg = f"--family {family}" if family else ""
+        genome_arg = f"--genome-fa {genome}" if genome else ""
         cmd = (
             f"cd {self.remote_work_dir} && "
-            f"python te_prep.py --build {build} {fam_arg} --out-dir {out_dir} {extra}"
+            f"python te_prep.py --build {build} {fam_arg} {genome_arg} --out-dir {out_dir} {extra}"
         )
         print(f"\nRunning: {cmd}\n")
         out, err, code = self.run_command(cmd, timeout=600)
@@ -1214,7 +1455,9 @@ exit $EXIT_CODE
         if not clustered:
             print("Clustered CSV path required.")
             return
-        build    = input("Genome build [hg38]: ").strip() or "hg38"
+        species  = input("Species (human/mouse) [human]: ").strip().lower() or "human"
+        default_build = "mm10" if species in {"mouse", "mus musculus"} else "hg38"
+        build    = input(f"Assembly/build [{default_build}]: ").strip() or default_build
         family   = input("TE family name [FAMILY]: ").strip() or "FAMILY"
         out_dir  = input(f"Remote output dir [{self.remote_work_dir}]: ").strip() or self.remote_work_dir
         jaspar   = input("JASPAR BED path (blank = auto-download): ").strip()

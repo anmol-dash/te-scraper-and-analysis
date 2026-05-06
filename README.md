@@ -192,8 +192,8 @@ All paths are configurable — no hardcoded site-specific locations.
 
 | Variable | Description |
 |---|---|
-| `HG38_FA` | Path to hg38 FASTA (enables fast local extraction) |
-| `MM10_FA` | Path to mm10 FASTA |
+| `HG38_FA` | Optional path to hg38 FASTA for `te_prep.py` |
+| `MM10_FA` | Optional path to mm10 FASTA for `te_prep.py` |
 | `TE_BASE_DIR` | Default working directory for te_prep output |
 | `TE_RMSK_DIR` | Directory where rmsk.txt.gz files are cached |
 | `TE_JASPAR_HG38` | Pre-downloaded JASPAR BED for hg38 |
@@ -351,8 +351,10 @@ Use option `[1] Configure parameters` in the menu. Key parameters:
 | Parameter | Description |
 |---|---|
 | `FAMILY_NAME` | TE family to analyse |
+| `SPECIES` | Species to analyse (`human` or `mouse`) |
+| `ASSEMBLY` | UCSC assembly/build (`hg38`, `hg19`, `mm10`, `mm39`) |
 | `all_te_file` | Input CSV path on cluster |
-| `HG38_FA` | Genome FASTA path on cluster |
+| `LOCAL_ASSEMBLY_PATH` | Optional genome FASTA path on cluster |
 | `QUEUE` | Scheduler queue / partition |
 | `MEM_MB` | Memory request in MB |
 | `CPUS` | CPU core count |

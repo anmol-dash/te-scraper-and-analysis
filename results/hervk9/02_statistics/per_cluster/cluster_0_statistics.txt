@@ -1,0 +1,16 @@
+============================================================
+STATISTICS — Cluster 0
+============================================================
+Dataset size: 8 sequences
+
+=== SEQUENCE LENGTH ===
+Mean: 500.0  Median: 500.0
+Std:  0.0  Range: [500, 500]
+
+=== GC CONTENT ===
+Mean: 0.419 (41.9%)
+Std:  0.007  Range: [0.410, 0.434]
+
+=== EXPRESSION COLUMNS ===
+Columns: 8
+Total expression — mean: 60.67  max: 78.53

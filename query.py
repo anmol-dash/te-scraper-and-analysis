@@ -5,19 +5,26 @@ query.py — TE Analysis Pipeline Orchestrator
 Stages:
   1. Load reference genome (GenomeCache)
   2. Load & filter TE data
-  3. Extract sequences (local genome or UCSC API)
-  4. Basic statistics
+  3. Extract sequences (local genome or parallel UCSC API)
+  4. Basic statistics (Cython-accelerated when te_fast is compiled)
   5. Clustering (UMAP / HDBSCAN) → te_clustering.py
   6. Visualization dashboard
   7. Primer design                → te_primers.py
   8. Alignment + CIAlign          → te_alignment.py
 
-Usage:
-  python query.py --input te_data.csv --family HERVK9 --genome /path/hg38.fa
-  python query.py --test                          # mock test data, no genome needed
-  python query.py --input data.csv --skip-genome  # skip primer genome search
+LOCAL MODE (no HPC, no file paths needed):
+  python query.py --local --family THE1D-int --assembly hg38
+  python query.py --local --family HERVK9 --assembly hg38 --genome /path/hg38.fa
+  python query.py --local --family THE1D-int --assembly hg38 --max-loci 100
 
-Can also be called programmatically after setting df in the calling scope.
+HPC MODE (default):
+  python query.py --input te_data.csv --family HERVK9 --genome /path/hg38.fa
+  python query.py --test
+
+Speed options:
+  --fetch-workers 20      # more parallel UCSC workers (default 10)
+  --parallel-primers      # parallel genome-wide primer search
+  python setup_cython.py build_ext --inplace   # compile Cython for batch ops
 """
 
 import argparse
@@ -27,6 +34,33 @@ import sys
 import time
 import traceback
 from pathlib import Path
+
+# ── HPC-only guard ────────────────────────────────────────────────────────────
+# query.py is designed to run on a SLURM or LSF cluster.  Bypass with --local
+# for local execution or --test for CI/unit-test mode.
+def _check_hpc_environment():
+    on_slurm = bool(os.environ.get("SLURM_JOB_ID") or os.environ.get("SLURM_NODELIST"))
+    on_lsf   = bool(os.environ.get("LSB_JOBID")    or os.environ.get("LSB_HOSTS"))
+    if on_slurm or on_lsf:
+        return
+    if "--test" in sys.argv or "--local" in sys.argv:
+        return
+    print(
+        "\n"
+        "  ╔══════════════════════════════════════════════════════════════╗\n"
+        "  ║  ERROR: query.py must run on an HPC cluster                  ║\n"
+        "  ║                                                              ║\n"
+        "  ║  No SLURM or LSF environment detected.                       ║\n"
+        "  ║                                                              ║\n"
+        "  ║  Run locally (auto-downloads rmsk, fetches seqs via UCSC):   ║\n"
+        "  ║    python query.py --local --family HERVK9 --assembly hg38  ║\n"
+        "  ║                                                              ║\n"
+        "  ║  Or submit via HPC:                                          ║\n"
+        "  ║    python ui.py --host <cluster> --user <username>           ║\n"
+        "  ╚══════════════════════════════════════════════════════════════╝\n",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 # Fix matplotlib backend before any plotting imports
 os.environ["MPLBACKEND"] = "Agg"
@@ -49,26 +83,54 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(
         description="TE Analysis Pipeline",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Local mode (no HPC, no file paths needed):\n"
+            "  python query.py --local --family THE1D-int --assembly hg38\n"
+            "  python query.py --local --family HERVK9 --assembly hg38 --genome /path/hg38.fa\n"
+        ),
     )
-    p.add_argument("--input",  type=str, default=None, help="Input CSV file")
-    p.add_argument("--family", type=str, default="HERVK9", help="TE family name")
-    p.add_argument("--genome", type=str, default=None,
+    p.add_argument("--input",    type=str, default=None, help="Input CSV file")
+    p.add_argument("--family",   type=str, default="HERVK9", help="TE family repName")
+    p.add_argument("--genome",   type=str, default=None,
                    help="Path to genome FASTA (enables local extraction + primer search)")
-    p.add_argument("--output", type=str, default="results",
+    p.add_argument("--output",   type=str, default="results",
                    help="Base output directory (default: results)")
-    p.add_argument("--kmer",   type=int, default=18, help="K-mer size (default: 18)")
-    p.add_argument("--primer-kmer", type=int, default=18, help="Primer k-mer size")
-    p.add_argument("--top-global",  type=int, default=8)
-    p.add_argument("--top-cluster", type=int, default=5)
-    p.add_argument("--min-sequences", type=int, default=10,
+    p.add_argument("--kmer",     type=int, default=6,
+                   help="K-mer size for clustering (default: 6; use --primer-kmer for primers)")
+    p.add_argument("--pca-dims", type=int, default=50,
+                   help="SVD components fed into UMAP/t-SNE clustering (default: 50)")
+    p.add_argument("--n-epochs", type=int, default=200,
+                   help="UMAP optimisation epochs for clustering (default: 200)")
+    p.add_argument("--random-state", type=int, default=42,
+                   help="Clustering random seed; pass 0 to enable multicore UMAP")
+    p.add_argument("--skip-tsne", action="store_true",
+                   help="Skip t-SNE during clustering for faster UMAP/PCA pipeline runs")
+    p.add_argument("--primer-kmer",  type=int, default=18, help="Primer k-mer size")
+    p.add_argument("--top-global",   type=int, default=8)
+    p.add_argument("--top-cluster",  type=int, default=5)
+    p.add_argument("--min-sequences",type=int, default=10,
                    help="Minimum sequences needed for clustering (default: 10)")
     p.add_argument("--primer-timeout", type=int, default=120,
                    help="Timeout for primer genome search in seconds (default: 120)")
-    p.add_argument("--test",        action="store_true", help="Run with mock test data")
-    p.add_argument("--debug",       action="store_true")
-    p.add_argument("--skip-genome", action="store_true", help="Skip genome-wide primer search")
-    p.add_argument("--skip-alignment", action="store_true")
-    p.add_argument("--skip-primers",   action="store_true")
+    # ── Local mode ─────────────────────────────────────────────────────────────
+    p.add_argument("--local",    action="store_true",
+                   help="Run locally: auto-download rmsk, fetch seqs via UCSC API")
+    p.add_argument("--assembly", type=str, default="hg38",
+                   help="Genome assembly for local mode: hg38, hg19, mm10, mm39 (default: hg38)")
+    p.add_argument("--rmsk-dir", type=str, default=None,
+                   help="Directory for rmsk cache files (default: ~/te_analysis/rmsk)")
+    p.add_argument("--max-loci", type=int, default=None,
+                   help="Cap number of TE loci (useful for quick tests)")
+    p.add_argument("--fetch-workers", type=int, default=10,
+                   help="Parallel UCSC fetch workers (default: 10)")
+    p.add_argument("--parallel-primers", action="store_true",
+                   help="Parallelize primer genome search across chromosomes")
+    # ── Misc ───────────────────────────────────────────────────────────────────
+    p.add_argument("--test",          action="store_true", help="Run with mock test data")
+    p.add_argument("--debug",         action="store_true")
+    p.add_argument("--skip-genome",   action="store_true", help="Skip genome-wide primer search")
+    p.add_argument("--skip-alignment",action="store_true")
+    p.add_argument("--skip-primers",  action="store_true")
     return p.parse_args(argv)
 
 
@@ -157,13 +219,186 @@ def create_test_data():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# LOCAL MODE HELPERS
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _load_local_data(args):
+    """Download rmsk (if needed), parse family loci, return DataFrame with coords.
+
+    Called when --local is set and --input is not provided.
+    """
+    from te_prep import download_rmsk, get_rmsk_path, parse_rmsk_family
+    from pathlib import Path
+
+    assembly = args.assembly
+    family   = args.family
+    rmsk_dir = args.rmsk_dir or str(Path.home() / "te_analysis" / "rmsk")
+
+    progress_print(f"LOCAL MODE: {family} on {assembly}")
+
+    # Auto-download rmsk if not present
+    rmsk_path_candidate = Path(rmsk_dir) / f"rmsk_{assembly}.txt.gz"
+    if not rmsk_path_candidate.exists():
+        progress_print(f"  rmsk_{assembly}.txt.gz not found — downloading (~150 MB, one-time)...")
+        download_rmsk(assembly, rmsk_dir)
+    else:
+        progress_print(f"  rmsk found: {rmsk_path_candidate}")
+
+    rmsk_path = get_rmsk_path(assembly, rmsk_dir)
+
+    # Standard chromosomes filter
+    if assembly.startswith("hg"):
+        std = set([f"chr{i}" for i in range(1, 23)] + ["chrX", "chrY"])
+    else:
+        std = set([f"chr{i}" for i in range(1, 20)] + ["chrX", "chrY"])
+
+    progress_print(f"  Parsing rmsk for '{family}'...")
+    hits = parse_rmsk_family(rmsk_path, family, std_chroms=std)
+
+    if not hits:
+        print(f"ERROR: No loci found for repName='{family}' in {assembly}.")
+        print(f"  repName is case-sensitive. Search families with:")
+        print(f"    python te_prep.py --search {family.lower()} --build {assembly}")
+        sys.exit(1)
+
+    df = pd.DataFrame(hits)
+    df["TE_name"] = df["repName"]
+    df["chr"]     = df["Chromosome"]
+    df["start"]   = df["Start"]
+    df["stop"]    = df["Stop"]
+
+    if args.max_loci and len(df) > args.max_loci:
+        progress_print(f"  Capping to {args.max_loci} loci (--max-loci)")
+        df = df.head(args.max_loci).reset_index(drop=True)
+
+    progress_print(f"  {len(df):,} loci across {df['chr'].nunique()} chromosomes")
+    return df.reset_index(drop=True)
+
+
+def _fetch_sequences_parallel(df, assembly="hg38", n_workers=10):
+    """Fetch sequences from UCSC API in parallel using ThreadPoolExecutor.
+
+    ~10x faster than the original sequential loop for large families.
+    Returns list of sequences (same order as df rows).
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    n = len(df)
+    seqs = [None] * n
+    failed = []
+    lock = threading.Lock()
+    # Semaphore to respect UCSC rate limits (~10 concurrent OK)
+    sem = threading.Semaphore(n_workers)
+
+    def _fetch_one(i):
+        chrom = df["chr"].iloc[i]
+        start = int(df["start"].iloc[i])
+        stop  = int(df["stop"].iloc[i])
+        url = (
+            f"https://api.genome.ucsc.edu/getData/sequence?"
+            f"genome={assembly};chrom={chrom};start={start};end={stop}"
+        )
+        retries = 3
+        for attempt in range(retries):
+            try:
+                with sem:
+                    r = requests.get(url, timeout=30)
+                    r.raise_for_status()
+                    res = r.json()
+                    if "error" in res:
+                        raise ValueError(res["error"])
+                    return i, res["dna"].upper()
+            except Exception as exc:
+                if attempt == retries - 1:
+                    return i, None
+                time.sleep(0.5 * (attempt + 1))
+        return i, None
+
+    progress_print(f"  Fetching {n} sequences in parallel ({n_workers} workers)...")
+    done = 0
+
+    with ThreadPoolExecutor(max_workers=n_workers) as exe:
+        futures = {exe.submit(_fetch_one, i): i for i in range(n)}
+        for fut in as_completed(futures):
+            i, seq = fut.result()
+            if seq is None:
+                failed.append(i)
+                seqs[i] = "N" * 100
+            else:
+                seqs[i] = seq
+            done += 1
+            progress_bar(done, n, "  Fetching")
+
+    if failed:
+        progress_print(f"  {len(failed)} sequences failed to fetch (filled with Ns)")
+    return seqs
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SQL-BACKED STATISTICS
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _cluster_summary_sql(df):
+    """Per-cluster stats via SQLite — replaces pandas groupby for large datasets.
+
+    Returns a DataFrame: cluster, size, mean_length, mean_gc, min_length, max_length.
+    """
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    seqs = df["Seq"].astype(str).tolist()
+
+    # Build a compact stats table without pulling Seq strings into SQL
+    rows = []
+    for i, row in df.iterrows():
+        s = row["Seq"] if isinstance(row["Seq"], str) else str(row["Seq"])
+        ln = len(s)
+        gc = (s.count("G") + s.count("C")) / ln if ln > 0 else 0.0
+        rows.append((int(row["Cluster"]), ln, gc))
+
+    conn.execute("CREATE TABLE seq_stats (cluster INTEGER, length INTEGER, gc REAL)")
+    conn.executemany("INSERT INTO seq_stats VALUES (?, ?, ?)", rows)
+    conn.commit()
+
+    result = conn.execute("""
+        SELECT
+            cluster,
+            COUNT(*)        AS size,
+            AVG(length)     AS mean_length,
+            AVG(gc)         AS mean_gc,
+            MIN(length)     AS min_length,
+            MAX(length)     AS max_length
+        FROM seq_stats
+        GROUP BY cluster
+        ORDER BY cluster
+    """).fetchall()
+    conn.close()
+
+    return pd.DataFrame(result,
+                        columns=["cluster", "size", "mean_length", "mean_gc",
+                                 "min_length", "max_length"])
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # STATISTICS
 # ═══════════════════════════════════════════════════════════════════════════
 
 def compute_basic_stats(df, label="", output_file=None):
     seqs = df["Seq"].astype(str)
-    lengths = seqs.apply(len)
-    gc = seqs.apply(lambda s: (s.count("G") + s.count("C")) / len(s) if len(s) > 0 else np.nan)
+    seqs_list = seqs.tolist()
+
+    # Use Cython batch functions if available, otherwise numpy
+    try:
+        import te_fast as _tf
+        lengths = _tf.batch_lengths(seqs_list)
+        gc = _tf.batch_gc_content(seqs_list)
+    except ImportError:
+        import numpy as _np
+        lengths = seqs.apply(len).values
+        gc = seqs.apply(
+            lambda s: (s.count("G") + s.count("C")) / len(s) if len(s) > 0 else np.nan
+        ).values
 
     numeric = list(df.select_dtypes(include=[np.number]).columns)
     exclude = {"start", "stop", "Unnamed: 0", "chr", "Cluster", "_total_expr"}
@@ -173,11 +408,11 @@ def compute_basic_stats(df, label="", output_file=None):
         f"{'='*60}", f"STATISTICS{label}", f"{'='*60}",
         f"Dataset size: {len(df)} sequences",
         "", "=== SEQUENCE LENGTH ===",
-        f"Mean: {lengths.mean():.1f}  Median: {lengths.median():.1f}",
-        f"Std:  {lengths.std():.1f}  Range: [{lengths.min()}, {lengths.max()}]",
+        f"Mean: {np.mean(lengths):.1f}  Median: {np.median(lengths):.1f}",
+        f"Std:  {np.std(lengths):.1f}  Range: [{lengths.min()}, {lengths.max()}]",
         "", "=== GC CONTENT ===",
-        f"Mean: {gc.mean():.3f} ({gc.mean()*100:.1f}%)",
-        f"Std:  {gc.std():.3f}  Range: [{gc.min():.3f}, {gc.max():.3f}]",
+        f"Mean: {np.mean(gc):.3f} ({np.mean(gc)*100:.1f}%)",
+        f"Std:  {np.std(gc):.3f}  Range: [{gc.min():.3f}, {gc.max():.3f}]",
     ]
     if expr_cols:
         lines += ["", "=== EXPRESSION COLUMNS ===",
@@ -362,11 +597,23 @@ def run_pipeline(args):
     print(f"  Family:  {FAMILY_NAME}")
     print(f"  Output:  {OUT_DIR.resolve()}")
     print(f"  Genome:  {HG38_FA or '(not provided)'}")
+    if getattr(args, "local", False):
+        print(f"  Mode:    LOCAL  (assembly={getattr(args, 'assembly', 'hg38')})")
+    print(f"  K-mer:   {args.kmer}")
+    print(f"  UMAP:    pca_dims={args.pca_dims}, n_epochs={args.n_epochs}, "
+          f"random_state={'None/multicore' if args.random_state == 0 else args.random_state}, "
+          f"skip_tsne={args.skip_tsne}")
+    print(f"  Threads: OMP={os.environ.get('OMP_NUM_THREADS', '(unset)')} "
+          f"MKL={os.environ.get('MKL_NUM_THREADS', '(unset)')} "
+          f"OPENBLAS={os.environ.get('OPENBLAS_NUM_THREADS', '(unset)')} "
+          f"NUMBA={os.environ.get('NUMBA_NUM_THREADS', '(unset)')}")
+    print(f"  Cache:   NUMBA_CACHE_DIR={os.environ.get('NUMBA_CACHE_DIR', '(unset)')}")
     print(f"  Date:    {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
 
     # ── 1. Load genome ──────────────────────────────────────────────────────
     print("\n=== LOADING REFERENCE GENOME ===")
+    progress_print(f"Genome path argument: {HG38_FA or '(none)'}")
     genome_cache = GenomeCache(HG38_FA, cache_dir=str(OUT_DIR))
     genome_cache.load()
     if genome_cache.is_loaded:
@@ -378,10 +625,17 @@ def run_pipeline(args):
     t0 = time.time()
     print("\n=== LOADING DATA ===")
     try:
+        progress_print(
+            f"Data source: test={args.test}, local={getattr(args, 'local', False)}, "
+            f"input={args.input or '(auto)'}"
+        )
         if args.test:
             progress_print("Creating mock test data...")
             df_family = create_test_data()
             FAMILY_NAME = "TEST_TE"
+        elif getattr(args, "local", False) and not args.input:
+            # Local mode: auto-download rmsk and build DataFrame from coords
+            df_family = _load_local_data(args)
         elif args.input:
             if not Path(args.input).exists():
                 raise FileNotFoundError(f"Input file not found: {args.input}")
@@ -399,7 +653,12 @@ def run_pipeline(args):
                 df_raw["TE_name"].str.contains(FAMILY_NAME, case=False, na=False)
             ].copy().reset_index(drop=True)
         else:
-            raise RuntimeError("No data source: use --input, --test, or set df= in interactive mode")
+            raise RuntimeError(
+                "No data source. Options:\n"
+                "  --local --family <NAME> --assembly hg38  (auto-download + UCSC API)\n"
+                "  --input <CSV>\n"
+                "  --test"
+            )
 
         if len(df_family) == 0:
             print(f"ERROR: No sequences found for family '{FAMILY_NAME}'")
@@ -422,11 +681,11 @@ def run_pipeline(args):
                 if col not in df_family.columns:
                     raise ValueError(f"Missing column '{col}' for sequence extraction")
 
-            seqlist = []
-            failed = []
-
             if genome_cache.is_loaded:
+                # Fast local extraction — vectorized per-row, no network
                 progress_print(f"Extracting {len(df_family)} sequences from local genome...")
+                failed = []
+                seqlist = []
                 for i in range(len(df_family)):
                     progress_bar(i + 1, len(df_family), "  Extracting")
                     try:
@@ -437,32 +696,20 @@ def run_pipeline(args):
                         if seq is None:
                             raise ValueError(f"No sequence for {chrom}:{start}-{stop}")
                         seqlist.append(seq)
-                    except Exception as e2:
+                    except Exception:
                         seqlist.append("N" * 100)
                         failed.append(i)
+                df_family["Seq"] = seqlist
+                if failed:
+                    progress_print(f"  {len(failed)} sequences failed extraction")
             else:
-                progress_print(f"Fetching {len(df_family)} sequences from UCSC API...")
-                for i in range(len(df_family)):
-                    progress_bar(i + 1, len(df_family), "  Fetching")
-                    try:
-                        chrom = df_family["chr"].iloc[i]
-                        start = int(df_family["start"].iloc[i])
-                        stop  = int(df_family["stop"].iloc[i])
-                        url = (f"https://api.genome.ucsc.edu/getData/sequence?"
-                               f"genome=hg38;chrom={chrom};start={start};end={stop}")
-                        r = requests.get(url, timeout=30)
-                        r.raise_for_status()
-                        res = r.json()
-                        if "error" in res:
-                            raise ValueError(res["error"])
-                        seqlist.append(res["dna"].upper())
-                    except Exception as e2:
-                        seqlist.append("N" * 100)
-                        failed.append(i)
-
-            df_family["Seq"] = seqlist
-            if failed:
-                progress_print(f"  {len(failed)} sequences failed to fetch")
+                # Parallel UCSC API fetch — ~10x faster than sequential
+                assembly = getattr(args, "assembly", "hg38") or "hg38"
+                n_workers = getattr(args, "fetch_workers", 10)
+                progress_print(f"UCSC fetch settings: assembly={assembly}, workers={n_workers}")
+                seqlist = _fetch_sequences_parallel(df_family, assembly=assembly,
+                                                    n_workers=n_workers)
+                df_family["Seq"] = seqlist
 
         df_family.to_csv(DIRS["data"] / f"{FAMILY_NAME.lower()}_with_sequences.csv", index=False)
     except Exception as e:
@@ -491,11 +738,21 @@ def run_pipeline(args):
             )
             df_family["Cluster"] = 0
         else:
+            rs = args.random_state if args.random_state != 0 else None
+            progress_print(
+                "Clustering settings: "
+                f"kmer={args.kmer}, pca_dims={args.pca_dims}, n_epochs={args.n_epochs}, "
+                f"random_state={rs}, compute_tsne={not args.skip_tsne}"
+            )
             df_family, cluster_labels = clustering_analysis(
                 df_family, kmer=args.kmer,
                 out_dir=DIRS["clustering"],
                 family_name=FAMILY_NAME,
-                debug=args.debug
+                debug=args.debug,
+                pca_dims=args.pca_dims,
+                n_epochs=args.n_epochs,
+                random_state=rs,
+                compute_tsne=not args.skip_tsne,
             )
 
         df_family.to_csv(DIRS["data"] / f"{FAMILY_NAME.lower()}_clustered.csv", index=False)
@@ -506,23 +763,17 @@ def run_pipeline(args):
         df_family["Cluster"] = 0
     stage_times["Clustering"] = time.time() - t0
 
-    # Per-cluster stats
+    # Per-cluster stats: text files written per cluster, summary via SQL
     cs_dir = DIRS["stats"] / "per_cluster"
     cs_dir.mkdir(exist_ok=True)
-    cluster_summary = []
     for cl in sorted(df_family["Cluster"].unique()):
         c_df = df_family[df_family["Cluster"] == cl]
         compute_basic_stats(
             c_df, label=f" — Cluster {cl}",
             output_file=cs_dir / f"cluster_{cl}_statistics.txt"
         )
-        lengths = c_df["Seq"].astype(str).apply(len)
-        gc = c_df["Seq"].astype(str).apply(
-            lambda s: (s.count("G") + s.count("C")) / len(s) if len(s) > 0 else 0
-        )
-        cluster_summary.append({"cluster": cl, "size": len(c_df),
-                                  "mean_length": lengths.mean(), "mean_gc": gc.mean()})
-    pd.DataFrame(cluster_summary).to_csv(DIRS["stats"] / "cluster_summary.csv", index=False)
+    sql_summary = _cluster_summary_sql(df_family)
+    sql_summary.to_csv(DIRS["stats"] / "cluster_summary.csv", index=False)
 
     # ── 6. Dashboard ────────────────────────────────────────────────────────
     t0 = time.time()
@@ -535,6 +786,9 @@ def run_pipeline(args):
         t0 = time.time()
         print("\n=== PRIMER DESIGN ===")
         try:
+            # Enable parallel genome search when --parallel-primers is set
+            if getattr(args, "parallel_primers", False) and genome_cache.is_loaded:
+                genome_cache._default_parallel = True
             design_primers(
                 df_family,
                 primer_k=args.primer_kmer,
@@ -571,6 +825,10 @@ def run_pipeline(args):
     print(f"  Output:    {OUT_DIR.resolve()}")
     print(f"  Total:     {total:.1f}s ({total/60:.1f} min)")
     print()
+    print("  Stage timings:")
+    for stage, seconds in stage_times.items():
+        print(f"    {stage:<14} {seconds:>8.1f}s")
+    print()
     print(f"  Dashboard:     07_visualizations/index.html")
     print(f"  CIAlign:       cialign_plots/index.html")
     print(f"  Primers:       06_primers/selected_primers_summary.csv")
@@ -585,5 +843,6 @@ def run_pipeline(args):
 # ═══════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
+    _check_hpc_environment()
     args = parse_args()
     run_pipeline(args)

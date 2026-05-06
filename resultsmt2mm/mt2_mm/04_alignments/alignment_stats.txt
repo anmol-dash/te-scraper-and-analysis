@@ -1,0 +1,8 @@
+=== GLOBAL ALIGNMENT STATISTICS ===
+
+n_sequences: 2641
+alignment_length: 2491
+consensus_length_no_gaps: 2491
+avg_gaps_per_col: 2161.663990365315
+cols_no_gaps: 0
+cols_majority_gap: 2157

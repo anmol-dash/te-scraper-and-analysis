@@ -148,16 +148,34 @@ def download_rmsk(build, rmsk_dir):
     print("  (hg38 ~150 MB, may take a few minutes)")
 
     import subprocess
-    for tool in [["wget", "-q", "--show-progress", "-O", str(outpath), url],
-                 ["curl", "-L", "-o", str(outpath), url]]:
-        ret = subprocess.run(tool)
-        if ret.returncode == 0:
-            size_mb = outpath.stat().st_size / 1e6
-            print(f"Done: {outpath} ({size_mb:.0f} MB)")
-            return str(outpath)
 
-    print("FATAL: Download failed. Check internet connection.")
-    sys.exit(1)
+    # Try system download tools; skip gracefully when the binary is missing
+    for tool in [
+        ["curl", "-L", "--progress-bar", "-o", str(outpath), url],
+        ["wget", "-q", "--show-progress", "-O", str(outpath), url],
+    ]:
+        try:
+            ret = subprocess.run(tool)
+            if ret.returncode == 0:
+                size_mb = outpath.stat().st_size / 1e6
+                print(f"Done: {outpath} ({size_mb:.0f} MB)")
+                return str(outpath)
+        except FileNotFoundError:
+            continue  # binary not available on this system
+
+    # Pure-Python fallback using urllib (no external tools required)
+    print("  curl/wget not found — using Python urllib (no progress bar)...")
+    import urllib.request
+    try:
+        urllib.request.urlretrieve(url, str(outpath))
+        size_mb = outpath.stat().st_size / 1e6
+        print(f"Done: {outpath} ({size_mb:.0f} MB)")
+        return str(outpath)
+    except Exception as e:
+        if outpath.exists():
+            outpath.unlink()
+        print(f"FATAL: Download failed: {e}")
+        sys.exit(1)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
