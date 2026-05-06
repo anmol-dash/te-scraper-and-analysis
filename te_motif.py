@@ -84,6 +84,15 @@ def parse_args():
                    help="Fisher p-value significance threshold (default: 0.05)")
     p.add_argument("--force", action="store_true",
                    help="Re-run even if overlap file already exists")
+    p.add_argument("--homer", action="store_true",
+                   help="Also run HOMER findMotifsGenome.pl on each cluster")
+    p.add_argument("--homer-genome", default=None,
+                   help="HOMER genome name or FASTA path (e.g. hg38, mm10); "
+                        "defaults to --build value")
+    p.add_argument("--homer-size", default="200",
+                   help="HOMER -size parameter (default: 200)")
+    p.add_argument("--homer-threads", type=int, default=4,
+                   help="HOMER -p threads per cluster (default: 4)")
     return p.parse_args()
 
 
@@ -425,6 +434,124 @@ def run_motif_analysis(input_csv, build, out_dir, jaspar_bed_arg,
     }
 
 
+def run_homer(input_csv, build, out_dir, genome=None, size="200",
+              threads=4, force=False):
+    """
+    Run HOMER findMotifsGenome.pl on each cluster's loci.
+
+    Parameters
+    ----------
+    input_csv : path to clustered CSV (output of te_clustering.py)
+    build     : genome build string used as fallback genome name
+    out_dir   : root output directory; results go in <out_dir>/homer_results/
+    genome    : HOMER genome name or FASTA path (defaults to build)
+    size      : HOMER -size value, e.g. "200" or "given"
+    threads   : HOMER -p (parallel threads per cluster run)
+    force     : re-run even if per-cluster output already exists
+
+    Returns
+    -------
+    dict mapping cluster_id -> path to knownResults.txt (or None if failed)
+    """
+    import shutil, subprocess
+
+    if not shutil.which("findMotifsGenome.pl"):
+        print("FATAL: HOMER not found. Install via http://homer.ucsd.edu/homer/introduction/install.html")
+        sys.exit(1)
+
+    genome = genome or build
+    out_dir = Path(out_dir)
+    homer_root = out_dir / "homer_results"
+    homer_root.mkdir(parents=True, exist_ok=True)
+
+    print(f"\n  Loading {input_csv} for HOMER...")
+    df = pd.read_csv(input_csv)
+    chr_col, start_col, stop_col = _detect_coords(df)
+    if not all([chr_col, start_col, stop_col]):
+        print("FATAL: Cannot find coordinate columns.")
+        sys.exit(1)
+    cl_col = _cluster_col(df)
+    if cl_col is None:
+        print("FATAL: No Cluster column. Run te_clustering.py first.")
+        sys.exit(1)
+
+    df[cl_col] = df[cl_col].astype(int)
+    cluster_ids = sorted([c for c in df[cl_col].unique() if c >= 0])
+    print(f"  {len(cluster_ids)} clusters: {cluster_ids}")
+
+    results = {}
+    for cid in cluster_ids:
+        cluster_dir = homer_root / f"cluster_{cid}"
+        known_txt   = cluster_dir / "knownResults.txt"
+
+        if known_txt.exists() and not force:
+            print(f"  [SKIP] Cluster {cid}: {known_txt}")
+            results[cid] = str(known_txt)
+            continue
+
+        cluster_dir.mkdir(parents=True, exist_ok=True)
+
+        # Write BED for this cluster (HOMER wants: name chr start end strand)
+        sub = df[df[cl_col] == cid][[chr_col, start_col, stop_col]].copy()
+        sub.insert(0, "name", [f"locus_{i}" for i in range(len(sub))])
+        sub["strand"] = "+"
+        bed_path = cluster_dir / f"cluster_{cid}.bed"
+        sub[["name", chr_col, start_col, stop_col, "strand"]].to_csv(
+            bed_path, sep="\t", header=False, index=False
+        )
+
+        cmd = [
+            "findMotifsGenome.pl",
+            str(bed_path),
+            genome,
+            str(cluster_dir),
+            "-size", str(size),
+            "-p", str(threads),
+            "-nomotif",       # skip de-novo to keep runtime reasonable
+        ]
+        print(f"  Cluster {cid} (n={len(sub):,}): running HOMER...")
+        t0 = time.time()
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        elapsed = time.time() - t0
+
+        if proc.returncode != 0:
+            print(f"  [WARN] Cluster {cid} HOMER failed ({elapsed:.1f}s):\n{proc.stderr[-500:]}")
+            results[cid] = None
+            continue
+
+        if not known_txt.exists():
+            print(f"  [WARN] Cluster {cid}: knownResults.txt not produced")
+            results[cid] = None
+            continue
+
+        # Parse and summarise top 10 known motifs
+        try:
+            kr = pd.read_csv(known_txt, sep="\t")
+            kr.columns = [c.strip() for c in kr.columns]
+            p_col = next((c for c in kr.columns if "p-value" in c.lower() or "pvalue" in c.lower()), None)
+            name_col = kr.columns[0]
+            if p_col:
+                kr = kr.sort_values(p_col)
+                top = kr[[name_col, p_col]].head(10).to_string(index=False)
+            else:
+                top = kr.head(10).to_string(index=False)
+            print(f"  Cluster {cid}: top known motifs [{elapsed:.1f}s]\n{top}")
+        except Exception as e:
+            print(f"  Cluster {cid}: HOMER done [{elapsed:.1f}s] (parse warning: {e})")
+
+        # Save a summary CSV alongside HOMER output
+        try:
+            kr.to_csv(cluster_dir / "knownResults_summary.csv", index=False)
+        except Exception:
+            pass
+
+        results[cid] = str(known_txt)
+
+    n_ok = sum(1 for v in results.values() if v)
+    print(f"\n  HOMER complete: {n_ok}/{len(cluster_ids)} clusters succeeded → {homer_root}")
+    return results
+
+
 def main():
     args = parse_args()
     print("=" * 60)
@@ -442,6 +569,16 @@ def main():
         p_threshold    = args.p_threshold,
         force          = args.force,
     )
+    if args.homer:
+        run_homer(
+            input_csv = args.input,
+            build     = args.build,
+            out_dir   = args.out_dir,
+            genome    = args.homer_genome,
+            size      = args.homer_size,
+            threads   = args.homer_threads,
+            force     = args.force,
+        )
 
 
 if __name__ == "__main__":

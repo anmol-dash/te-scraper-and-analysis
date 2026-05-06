@@ -235,11 +235,20 @@ Key options:
   --family FAMILY         TE family name
   --genome FA             Genome FASTA for local extraction
   --out-dir DIR           Output directory
-  --kmer K                k-mer size [18]
+  --kmer K                k-mer size [6]
+  --expression-assembly FILE
+                          Optional CSV/TSV/BED-like expression intervals
+  --expression-buffer N   Expand expression start/stop by +/- N bp [50]
   --min-sequences N       Minimum sequences for clustering [10]
   --skip-alignment        Skip MAFFT / CIAlign
   --skip-primers          Skip primer design
 ```
+
+For local mode, `--expression-assembly` cross-references expression intervals
+against the RepeatMasker loci before clustering. The expression file must have
+chromosome/start/stop-like columns. Intervals are expanded by `--expression-buffer`
+on both sides, and numeric expression columns are attached to matching TE loci
+with an `expr_` prefix.
 
 ---
 

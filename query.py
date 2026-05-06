@@ -29,7 +29,9 @@ Speed options:
 
 import argparse
 import datetime
+import ast
 import os
+import re
 import sys
 import time
 import traceback
@@ -43,7 +45,7 @@ def _check_hpc_environment():
     on_lsf   = bool(os.environ.get("LSB_JOBID")    or os.environ.get("LSB_HOSTS"))
     if on_slurm or on_lsf:
         return
-    if "--test" in sys.argv or "--local" in sys.argv:
+    if "--test" in sys.argv or "--local" in sys.argv or "--help" in sys.argv or "-h" in sys.argv:
         return
     print(
         "\n"
@@ -121,6 +123,10 @@ def parse_args(argv=None):
                    help="Directory for rmsk cache files (default: ~/te_analysis/rmsk)")
     p.add_argument("--max-loci", type=int, default=None,
                    help="Cap number of TE loci (useful for quick tests)")
+    p.add_argument("--expression-assembly", type=str, default=None,
+                   help="Optional CSV/TSV/BED-like expression assembly with chr/start/stop columns")
+    p.add_argument("--expression-buffer", type=int, default=50,
+                   help="Expand expression start/stop by this many bp when matching TE loci (default: 50)")
     p.add_argument("--fetch-workers", type=int, default=10,
                    help="Parallel UCSC fetch workers (default: 10)")
     p.add_argument("--parallel-primers", action="store_true",
@@ -272,7 +278,217 @@ def _load_local_data(args):
         df = df.head(args.max_loci).reset_index(drop=True)
 
     progress_print(f"  {len(df):,} loci across {df['chr'].nunique()} chromosomes")
+    if getattr(args, "expression_assembly", None):
+        df = _attach_expression_assembly(
+            df,
+            args.expression_assembly,
+            buffer_bp=getattr(args, "expression_buffer", 50),
+        )
     return df.reset_index(drop=True)
+
+
+def _detect_coord_columns(df, label="table"):
+    """Detect chr/start/stop columns across common BED/CSV spellings."""
+    def _pick(candidates):
+        lower = {c.lower(): c for c in df.columns}
+        for cand in candidates:
+            if cand.lower() in lower:
+                return lower[cand.lower()]
+        return None
+
+    chr_col = _pick(["chr", "chrom", "chromosome", "#chrom", "seqnames"])
+    start_col = _pick(["start", "chromStart", "txStart", "begin"])
+    stop_col = _pick(["stop", "end", "chromEnd", "txEnd"])
+    if not all([chr_col, start_col, stop_col]):
+        raise ValueError(
+            f"Could not detect coordinate columns in {label}. "
+            f"Need chr/start/stop-like columns; found {list(df.columns)}"
+        )
+    return chr_col, start_col, stop_col
+
+
+def _read_expression_assembly(path):
+    """Read expression assembly as CSV/TSV/BED-like table."""
+    path = Path(path).expanduser()
+    if not path.exists():
+        raise FileNotFoundError(f"Expression assembly not found: {path}")
+
+    sep = "\t" if path.suffix.lower() in {".tsv", ".bed"} else None
+    try:
+        kwargs = {"sep": sep}
+        if sep is None:
+            kwargs["engine"] = "python"
+        df = pd.read_csv(path, **kwargs)
+    except Exception:
+        df = pd.read_csv(path, sep="\t", header=None)
+
+    # Headerless BED fallback.
+    if all(isinstance(c, int) for c in df.columns) and df.shape[1] >= 3:
+        cols = ["chr", "start", "stop"] + [f"expr_field_{i}" for i in range(4, df.shape[1] + 1)]
+        df.columns = cols[:df.shape[1]]
+    return df
+
+
+def _attach_expression_assembly(df_te, expression_path, buffer_bp=50):
+    """Attach expression assembly rows to RepeatMasker loci using buffered overlap.
+
+    Expression intervals are expanded by +/- buffer_bp before overlap testing:
+      TE_start <= expr_stop + buffer AND TE_stop >= expr_start - buffer
+
+    Numeric expression columns are summed across all matching expression rows and
+    prefixed with expr_.  Extra metadata summarizes match count and matched IDs.
+    """
+    progress_print(
+        f"  Loading expression assembly: {expression_path} "
+        f"(buffer +/- {buffer_bp:,} bp)"
+    )
+    df_expr = _read_expression_assembly(expression_path)
+    te_chr, te_start, te_stop = _detect_coord_columns(df_te, "RepeatMasker loci")
+    ex_chr, ex_start, ex_stop = _detect_coord_columns(df_expr, "expression assembly")
+
+    df_te = df_te.copy().reset_index(drop=True)
+    df_te["_te_row_id"] = np.arange(len(df_te), dtype=int)
+    df_expr = df_expr.copy().reset_index(drop=True)
+    df_expr["_expr_row_id"] = np.arange(len(df_expr), dtype=int)
+
+    for col in (te_start, te_stop):
+        df_te[col] = pd.to_numeric(df_te[col], errors="coerce")
+    for col in (ex_start, ex_stop):
+        df_expr[col] = pd.to_numeric(df_expr[col], errors="coerce")
+
+    df_te = df_te.dropna(subset=[te_chr, te_start, te_stop]).copy()
+    df_expr = df_expr.dropna(subset=[ex_chr, ex_start, ex_stop]).copy()
+    df_te[te_chr] = df_te[te_chr].astype(str)
+    df_expr[ex_chr] = df_expr[ex_chr].astype(str)
+
+    expr_exclude = {ex_chr, ex_start, ex_stop, "_expr_row_id", "Seq", "sequence", "Unnamed: 0"}
+    numeric_expr_cols = [
+        c for c in df_expr.columns
+        if c not in expr_exclude
+        and not str(c).lower().startswith("unnamed")
+        and pd.api.types.is_numeric_dtype(df_expr[c])
+    ]
+
+    def _listlike_count(v):
+        if pd.isna(v):
+            return 0
+        if isinstance(v, (list, tuple, set)):
+            return len(v)
+        s = str(v).strip()
+        if not s or s.lower() == "nan":
+            return 0
+        if s.startswith("[") and s.endswith("]"):
+            try:
+                parsed = ast.literal_eval(s)
+                if isinstance(parsed, (list, tuple, set)):
+                    return len(parsed)
+            except Exception:
+                return 0
+        return np.nan
+
+    derived_expr_cols = []
+    for c in list(df_expr.columns):
+        if c in expr_exclude or str(c).lower().startswith("unnamed"):
+            continue
+        if c in numeric_expr_cols:
+            continue
+        counts = df_expr[c].map(_listlike_count)
+        if counts.notna().any() and counts.fillna(0).sum() > 0:
+            safe = re.sub(r"[^0-9A-Za-z_]+", "_", str(c)).strip("_")
+            new_col = f"{safe}_count"
+            df_expr[new_col] = counts.fillna(0).astype(float)
+            derived_expr_cols.append(new_col)
+    numeric_expr_cols.extend(derived_expr_cols)
+
+    if not numeric_expr_cols:
+        for c in df_expr.columns:
+            if c in expr_exclude or str(c).lower().startswith("unnamed"):
+                continue
+            converted = pd.to_numeric(df_expr[c], errors="coerce")
+            if converted.notna().any():
+                df_expr[c] = converted
+                numeric_expr_cols.append(c)
+
+    id_col = next(
+        (c for c in ["TE_ID", "name", "Name", "gene", "gene_id", "transcript_id", "id", "ID"]
+         if c in df_expr.columns),
+        None,
+    )
+
+    df_te["expr_match_count"] = 0
+    df_te["expr_overlap_bp"] = 0
+    df_te["expr_ids"] = ""
+    seq_col = next((c for c in ["Seq", "seq", "sequence"] if c in df_expr.columns), None)
+    if seq_col and "Seq" not in df_te.columns:
+        df_te["Seq"] = pd.NA
+        df_te["expr_seq_source"] = ""
+    for col in numeric_expr_cols:
+        out_col = f"expr_{col}" if not str(col).startswith("expr_") else str(col)
+        if out_col not in df_te.columns:
+            df_te[out_col] = 0.0
+
+    total_matches = 0
+    matched_te = set()
+    buffer_bp = max(0, int(buffer_bp or 0))
+
+    for chrom, te_chr_df in df_te.groupby(te_chr, sort=False):
+        expr_chr_df = df_expr[df_expr[ex_chr] == chrom]
+        if expr_chr_df.empty:
+            continue
+
+        expr_starts = expr_chr_df[ex_start].astype(int).to_numpy() - buffer_bp
+        expr_stops = expr_chr_df[ex_stop].astype(int).to_numpy() + buffer_bp
+        expr_starts = np.maximum(expr_starts, 0)
+
+        for te_idx, te_row in te_chr_df.iterrows():
+            ts = int(te_row[te_start])
+            te = int(te_row[te_stop])
+            mask = (ts <= expr_stops) & (te >= expr_starts)
+            if not mask.any():
+                continue
+
+            hits = expr_chr_df.loc[mask]
+            n_hits = len(hits)
+            total_matches += n_hits
+            matched_te.add(te_idx)
+            df_te.at[te_idx, "expr_match_count"] = n_hits
+
+            overlap_starts = np.maximum(ts, expr_starts[mask])
+            overlap_stops = np.minimum(te, expr_stops[mask])
+            df_te.at[te_idx, "expr_overlap_bp"] = int(np.maximum(0, overlap_stops - overlap_starts).sum())
+
+            if id_col:
+                vals = [str(v) for v in hits[id_col].dropna().astype(str).unique()[:8]]
+                df_te.at[te_idx, "expr_ids"] = ";".join(vals)
+
+            if seq_col:
+                seq_hits = hits[seq_col].dropna().astype(str)
+                seq_hits = seq_hits[seq_hits.str.len() > 0]
+                if not seq_hits.empty:
+                    seq = seq_hits.iloc[0].upper()
+                    if set(seq) <= set("ACGTNacgtn"):
+                        df_te.at[te_idx, "Seq"] = seq
+                        df_te.at[te_idx, "expr_seq_source"] = str(hits.iloc[0].get(id_col, hits.iloc[0]["_expr_row_id"]))
+
+            for col in numeric_expr_cols:
+                out_col = f"expr_{col}" if not str(col).startswith("expr_") else str(col)
+                df_te.at[te_idx, out_col] = float(pd.to_numeric(hits[col], errors="coerce").fillna(0).sum())
+
+    progress_print(
+        f"  Expression overlap: {len(matched_te):,}/{len(df_te):,} TE loci matched "
+        f"({total_matches:,} expression interval overlaps)"
+    )
+    if numeric_expr_cols:
+        progress_print(
+            f"  Attached expression columns: "
+            f"{', '.join([('expr_' + str(c)) if not str(c).startswith('expr_') else str(c) for c in numeric_expr_cols])}"
+        )
+    else:
+        progress_print("  No numeric expression columns found; attached match metadata only")
+    if seq_col and "Seq" in df_te.columns:
+        progress_print(f"  Expression assembly supplied sequences for {df_te['Seq'].notna().sum():,} TE loci")
+
+    return df_te.drop(columns=["_te_row_id"], errors="ignore")
 
 
 def _fetch_sequences_parallel(df, assembly="hg38", n_workers=10):
@@ -333,6 +549,30 @@ def _fetch_sequences_parallel(df, assembly="hg38", n_workers=10):
     if failed:
         progress_print(f"  {len(failed)} sequences failed to fetch (filled with Ns)")
     return seqs
+
+
+def _fill_missing_sequences_parallel(df, assembly="hg38", n_workers=10):
+    """Fetch only rows with missing Seq, preserving any sequences already present."""
+    if "Seq" not in df.columns:
+        return _fetch_sequences_parallel(df, assembly=assembly, n_workers=n_workers)
+
+    existing = df["Seq"].copy()
+    valid = existing.notna() & existing.astype(str).str.len().gt(0)
+    missing_idx = df.index[~valid].tolist()
+    if not missing_idx:
+        progress_print("All sequences already present — skipping fetch")
+        return existing.astype(str).str.upper().tolist()
+
+    progress_print(
+        f"Preserving {int(valid.sum()):,} supplied sequences; "
+        f"fetching {len(missing_idx):,} missing sequence(s)"
+    )
+    sub = df.loc[missing_idx].reset_index(drop=True)
+    fetched = _fetch_sequences_parallel(sub, assembly=assembly, n_workers=n_workers)
+    seqs = existing.astype("object").tolist()
+    for original_idx, seq in zip(missing_idx, fetched):
+        seqs[original_idx] = seq
+    return [str(s).upper() if pd.notna(s) else "N" * 100 for s in seqs]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -707,8 +947,11 @@ def run_pipeline(args):
                 assembly = getattr(args, "assembly", "hg38") or "hg38"
                 n_workers = getattr(args, "fetch_workers", 10)
                 progress_print(f"UCSC fetch settings: assembly={assembly}, workers={n_workers}")
-                seqlist = _fetch_sequences_parallel(df_family, assembly=assembly,
-                                                    n_workers=n_workers)
+                seqlist = _fill_missing_sequences_parallel(
+                    df_family,
+                    assembly=assembly,
+                    n_workers=n_workers,
+                )
                 df_family["Seq"] = seqlist
 
         df_family.to_csv(DIRS["data"] / f"{FAMILY_NAME.lower()}_with_sequences.csv", index=False)

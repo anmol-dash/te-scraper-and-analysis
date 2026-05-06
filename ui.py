@@ -156,6 +156,8 @@ STEP A — Alignment  (te_alignment.py)
 STEP M — Motif  (te_motif.py)
   bedtools intersect TE loci against JASPAR TFBS predictions,
   then Fisher's exact test per cluster × motif.
+  Optionally runs HOMER findMotifsGenome.pl (--homer flag) on each
+  cluster for known-motif enrichment; results in homer_results/.
 
 STEP G — Gene / GO  (te_go.py)
   Looks up GO terms for enriched TF motifs via mygene.info API.
@@ -423,13 +425,24 @@ def _step_alignment(client):
 
 def _step_motif(client):
     print()
-    print(_divider("te_motif.py  ·  JASPAR overlap + Fisher enrichment"))
+    print(_divider("te_motif.py  ·  JASPAR overlap + Fisher enrichment + HOMER"))
     inp     = _ask("Input clustered CSV (remote path)")
     species, build = _ask_species_assembly()
     out_dir = _ask("Output directory (remote)", client.remote_work_dir + "/results")
-    jaspar  = ""
+
+    jaspar = ""
     if _confirm("Provide a JASPAR BED file (remote path)?", default=False):
         jaspar = _ask("JASPAR BED path (remote)")
+
+    run_homer = _confirm("Also run HOMER known-motif enrichment per cluster?", default=False)
+    homer_genome = ""
+    homer_size   = "200"
+    homer_threads = "4"
+    if run_homer:
+        homer_genome  = _ask("HOMER genome name or FASTA (blank = same as build)", "")
+        homer_size    = _ask("HOMER -size value", "200")
+        homer_threads = _ask("HOMER threads per cluster", "4")
+
     if not _sync_remote_files(client, ["te_motif.py"]):
         return
     cmd = (
@@ -438,7 +451,12 @@ def _step_motif(client):
     )
     if jaspar:
         cmd += f" --jaspar-bed {jaspar}"
-    _remote_run(client, "te_motif", cmd, timeout=1800)
+    if run_homer:
+        cmd += " --homer"
+        if homer_genome.strip():
+            cmd += f" --homer-genome {homer_genome.strip()}"
+        cmd += f" --homer-size {homer_size} --homer-threads {homer_threads}"
+    _remote_run(client, "te_motif", cmd, timeout=3600)
 
 
 def _step_go(client):
@@ -511,7 +529,7 @@ MENU = [
     ("3",  "te_clustering.py k-mer · UMAP · HDBSCAN",    "action"),
     ("4",  "te_alignment.py  MAFFT · CIAlign · consensus","action"),
     (None, "Enrichment",                                  "section"),
-    ("5",  "te_motif.py      JASPAR overlap + Fisher",    "action"),
+    ("5",  "te_motif.py      JASPAR + Fisher + HOMER",      "action"),
     ("6",  "te_go.py         GO annotation (mygene.info)","action"),
     ("7",  "te_expression.py Expression boxplots",        "action"),
     ("8",  "te_enrichment.py All enrichment  (M+G+E)",   "action"),
@@ -627,6 +645,10 @@ def _step_local_run():
     species, assembly = _ask_species_assembly()
     max_loci  = _ask("Max loci to analyse (blank = all)", "")
     genome    = _ask("Path to local assembly FASTA (blank = UCSC API for sequences)", "")
+    expr_csv  = _ask("Expression assembly CSV/TSV/BED with chr/start/stop (blank = none)", "")
+    expr_buf  = ""
+    if expr_csv.strip():
+        expr_buf = _ask("Expression coordinate buffer bp", "50")
     workers   = _ask("Parallel UCSC fetch workers", "10")
     out_root  = _ask("Output directory", "results")
 
@@ -647,6 +669,11 @@ def _step_local_run():
 
     if max_loci.strip():
         cmd += ["--max-loci", max_loci.strip()]
+
+    if expr_csv.strip():
+        cmd += ["--expression-assembly", expr_csv.strip()]
+        if expr_buf.strip():
+            cmd += ["--expression-buffer", expr_buf.strip()]
 
     print()
     print(f"  {dim('$')} {' '.join(cmd)}")
@@ -686,7 +713,7 @@ def _find_clustered_csv(results_dir, family=None):
     return candidates[0] if candidates else None
 
 
-def _launch_local_dashboard(results_dir=None, family=None):
+def _launch_local_dashboard(results_dir=None, family=None, open_browser=True):
     """Launch an interactive Dash clustering dashboard.
 
     Features:
@@ -713,7 +740,6 @@ def _launch_local_dashboard(results_dir=None, family=None):
     import base64
     import io
     import threading
-    import webbrowser
     import time as _t
     import tempfile
     import uuid
@@ -1571,7 +1597,15 @@ def _launch_local_dashboard(results_dir=None, family=None):
     url  = f"http://127.0.0.1:{PORT}"
     print(f"\n  {green('●')}  Dashboard → {bold(url)}")
     print(f"  {dim('Press Ctrl+C to stop.')}")
-    threading.Timer(1.2, lambda: webbrowser.open(url)).start()
+    if open_browser:
+        def _open_dashboard():
+            try:
+                import webbrowser
+                webbrowser.open(url)
+            except Exception as exc:
+                _log(f"Browser auto-open failed: {exc}")
+
+        threading.Timer(1.2, _open_dashboard).start()
 
     try:
         app.run(debug=False, port=PORT, use_reloader=False)
@@ -1728,6 +1762,8 @@ def main():
                         help="Launch the clustering dashboard for a local/downloaded results directory")
     parser.add_argument("--family",
                         help="Family name to use with --dashboard when auto-detect is ambiguous")
+    parser.add_argument("--no-browser", action="store_true",
+                        help="Do not automatically open a browser for --dashboard")
     parser.add_argument("--help-workflow",  action="store_true",
                         help="Print workflow overview and exit")
     args = parser.parse_args()
@@ -1743,7 +1779,7 @@ def main():
         return
 
     if args.dashboard:
-        _launch_local_dashboard(args.dashboard, args.family)
+        _launch_local_dashboard(args.dashboard, args.family, open_browser=not args.no_browser)
         return
 
     # ── Local mode: no SSH needed ─────────────────────────────────────────────
