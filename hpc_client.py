@@ -2078,13 +2078,15 @@ exit 0
         family   = input("TE family name [FAMILY]: ").strip() or "FAMILY"
         out_dir  = input(f"Remote output dir [{self.remote_work_dir}]: ").strip() or self.remote_work_dir
         jaspar   = input("JASPAR BED path (blank = auto-download): ").strip()
+        p_thresh = input("Fisher p-value significance threshold [0.05]: ").strip() or "0.05"
         extra    = input("Extra te_enrichment args (or blank): ").strip()
 
         jaspar_arg = f"--jaspar-bed {jaspar}" if jaspar else ""
         cmd = (
             f"cd {self.remote_work_dir} && "
             f"python te_enrichment.py --input {clustered} --build {build} "
-            f"--family {family} --out-dir {out_dir} {jaspar_arg} {extra}"
+            f"--family {family} --out-dir {out_dir} {jaspar_arg} "
+            f"--p-threshold {p_thresh} {extra}"
         )
         print(f"\nRunning: {cmd}\n")
         out, err, code = self.run_command(cmd, timeout=1800)
@@ -2229,7 +2231,16 @@ exit 0
         print(out)
         return True
 
-    def retrieve_results(self, local_dir: str):
+    def _find_last_remote_dir(self) -> str:
+        """Return the most recently created subdirectory under BASE_OUT_DIR, or ''."""
+        base = f"{self.remote_work_dir}/{self.params['BASE_OUT_DIR']}"
+        out, _, _ = self.run_command(
+            f"ls -td {base}/*/ 2>/dev/null | head -1 | tr -d '\\n'",
+            timeout=10,
+        )
+        return out.strip().rstrip('/') if out.strip() else ""
+
+    def retrieve_results(self, local_dir: str, remote_out_override: str = None):
         """Download results from HPC to local directory."""
         # First check if there's a completed job
         job_info_file = f"{self.remote_work_dir}/te_analysis_job.info"
@@ -2253,19 +2264,21 @@ exit 0
             except ValueError:
                 pass
 
-        # Try to get output directory from job info
-        remote_out = None
-        info_out, _, _ = self.run_command(f"cat {job_info_file} 2>/dev/null", timeout=10)
-        if info_out.strip():
-            for line in info_out.strip().split('\n'):
-                if line.startswith('OUTPUT_DIR='):
-                    remote_out = line.split('=', 1)[1]
-                    break
+        # Use caller-supplied path, job info, or constructed fallback
+        if remote_out_override:
+            remote_out = remote_out_override
+        else:
+            remote_out = None
+            info_out, _, _ = self.run_command(f"cat {job_info_file} 2>/dev/null", timeout=10)
+            if info_out.strip():
+                for line in info_out.strip().split('\n'):
+                    if line.startswith('OUTPUT_DIR='):
+                        remote_out = line.split('=', 1)[1]
+                        break
 
-        # Fall back to constructed path
-        if not remote_out:
-            family = self.params["FAMILY_NAME"].lower()
-            remote_out = f"{self.remote_work_dir}/{self.params['BASE_OUT_DIR']}/{family}"
+            if not remote_out:
+                family = self.params["FAMILY_NAME"].lower()
+                remote_out = f"{self.remote_work_dir}/{self.params['BASE_OUT_DIR']}/{family}"
 
         # Verify remote directory exists
         check_out, _, _ = self.run_command(f"test -d '{remote_out}' && echo 'exists'", timeout=10)
@@ -2413,14 +2426,20 @@ exit 0
                 elif choice == '8':
                     self.watch_job()
                 elif choice == '9':
+                    last_remote = self._find_last_remote_dir()
+                    remote_prompt = (
+                        f"Remote results directory [{last_remote}]: "
+                        if last_remote else "Remote results directory: "
+                    )
+                    remote_path = input(remote_prompt).strip() or last_remote
+
                     if self.local_output_dir:
-                        default_dir = str(self.local_output_dir)
-                        local_dir = input(f"Enter local output directory [{default_dir}]: ").strip()
-                        local_dir = local_dir or default_dir
+                        default_local = str(self.local_output_dir)
+                        local_dir = input(f"Local output directory [{default_local}]: ").strip() or default_local
                     else:
-                        local_dir = input("Enter local output directory (e.g., ~/Documents/output): ").strip()
+                        local_dir = input("Local output directory (e.g., ~/Documents/output): ").strip()
                     if local_dir:
-                        self.retrieve_results(local_dir)
+                        self.retrieve_results(local_dir, remote_out_override=remote_path or None)
                 elif choice == '10':
                     local_dir = input("Enter local directory for error logs [./hpc_error_logs]: ").strip()
                     self.download_error_logs(local_dir if local_dir else None)
