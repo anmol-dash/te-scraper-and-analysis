@@ -535,6 +535,7 @@ MENU = [
     ("8",  "te_enrichment.py All enrichment  (M+G+E)",   "action"),
     (None, "Batch / full pipeline  (scheduler)",          "section"),
     ("9",  "Configure + submit batch job  (bsub/sbatch)", "action"),
+    ("16", "Submit motif+GO batch job  (from BED file)",  "action"),
     ("10", "Run interactively on compute node",           "action"),
     ("11", "Check batch job status",                      "action"),
     ("12", "Watch batch job  (live tail)",                "action"),
@@ -592,6 +593,10 @@ def interactive_menu(client):
         elif choice == '9':
             if client.set_parameter_interactive():
                 client.submit_batch_job()
+
+        elif choice == '16':
+            client.submit_motif_batch_job()
+            input(f"  {dim('Press Enter to return to menu…')}")
 
         elif choice == '10':
             client.run_interactive_job()
@@ -694,22 +699,36 @@ def _step_local_run():
 
 
 def _find_clustered_csv(results_dir, family=None):
-    """Return Path to the *_clustered.csv for this family, or None."""
+    """Return a clustered CSV from a result root, family dir, or CSV path."""
     results_dir = Path(results_dir).expanduser()
+
+    if results_dir.is_file():
+        if results_dir.suffix.lower() == ".csv":
+            return results_dir
+        return None
+
+    if not results_dir.exists():
+        return None
 
     if family:
         fam_lo = family.lower()
+        fam_key = re.sub(r"[^a-z0-9]", "", fam_lo)
         # Standard output layout from query.py
         candidate = results_dir / fam_lo / "01_data" / f"{fam_lo}_clustered.csv"
         if candidate.exists():
             return candidate
+        candidate = results_dir / "01_data" / f"{fam_lo}_clustered.csv"
+        if candidate.exists():
+            return candidate
         # Also try with hyphens replaced by underscores, etc.
-        for p in results_dir.glob(f"**/*_clustered.csv"):
-            if fam_lo.replace("-", "") in p.stem.replace("-", ""):
+        for p in sorted(results_dir.glob("**/*_clustered.csv")):
+            stem_key = re.sub(r"[^a-z0-9]", "", p.stem.lower())
+            if fam_key in stem_key:
                 return p
 
-    # Fall back: any clustered CSV under results_dir
-    candidates = sorted(results_dir.glob("**/01_data/*_clustered.csv"))
+    # Fall back: any clustered CSV under results_dir, including files stored
+    # directly in presentation/test folders rather than query.py's 01_data dir.
+    candidates = sorted(results_dir.glob("**/*_clustered.csv"))
     return candidates[0] if candidates else None
 
 
@@ -727,7 +746,7 @@ def _launch_local_dashboard(results_dir=None, family=None, open_browser=True):
     # ── Dependency check ──────────────────────────────────────────────────────
     try:
         import dash
-        from dash import Dash, dcc, html, Input, Output, State, callback_context, no_update
+        from dash import Dash, dcc, html, Input, Output, State, ALL, callback_context, no_update
         import plotly.graph_objects as go
         import plotly.express as px
     except ImportError:
@@ -743,6 +762,7 @@ def _launch_local_dashboard(results_dir=None, family=None, open_browser=True):
     import time as _t
     import tempfile
     import uuid
+    import json
     from flask import send_from_directory
 
     # ── Locate data ───────────────────────────────────────────────────────────
@@ -984,29 +1004,92 @@ def _launch_local_dashboard(results_dir=None, family=None, open_browser=True):
             f"min_cluster_size = {mcs}  |  source = {source_label}{added}"
         )
 
-    def _tab_links():
+    def _tab_links(active_tab=None):
         tabs = _state.get("tabs", [])
         if not tabs:
             return html.Div("No recluster tabs yet.", style=_HINT)
         return html.Div([
-            html.A(
-                t["label"],
-                href=t["url"],
-                target="_blank",
+            html.Div([
+                html.Button(
+                    t["label"],
+                    id={"type": "cluster-tab", "tab_id": t["id"]},
+                    n_clicks=0,
+                    title="Show this recluster result",
+                    style={
+                        "border": "none",
+                        "background": "transparent",
+                        "color": "#1f6fb2",
+                        "cursor": "pointer",
+                        "fontSize": "11px",
+                        "padding": "0 4px 0 0",
+                    },
+                ),
+                html.Button(
+                    "x",
+                    id={"type": "close-tab", "tab_id": t["id"]},
+                    n_clicks=0,
+                    title="Close tab",
+                    style={
+                        "border": "none",
+                        "background": "transparent",
+                        "color": "#777",
+                        "cursor": "pointer",
+                        "fontSize": "11px",
+                        "padding": "0 0 0 4px",
+                    },
+                ),
+                html.Button(
+                    "<",
+                    id={"type": "move-tab-left", "tab_id": t["id"]},
+                    n_clicks=0,
+                    title="Move tab left",
+                    style={
+                        "border": "none",
+                        "background": "transparent",
+                        "color": "#777",
+                        "cursor": "pointer",
+                        "fontSize": "11px",
+                        "padding": "0 0 0 6px",
+                    },
+                ),
+                html.Button(
+                    ">",
+                    id={"type": "move-tab-right", "tab_id": t["id"]},
+                    n_clicks=0,
+                    title="Move tab right",
+                    style={
+                        "border": "none",
+                        "background": "transparent",
+                        "color": "#777",
+                        "cursor": "pointer",
+                        "fontSize": "11px",
+                        "padding": "0 0 0 2px",
+                    },
+                ),
+            ],
                 style={
-                    "display": "inline-block",
+                    "display": "inline-flex",
+                    "alignItems": "center",
                     "padding": "5px 8px",
                     "margin": "0 6px 6px 0",
-                    "border": "1px solid #b8d7f6",
+                    "border": ("1px solid #4C9BE8"
+                               if t["id"] == active_tab else "1px solid #b8d7f6"),
                     "borderRadius": "4px",
-                    "color": "#1f6fb2",
-                    "textDecoration": "none",
-                    "fontSize": "11px",
-                    "background": "#f3f9ff",
+                    "background": ("#e6f2ff" if t["id"] == active_tab else "#f3f9ff"),
                 },
             )
             for t in tabs
         ])
+
+    def _tab_content(active_tab=None):
+        tabs = _state.get("tabs", [])
+        if not tabs:
+            return ""
+        active = next((t for t in tabs if t["id"] == active_tab), tabs[-1])
+        return (
+            f"Showing {active['label']}. Use the tab buttons above to move between "
+            "recluster results, < and > to reorder tabs, or x to close a tab."
+        )
 
     # ── App layout ────────────────────────────────────────────────────────────
     _BTN = {
@@ -1019,7 +1102,11 @@ def _launch_local_dashboard(results_dir=None, family=None, open_browser=True):
                "display": "block", "marginBottom": "4px", "color": "#555"}
     _HINT  = {"fontSize": "11px", "color": "#999", "marginTop": "2px"}
 
-    PORT = 8765
+    HOST = os.environ.get("GAMECA_HOST", "127.0.0.1")
+    try:
+        PORT = int(os.environ.get("GAMECA_PORT", "8765"))
+    except ValueError:
+        PORT = 8765
     tab_dir = Path(tempfile.gettempdir()) / f"gameca_recluster_tabs_{os.getpid()}"
     tab_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1030,6 +1117,7 @@ def _launch_local_dashboard(results_dir=None, family=None, open_browser=True):
         return send_from_directory(tab_dir, filename)
 
     _state["tabs"] = []
+    _state["active_tab"] = None
 
     app.layout = html.Div([
         dcc.Store(id="open-tab-url"),
@@ -1046,6 +1134,8 @@ def _launch_local_dashboard(results_dir=None, family=None, open_browser=True):
                 style={"margin": 0, "fontSize": "12px", "color": "#888"}),
             html.Div(id="tab-list", children=_tab_links(),
                      style={"marginTop": "8px", "minHeight": "26px"}),
+            html.Div(id="tab-content", children=_tab_content(),
+                     style={"fontSize": "11px", "color": "#777", "minHeight": "16px"}),
         ], style={"padding": "14px 20px 10px",
                    "borderBottom": "2px solid #e8e8e8",
                    "background": "white"}),
@@ -1354,6 +1444,7 @@ def _launch_local_dashboard(results_dir=None, family=None, open_browser=True):
         Output("header-title", "children"),
         Output("header-subtitle", "children"),
         Output("tab-list", "children"),
+        Output("tab-content", "children"),
         Input("recluster-btn", "n_clicks"),
         Input("reset-btn",     "n_clicks"),
         Input("feature-chromosomes", "value"),
@@ -1391,12 +1482,14 @@ def _launch_local_dashboard(results_dir=None, family=None, open_browser=True):
                 no_update,
                 no_update,
                 no_update,
+                no_update,
             )
 
         # ── Reset ─────────────────────────────────────────────────────────────
         if triggered == "reset-btn":
             _state["df"] = df_orig.copy()
             _state["tabs"] = []
+            _state["active_tab"] = None
             n   = len(df_orig)
             mcs = max(2, n // 5)
             _log(f"Dashboard reset: rows={n}, min_cluster_size={mcs}")
@@ -1406,7 +1499,8 @@ def _launch_local_dashboard(results_dir=None, family=None, open_browser=True):
                     no_update,
                     _header_title(),
                     _header_subtitle(_state["df"]),
-                    _tab_links())
+                    _tab_links(),
+                    _tab_content())
 
         # ── Build working copy ─────────────────────────────────────────────────
         df_work = _state["df"].copy()
@@ -1441,6 +1535,7 @@ def _launch_local_dashboard(results_dir=None, family=None, open_browser=True):
                         no_update,
                         no_update,
                         no_update,
+                        no_update,
                         no_update)
 
         if sequence_upload_contents:
@@ -1471,6 +1566,7 @@ def _launch_local_dashboard(results_dir=None, family=None, open_browser=True):
                     no_update,
                     no_update,
                     no_update,
+                    no_update,
                 )
 
         # ── Determine subset ──────────────────────────────────────────────────
@@ -1487,7 +1583,7 @@ def _launch_local_dashboard(results_dir=None, family=None, open_browser=True):
                 _log(f"Loaded {len(indices)} valid index selection(s) from upload")
             except Exception as e:
                 _log(f"Index upload failed: {e}")
-                return no_update, f"⚠ Index file error: {e}", no_update, no_update, no_update, no_update, no_update
+                return no_update, f"⚠ Index file error: {e}", no_update, no_update, no_update, no_update, no_update, no_update
 
         elif sel_data and sel_data.get("points"):
             indices = [int(pt["customdata"])
@@ -1508,6 +1604,7 @@ def _launch_local_dashboard(results_dir=None, family=None, open_browser=True):
         if n_sub < 4:
             return (no_update,
                     f"⚠ Too few sequences ({n_sub}) — need at least 4 to cluster.",
+                    no_update,
                     no_update,
                     no_update,
                     no_update,
@@ -1555,12 +1652,14 @@ def _launch_local_dashboard(results_dir=None, family=None, open_browser=True):
                 no_update,
                 no_update,
                 no_update,
+                no_update,
             )
 
         fig = _make_fig(_state["df"], feature_filters, feature_mode)
         tab_name = f"recluster_{uuid.uuid4().hex}.html"
         tab_path = tab_dir / tab_name
         tab_label = f"Recluster {len(_state['tabs']) + 1}"
+        tab_id = uuid.uuid4().hex
         try:
             fig.write_html(
                 tab_path,
@@ -1572,14 +1671,19 @@ def _launch_local_dashboard(results_dir=None, family=None, open_browser=True):
                     "modeBarButtonsToAdd": ["lasso2d", "select2d"],
                 },
             )
-            tab_url = f"http://127.0.0.1:{PORT}/recluster-tabs/{tab_name}"
+            tab_host = "127.0.0.1" if HOST in {"0.0.0.0", "::"} else HOST
+            tab_url = f"http://{tab_host}:{PORT}/recluster-tabs/{tab_name}"
             _state["tabs"].append({
+                "id": tab_id,
                 "label": f"{tab_label} ({n_sub:,} rows)",
                 "url": tab_url,
+                "figure": fig.to_dict(),
+                "status": "\n".join(status_lines),
             })
-            status_lines.append(f"Opened browser tab: {tab_label}")
+            _state["active_tab"] = tab_id
+            status_lines.append(f"Created interactive tab: {tab_label}")
             _log(f"Wrote recluster tab HTML: {tab_path}")
-            tab_payload = {"url": tab_url, "nonce": tab_name}
+            tab_payload = no_update
         except Exception as e:
             status_lines.append(f"Could not create new tab HTML: {e}")
             _log(f"Failed writing recluster tab HTML: {e}")
@@ -1591,10 +1695,70 @@ def _launch_local_dashboard(results_dir=None, family=None, open_browser=True):
                 tab_payload,
                 _header_title(),
                 _header_subtitle(_state["df"], sub_label),
-                _tab_links())
+                _tab_links(_state["active_tab"]),
+                _tab_content(_state["active_tab"]))
+
+    @app.callback(
+        Output("scatter", "figure", allow_duplicate=True),
+        Output("run-status", "children", allow_duplicate=True),
+        Output("tab-list", "children", allow_duplicate=True),
+        Output("tab-content", "children", allow_duplicate=True),
+        Input({"type": "cluster-tab", "tab_id": ALL}, "n_clicks"),
+        Input({"type": "close-tab", "tab_id": ALL}, "n_clicks"),
+        Input({"type": "move-tab-left", "tab_id": ALL}, "n_clicks"),
+        Input({"type": "move-tab-right", "tab_id": ALL}, "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def _manage_recluster_tabs(tab_clicks, close_clicks, move_left_clicks, move_right_clicks):
+        prop_id = callback_context.triggered[0]["prop_id"].split(".")[0]
+        try:
+            payload = json.loads(prop_id)
+        except Exception:
+            return no_update, no_update, no_update, no_update
+
+        tab_id = payload.get("tab_id")
+        action = payload.get("type")
+        tabs = _state.get("tabs", [])
+
+        if action == "close-tab":
+            closed_active = tab_id == _state.get("active_tab")
+            tabs = [t for t in tabs if t["id"] != tab_id]
+            _state["tabs"] = tabs
+            if closed_active:
+                _state["active_tab"] = tabs[-1]["id"] if tabs else None
+            active = next((t for t in tabs if t["id"] == _state.get("active_tab")), None)
+            fig = go.Figure(active["figure"]) if active else _make_fig(_state["df"])
+            status = active["status"] if active else "Closed recluster tab."
+            return fig, status, _tab_links(_state["active_tab"]), _tab_content(_state["active_tab"])
+
+        if action in {"move-tab-left", "move-tab-right"}:
+            index = next((i for i, t in enumerate(tabs) if t["id"] == tab_id), None)
+            if index is None:
+                return no_update, no_update, _tab_links(_state.get("active_tab")), _tab_content(_state.get("active_tab"))
+            delta = -1 if action == "move-tab-left" else 1
+            new_index = index + delta
+            if 0 <= new_index < len(tabs):
+                tabs[index], tabs[new_index] = tabs[new_index], tabs[index]
+                _state["tabs"] = tabs
+            active = next((t for t in tabs if t["id"] == _state.get("active_tab")), None)
+            fig = go.Figure(active["figure"]) if active else _make_fig(_state["df"])
+            status = active["status"] if active else no_update
+            return fig, status, _tab_links(_state.get("active_tab")), _tab_content(_state.get("active_tab"))
+
+        active = next((t for t in tabs if t["id"] == tab_id), None)
+        if not active:
+            return no_update, no_update, _tab_links(_state.get("active_tab")), _tab_content(_state.get("active_tab"))
+        _state["active_tab"] = tab_id
+        return (
+            go.Figure(active["figure"]),
+            active["status"],
+            _tab_links(tab_id),
+            _tab_content(tab_id),
+        )
 
     # ── Launch ────────────────────────────────────────────────────────────────
-    url  = f"http://127.0.0.1:{PORT}"
+    display_host = "127.0.0.1" if HOST in {"0.0.0.0", "::"} else HOST
+    url  = f"http://{display_host}:{PORT}"
     print(f"\n  {green('●')}  Dashboard → {bold(url)}")
     print(f"  {dim('Press Ctrl+C to stop.')}")
     if open_browser:
@@ -1608,7 +1772,7 @@ def _launch_local_dashboard(results_dir=None, family=None, open_browser=True):
         threading.Timer(1.2, _open_dashboard).start()
 
     try:
-        app.run(debug=False, port=PORT, use_reloader=False)
+        app.run(debug=False, host=HOST, port=PORT, use_reloader=False)
     except KeyboardInterrupt:
         print(f"\n  {yellow('Stopped.')}")
 

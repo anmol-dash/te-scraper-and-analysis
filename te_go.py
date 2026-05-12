@@ -213,17 +213,22 @@ def run_go_annotation(enrichment_dir, build, out_dir, clustered_csv=None,
 
     # ── Annotate enrichment CSVs ──────────────────────────────────────────────
     print("\n  Annotating enrichment CSVs...")
+    annotated_frames = []
     for cid in cluster_ids:
         sig = significant_tfs.get(cid, pd.DataFrame())
         if not len(sig):
             continue
         sig = sig.copy()
+        sig["Cluster"] = cid
         sig["Gene_Name"] = sig["Motif"].apply(lambda m: _lookup(m, "Name"))
         sig["Summary"]   = sig["Motif"].apply(lambda m: (_lookup(m, "Summary") or "")[:200])
         sig["GO_BP"]     = sig["Motif"].apply(lambda m: _lookup(m, "GO_BP"))
         out_ann = enrichment_dir / f"cluster_{cid}_enrichment_annotated.csv"
         sig.to_csv(out_ann, index=False)
+        annotated_frames.append(sig)
         print(f"  Cluster {cid}: {len(sig)} annotated → {out_ann.name}")
+
+    _general_go_plots(gf_df, annotated_frames, go_dir)
 
     # ── Strand GO plots (requires clustered CSV + overlap data) ──────────────
     if clustered_csv:
@@ -232,6 +237,60 @@ def run_go_annotation(enrichment_dir, build, out_dir, clustered_csv=None,
 
     print(f"\n  GO annotation complete → {go_dir}")
     return {"gene_functions_path": str(gf_path), "n_genes": len(gf_df)}
+
+
+def _split_go_terms(value):
+    terms = []
+    for item in str(value or "").split(";"):
+        item = item.strip()
+        if item:
+            terms.append(item)
+    return terms
+
+
+def _general_go_plots(gf_df, annotated_frames, go_dir):
+    """Generate non-strand GO summary plots so GO has visible outputs."""
+    go_dir = Path(go_dir)
+    summary_rows = []
+
+    if len(gf_df) and "GO_BP" in gf_df.columns:
+        for terms in gf_df["GO_BP"].dropna():
+            for term in _split_go_terms(terms):
+                summary_rows.append({"Source": "all_genes", "GO_Term": term})
+
+    for frame in annotated_frames:
+        if "GO_BP" not in frame.columns or "Cluster" not in frame.columns:
+            continue
+        for _, row in frame.iterrows():
+            for term in _split_go_terms(row.get("GO_BP", "")):
+                summary_rows.append({"Source": f"cluster_{row['Cluster']}", "GO_Term": term})
+
+    if not summary_rows:
+        (go_dir / "go_plot_status.txt").write_text(
+            "No GO Biological Process terms were available for plotting. "
+            "This can happen when no motifs pass the p-value cutoff or mygene.info "
+            "returns no GO annotations.\n"
+        )
+        return
+
+    counts = pd.DataFrame(summary_rows)
+    overall = counts["GO_Term"].value_counts().head(20).reset_index()
+    overall.columns = ["GO_Term", "Count"]
+    overall.to_csv(go_dir / "go_bp_top_terms.csv", index=False)
+
+    try:
+        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots(figsize=(10, max(5, 0.35 * len(overall))))
+        ax.barh(overall["GO_Term"][::-1], overall["Count"][::-1], color="#4C9BE8")
+        ax.set_xlabel("Count")
+        ax.set_title("Top GO Biological Process Terms", fontweight="bold")
+        ax.spines[["top", "right"]].set_visible(False)
+        plt.tight_layout()
+        plt.savefig(go_dir / "go_bp_top_terms.png", dpi=150, bbox_inches="tight")
+        plt.close()
+        print("  Saved go_bp_top_terms.png")
+    except Exception as e:
+        print(f"  [WARN] GO BP plot failed: {e}")
 
 
 def _strand_go_plots(clustered_csv, out_dir, cluster_ids,

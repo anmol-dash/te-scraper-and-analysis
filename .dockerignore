@@ -1,0 +1,19 @@
+.git
+.DS_Store
+__pycache__/
+*.py[cod]
+*.so
+*.o
+build/
+.pytest_cache/
+
+# Generated outputs can be bind-mounted when needed.
+results*/
+*results*/
+test_output/
+presentation/
+LTR5HSResults/
+collab_rna/
+
+# Large local notes/artifacts.
+directory_struct.txt

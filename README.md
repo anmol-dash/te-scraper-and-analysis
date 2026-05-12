@@ -16,6 +16,37 @@ rerun in isolation, or swapped out. Supports **LSF** and **Slurm** HPC clusters.
 ---
 ![alt text](https://github.com/anmol-dash/te-scraper-and-analysis/blob/main/ERD_Updated.png)
 
+## Install
+
+### Docker
+
+Docker is the easiest way to run GAMECA on a new computer because it includes
+Python plus command-line tools such as MAFFT and bedtools.
+
+```bash
+docker build -t gameca .
+docker run --rm -it -p 8765:8765 -v "$PWD:/work" gameca
+```
+
+Inside the menu, paths under `/work` point to the folder you launched Docker
+from. To open the local dashboard directly:
+
+```bash
+docker run --rm -it -p 8765:8765 -v "$PWD:/work" gameca \
+  python ui.py --dashboard /work/results --no-browser
+```
+
+Then open `http://127.0.0.1:8765` on the host computer.
+
+### Local Python
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python ui.py --local
+```
+
 ## Pipeline
 
 ```

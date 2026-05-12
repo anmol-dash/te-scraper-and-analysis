@@ -1,44 +1,33 @@
-# TE Analysis Pipeline — Python dependencies
-# Install: pip install -r requirements.txt
-# Or in the venv on HPC: pip install -r requirements.txt
+# GAMECA Python dependencies
 
-# ── Core data processing ──────────────────────────────────────────────────────
-pandas>=1.3.0
-numpy>=1.20.0
+# Core data processing
+numpy>=1.24,<2.0
+pandas>=2.0,<3.0
+scipy>=1.10,<2.0
 
-# ── Web requests / parsing ────────────────────────────────────────────────────
-requests>=2.25.0
-beautifulsoup4>=4.9.0
+# Web requests / parsing
+requests>=2.31,<3.0
+beautifulsoup4>=4.12,<5.0
 
-# ── Visualisation ─────────────────────────────────────────────────────────────
-plotly>=5.0.0
-matplotlib>=3.5.0
-dash>=2.0.0
+# Visualization and local interactive dashboard
+dash>=2.14,<3.0
+plotly>=5.18,<6.0
+matplotlib>=3.7,<4.0
 
-# ── Machine learning / clustering ─────────────────────────────────────────────
-scipy>=1.9.0
-scikit-learn>=1.3.0,<1.7
-umap-learn>=0.5.7
-hdbscan>=0.8.0
+# Machine learning / clustering
+scikit-learn>=1.3,<1.7
+umap-learn>=0.5.7,<0.6
+hdbscan>=0.8.33,<0.9
+numba>=0.58,<0.62
 
-# ── Bioinformatics ────────────────────────────────────────────────────────────
-biopython>=1.79
-# pysam: fast indexed FASTA access (requires htslib; install via conda or pip)
-#   conda install -c bioconda pysam
-#   pip install pysam
-pysam>=0.20.0
+# Bioinformatics
+biopython>=1.81,<2.0
+pysam>=0.22,<0.24
+pybedtools>=0.10,<0.11
+CIAlign>=1.0,<2.0
 
-# Bedtools Python bindings (te_enrichment.py motif intersection)
-#   conda install -c bioconda pybedtools
-#   pip install pybedtools
-pybedtools>=0.9.0
+# SSH client for HPC mode
+paramiko>=3.4,<4.0
 
-# CIAlign: alignment visualisation (te_alignment.py)
-#   pip install cialign
-cialign
-
-# ── SSH client (hpc_client.py) ────────────────────────────────────────────────
-paramiko>=2.7.0
-
-# ── Optional: gene annotation lookup (te_enrichment.py) ──────────────────────
-# mygene   # pip install mygene  (only needed for --go flag)
+# Build helper for optional te_fast Cython extension
+Cython>=3.0,<4.0

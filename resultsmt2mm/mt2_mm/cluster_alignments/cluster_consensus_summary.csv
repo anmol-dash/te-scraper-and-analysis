@@ -1,4 +1,0 @@
-cluster,size,consensus_length,n_sequences,alignment_length,consensus_length_no_gaps,avg_gaps_per_col,cols_no_gaps,cols_majority_gap
--1,829,945,829,945,945,403.8708994708995,0,452
-0,1082,1817,1082,1817,1817,838.4507429829389,0,1324
-1,730,1220,730,1220,1220,443.3196721311475,17,727

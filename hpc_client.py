@@ -63,6 +63,9 @@ class HPCClient:
             "SPECIES": "human",
             "ASSEMBLY": "hg38",      # UCSC assembly/build used for automatic loading
             "LOCAL_ASSEMBLY_PATH": "",  # Optional genome FASTA path on HPC
+            "JASPAR_BED_PATH": "",      # Optional pre-downloaded JASPAR BED/BED.GZ on HPC
+            "JASPAR_TABIX_PATH": "",    # bgzip+tabix-indexed JASPAR .bed.gz (reusable across families)
+            "P_THRESHOLD": 0.05,        # Fisher p-value significance threshold for motif/GO
             "BASE_OUT_DIR": "results",
             "K": 6,
             "PCA_DIMS": 40,
@@ -378,11 +381,14 @@ fi
         Args:
             command: The command to execute
             timeout: Timeout in seconds
-            stream_output: If True, print output in real-time as it's received
+            stream_output: If True, print raw output in real-time. If "summary",
+                print only stage/error/status lines plus a heartbeat.
         """
         if not self.connected:
             raise RuntimeError("Not connected to HPC")
 
+        summary_stream = stream_output == "summary"
+        raw_stream = bool(stream_output) and not summary_stream
         _log(f"Remote command start (timeout={timeout}s, stream={stream_output}): {command[:240]}")
         channel = self._transport.open_session()
         channel.settimeout(timeout)
@@ -395,30 +401,66 @@ fi
         import time
         start_time = time.time()
         last_output_time = time.time()
+        line_buffer = ""
+
+        def _important_stream_line(line):
+            s = line.strip()
+            if not s:
+                return False
+            patterns = (
+                "===", "TE Analysis", "PIPELINE", "Pipeline", "STEP ",
+                "FATAL", "ERROR", "Error", "Exception", "Traceback",
+                "WARNING", "[WARN]", "[SKIP]", "Saved ", "Results:",
+                "Exit code:", "Runtime:", "Starting pipeline", "Command:",
+                "Dashboard:", "Consensus:", "Motifs:", "TF binding:", "GO:",
+            )
+            if s.startswith(patterns):
+                return True
+            return bool(re.match(r"^\[\d{2}:\d{2}:\d{2}\].*(Starting|complete|done|failed|skipped|Loading|Fetching|Clustering|Running|Saved|Output|Results)", s))
+
+        def _emit_summary(chunk):
+            nonlocal line_buffer, last_output_time
+            try:
+                text = chunk.decode(errors="replace")
+            except Exception:
+                return
+            line_buffer += text.replace("\r", "\n")
+            while "\n" in line_buffer:
+                line, line_buffer = line_buffer.split("\n", 1)
+                if _important_stream_line(line):
+                    print(f"[HPC OUTPUT] {line.strip()}", flush=True)
+                    last_output_time = time.time()
+
+        if summary_stream:
+            print("[HPC STATUS] RUNNING — remote command has started.", flush=True)
 
         while True:
             # Check for stdout
             if channel.recv_ready():
                 chunk = channel.recv(4096)
                 out += chunk
-                if stream_output and chunk:
+                if raw_stream and chunk:
                     try:
                         print(chunk.decode(), end='', flush=True)
                     except UnicodeDecodeError:
                         pass
                     last_output_time = time.time()
+                elif summary_stream and chunk:
+                    _emit_summary(chunk)
 
             # Check for stderr
             if channel.recv_stderr_ready():
                 chunk = channel.recv_stderr(4096)
                 err += chunk
-                if stream_output and chunk:
+                if raw_stream and chunk:
                     try:
                         # Print stderr in a different color if possible
                         print(chunk.decode(), end='', flush=True)
                     except UnicodeDecodeError:
                         pass
                     last_output_time = time.time()
+                elif summary_stream and chunk:
+                    _emit_summary(chunk)
 
             # Check if command is done
             if channel.exit_status_ready():
@@ -429,36 +471,49 @@ fi
 
             # Print a heartbeat if no output for a while (only in stream mode)
             if stream_output and (time.time() - last_output_time) > 30:
-                print(f"\n[Still running... {int(time.time() - last_output_time)}s since last output]", flush=True)
+                elapsed = int(time.time() - start_time)
+                if summary_stream:
+                    print(f"[HPC STATUS] RUNNING — {elapsed}s elapsed.", flush=True)
+                else:
+                    print(f"\n[Still running... {int(time.time() - last_output_time)}s since last output]", flush=True)
                 last_output_time = time.time()
 
         # Get any remaining data
         while channel.recv_ready():
             chunk = channel.recv(4096)
             out += chunk
-            if stream_output and chunk:
+            if raw_stream and chunk:
                 try:
                     print(chunk.decode(), end='', flush=True)
                 except UnicodeDecodeError:
                     pass
+            elif summary_stream and chunk:
+                _emit_summary(chunk)
         while channel.recv_stderr_ready():
             chunk = channel.recv_stderr(4096)
             err += chunk
-            if stream_output and chunk:
+            if raw_stream and chunk:
                 try:
                     print(chunk.decode(), end='', flush=True)
                 except UnicodeDecodeError:
                     pass
+            elif summary_stream and chunk:
+                _emit_summary(chunk)
 
         exit_code = channel.recv_exit_status()
+        if summary_stream and line_buffer.strip() and _important_stream_line(line_buffer):
+            print(f"[HPC OUTPUT] {line_buffer.strip()}", flush=True)
         channel.close()
         elapsed = time.time() - start_time
+        if summary_stream:
+            state = "NOT RUNNING — completed successfully" if exit_code == 0 else f"NOT RUNNING — failed with exit {exit_code}"
+            print(f"[HPC STATUS] {state} after {elapsed/60:.1f} min.", flush=True)
         _log(
             f"Remote command done exit={exit_code} elapsed={elapsed:.1f}s "
             f"stdout={len(out):,}B stderr={len(err):,}B"
         )
 
-        return out.decode(), err.decode(), exit_code
+        return out.decode("utf-8", errors="replace"), err.decode("utf-8", errors="replace"), exit_code
 
     def preview_family_count(self) -> int:
         """Preview the number of sequences matching the family name."""
@@ -511,6 +566,8 @@ fi
             "13": "QUEUE", "14": "WALLTIME", "15": "MODULES",
             "17": "ASSEMBLY",
             "19": "LOCAL_ASSEMBLY_PATH",
+            "24": "JASPAR_BED_PATH",
+            "25": "JASPAR_TABIX_PATH",
         }
         int_params = {
             "4": "K", "5": "PRIMER_K", "6": "TOP_N_GLOBAL",
@@ -519,6 +576,9 @@ fi
             "18": "FETCH_WORKERS",
             "20": "PCA_DIMS", "21": "N_EPOCHS", "22": "RANDOM_STATE",
             "23": "SKIP_TSNE",
+        }
+        float_params = {
+            "26": "P_THRESHOLD",
         }
 
         while True:
@@ -533,6 +593,10 @@ fi
                 print(f"  [{num:>2}] {key:<35} = {val}")
             print()
             for num, key in sorted(int_params.items(), key=lambda x: int(x[0])):
+                val = self.params.get(key, "")
+                print(f"  [{num:>2}] {key:<35} = {val}")
+            print()
+            for num, key in sorted(float_params.items(), key=lambda x: int(x[0])):
                 val = self.params.get(key, "")
                 print(f"  [{num:>2}] {key:<35} = {val}")
             print()
@@ -552,6 +616,12 @@ fi
             print("    [17] ASSEMBLY: UCSC assembly/build (human: hg38/hg19; mouse: mm10/mm39)")
             print("    [18] FETCH_WORKERS: UCSC fetch workers for automatic loading")
             print("    [19] LOCAL_ASSEMBLY_PATH: Optional local FASTA on the cluster")
+            print("    [24] JASPAR_BED_PATH: Optional JASPAR BED/BED.GZ path on the cluster")
+            print("    [25] JASPAR_TABIX_PATH: bgzip+tabix-indexed JASPAR .bed.gz on the cluster")
+            print("         (.tbi must sit alongside it). Reusable across all TE families on the")
+            print("         same build — tabix only reads your loci regions, not the whole file.")
+            print("    [26] P_THRESHOLD: Fisher exact test p-value cutoff for motif/GO significance")
+            print("         (default 0.05; lower = stricter, e.g. 0.01 or 0.001)")
             print()
             print("  [p]  Preview family count")
             print("  [r]  Run analysis")
@@ -587,6 +657,18 @@ fi
                         self.params[key] = int(val)
                     except ValueError:
                         print("  Must be an integer.")
+            elif choice in float_params:
+                key = float_params[choice]
+                cur = self.params.get(key, "")
+                val = input(f"  {key} [{cur}]: ").strip()
+                if val:
+                    try:
+                        pv = float(val)
+                        if not (0 < pv <= 1):
+                            raise ValueError("must be between 0 and 1")
+                        self.params[key] = pv
+                    except ValueError as e:
+                        print(f"  Invalid value: {e}")
             else:
                 print("  Invalid option")
 
@@ -631,6 +713,15 @@ fi
 
         if int(self.params.get("SKIP_TSNE", 1)):
             args.append("--skip-tsne")
+
+        # Prefer the tabix-indexed copy when set; fall back to plain BED path.
+        jaspar = (str(self.params.get("JASPAR_TABIX_PATH", "")).strip()
+                  or str(self.params.get("JASPAR_BED_PATH", "")).strip())
+        if jaspar:
+            args += ["--jaspar-bed", jaspar]
+
+        p_thresh = self.params.get("P_THRESHOLD", 0.05)
+        args += ["--p-threshold", str(p_thresh)]
 
         cli = " ".join(shlex.quote(str(arg)) for arg in args)
         _log(f"Pipeline CLI args: {cli}")
@@ -1145,7 +1236,7 @@ exit $EXIT_CODE
         import time
         start_time = time.time()
         try:
-            out, err, code = self.run_command(bsub_cmd, timeout=14400, stream_output=True)
+            out, err, code = self.run_command(bsub_cmd, timeout=14400, stream_output="summary")
         except KeyboardInterrupt:
             print("\n\nInterrupted by user. Job may still be running on the cluster.")
             print("Use 'bjobs' on the HPC to check.")
@@ -1165,125 +1256,222 @@ exit $EXIT_CODE
 
         return code == 0
 
-    def check_job_status(self):
-        """Check the status of the submitted batch job."""
-        job_info_file = f"{self.remote_work_dir}/te_analysis_job.info"
-        job_done_file = f"{self.remote_work_dir}/te_analysis_job.done"
-        job_out_file = f"{self.remote_work_dir}/te_analysis_job.out"
-        job_err_file = f"{self.remote_work_dir}/te_analysis_job.err"
-        job_error_log = f"{self.remote_work_dir}/te_analysis_job.error.log"
+    def _find_latest_job_info(self):
+        """Return info for the most recently submitted job (pipeline or motif-only).
 
-        # Try to get job info
-        out, err, code = self.run_command(f"cat {job_info_file} 2>/dev/null", timeout=10)
-        if code != 0 or not out.strip():
-            print("No job information found. Have you submitted a job?")
+        Checks both te_analysis_job.info and te_motif_job.info and picks the
+        one with the newer mtime so the right files are used regardless of which
+        job type was last submitted.
+
+        Returns
+        -------
+        (info_dict, out_path, err_path, done_path, errlog_path)
+        All paths are None when no info file is found.
+        """
+        candidates = [
+            ("te_analysis_job", f"{self.remote_work_dir}/te_analysis_job.info"),
+            ("te_motif_job",    f"{self.remote_work_dir}/te_motif_job.info"),
+        ]
+
+        best_mtime  = -1
+        best_prefix = None
+        best_info   = None
+
+        for prefix, info_path in candidates:
+            mtime_out, _, _ = self.run_command(
+                f"stat -c %Y {info_path} 2>/dev/null || echo -1", timeout=10)
+            try:
+                mtime = int(mtime_out.strip())
+            except (ValueError, AttributeError):
+                mtime = -1
+
+            if mtime <= 0:
+                continue
+
+            content, _, ccode = self.run_command(f"cat {info_path} 2>/dev/null", timeout=10)
+            if ccode != 0 or not content.strip():
+                continue
+
+            info = {}
+            for line in content.strip().splitlines():
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    info[k.strip()] = v.strip()
+
+            if mtime > best_mtime:
+                best_mtime  = mtime
+                best_prefix = prefix
+                best_info   = info
+
+        if best_info is None:
+            return None, None, None, None, None
+
+        base = f"{self.remote_work_dir}/{best_prefix}"
+        return best_info, f"{base}.out", f"{base}.err", f"{base}.done", f"{base}.error.log"
+
+    def _get_scheduler_state(self, job_id):
+        """Return a normalised job state string by querying the scheduler.
+
+        Returns one of: 'RUNNING', 'PENDING', 'DONE', 'FAILED', 'UNKNOWN'
+
+        Never interprets the .done marker file — that's the caller's job.
+        """
+        if not job_id or job_id == "unknown":
+            return "UNKNOWN"
+
+        if self.scheduler == "slurm":
+            out, _, _ = self.run_command(
+                f"squeue -j {job_id} --format=%T --noheader 2>&1 | head -1",
+                timeout=15)
+            text = out.strip().upper()
+            if "RUNNING" in text:
+                return "RUNNING"
+            if "PENDING" in text or "CF" in text:
+                return "PENDING"
+            if text and "INVALID" not in text and "error" not in text.lower():
+                # Some other state (COMPLETING, SUSPENDED, etc.)
+                return "RUNNING"
+            # Job gone from squeue — check sacct for final state
+            acct, _, _ = self.run_command(
+                f"sacct -j {job_id} --format=State --noheader 2>/dev/null | head -1",
+                timeout=15)
+            state = acct.strip().upper()
+            if "COMPLETED" in state:
+                return "DONE"
+            if any(k in state for k in ("FAILED", "CANCELLED", "TIMEOUT", "NODE_FAIL")):
+                return "FAILED"
+            return "DONE"  # gone from squeue, assume finished
+
+        else:  # LSF
+            out, _, _ = self.run_command(f"bjobs {job_id} 2>&1", timeout=15)
+            low = out.lower()
+            if "not found" in low or "is not found" in low:
+                return "DONE"   # gone from LSF queue
+            # Parse STAT column: header is JOBID USER STAT QUEUE ...
+            for line in out.splitlines():
+                parts = line.split()
+                if len(parts) >= 3 and parts[0] == str(job_id):
+                    stat = parts[2].upper()
+                    if stat == "RUN":
+                        return "RUNNING"
+                    if stat in ("PEND", "WAIT", "PSUSP", "SSUSP", "USUSP"):
+                        return "PENDING"
+                    if stat == "DONE":
+                        return "DONE"
+                    if stat == "EXIT":
+                        return "FAILED"
+                    return "RUNNING"  # unknown LSF state — still in queue
+            return "UNKNOWN"
+
+    def check_job_status(self):
+        """Check the status of the most recently submitted batch job."""
+        job_info, job_out, job_err, job_done, job_errlog = self._find_latest_job_info()
+
+        if job_info is None:
+            print("\nNo job information found. Submit a batch job first.")
             return None
 
-        # Parse job info
-        job_info = {}
-        for line in out.strip().split('\n'):
-            if '=' in line:
-                key, val = line.split('=', 1)
-                job_info[key] = val
+        job_id   = job_info.get("JOB_ID",   "unknown")
+        out_dir  = job_info.get("OUTPUT_DIR", "")
+        family   = job_info.get("FAMILY",    "")
+        job_type = job_info.get("TYPE",      "pipeline")
+        submitted = job_info.get("SUBMITTED", "unknown")
 
-        job_id = job_info.get('JOB_ID', 'unknown')
-        family = job_info.get('FAMILY', 'unknown')
-        output_dir = job_info.get('OUTPUT_DIR', '')
-
-        print("\n" + "=" * 60)
-        print("JOB STATUS")
+        print()
         print("=" * 60)
-        print(f"Job ID: {job_id}")
-        print(f"Family: {family}")
-        print(f"Output dir: {output_dir}")
+        print("  JOB STATUS")
+        print("=" * 60)
+        print(f"  Job ID    : {job_id}")
+        print(f"  Type      : {job_type}" + (f"  (family: {family})" if family else ""))
+        print(f"  Submitted : {submitted}")
+        print(f"  Out dir   : {out_dir or '(unknown)'}")
+        print(f"  Job log   : {job_out}")
 
-        # Check if job is done
-        done_out, _, _ = self.run_command(f"cat {job_done_file} 2>/dev/null", timeout=10)
-        job_failed = False
-        if done_out.strip():
-            try:
-                exit_code = int(done_out.strip())
-                if exit_code == 0:
-                    print(f"\nStatus: COMPLETED SUCCESSFULLY")
-                else:
-                    print(f"\nStatus: FAILED (exit code: {exit_code})")
-                    job_failed = True
-            except ValueError:
-                print(f"\nStatus: COMPLETED (exit code: {done_out.strip()})")
+        # ── 1. Ask scheduler first — never trust .done alone ─────────────────
+        sched_state = self._get_scheduler_state(job_id)
+        done_out, _, _ = self.run_command(f"cat {job_done} 2>/dev/null", timeout=10)
+        done_val = done_out.strip()
 
-            # Show output size
-            size_out, _, _ = self.run_command(f"du -sh {output_dir} 2>/dev/null || echo 'unknown'", timeout=10)
-            print(f"Results size: {size_out.strip()}")
-            if not job_failed:
-                print("\nResults are ready to retrieve!")
-        else:
-            # Check if job is still running
-            if job_id != 'unknown':
-                check_cmd = self._check_running_cmd(job_id)
-                status_out, _, _ = self.run_command(check_cmd, timeout=10)
-                if not status_out.strip() or 'not found' in status_out.lower():
-                    print("\nStatus: COMPLETED (checking results...)")
-                else:
-                    print(f"\nScheduler output:\n{status_out}")
+        print()
+        if sched_state == "RUNNING":
+            print("  State     : RUNNING  ▶  job is active on the cluster")
+        elif sched_state == "PENDING":
+            print("  State     : PENDING  ⏳  waiting for resources")
+        elif sched_state in ("DONE", "FAILED"):
+            # Job left the queue; interpret exit code from .done marker
+            if done_val == "0":
+                print("  State     : COMPLETED SUCCESSFULLY  ✓")
+            elif done_val:
+                print(f"  State     : FAILED  ✗  (exit code: {done_val})")
+            elif sched_state == "DONE":
+                print("  State     : COMPLETED  (no exit-code marker written)")
             else:
-                print("\nStatus: UNKNOWN (no job ID available)")
+                print("  State     : FAILED  (scheduler reports failure; no marker)")
+        else:  # UNKNOWN — scheduler gave no clear answer; fall back to .done
+            if done_val == "0":
+                print("  State     : COMPLETED SUCCESSFULLY  ✓  (scheduler silent)")
+            elif done_val:
+                print(f"  State     : FAILED  ✗  (exit code: {done_val}, scheduler silent)")
+            else:
+                print("  State     : UNKNOWN  (scheduler silent, no done marker)")
 
-        # If job failed, show error information
+        # ── 2. Output file stats ──────────────────────────────────────────────
+        print()
+        lines_out, _, _ = self.run_command(
+            f"wc -l < {job_out} 2>/dev/null || echo 0", timeout=10)
+        size_out, _, _ = self.run_command(
+            f"du -sh {job_out} 2>/dev/null || echo '?'", timeout=10)
+        print(f"  Log lines : {lines_out.strip()}")
+        print(f"  Log size  : {size_out.strip()}")
+
+        if out_dir:
+            dir_size, _, _ = self.run_command(
+                f"du -sh {out_dir} 2>/dev/null || echo '(not found)'", timeout=10)
+            print(f"  Results   : {dir_size.strip()}")
+
+            files_out, _, _ = self.run_command(
+                f"find {out_dir} -maxdepth 4 -type f"
+                r" \( -name '*.csv' -o -name '*.tsv' -o -name '*.png' -o -name '*.log' \)"
+                f" 2>/dev/null | sort | head -25",
+                timeout=15)
+            if files_out.strip():
+                print("  Key files :")
+                for fline in files_out.strip().splitlines():
+                    sz, _, _ = self.run_command(f"du -sh {fline} 2>/dev/null | cut -f1", timeout=8)
+                    print(f"    {fline}  ({sz.strip()})")
+
+        # ── 3. Recent job output — always shown, no prompt ───────────────────
+        print()
+        print("  --- Recent output (last 50 lines) ---")
+        recent, _, _ = self.run_command(
+            f"tail -50 {job_out} 2>/dev/null || echo '(no output yet)'", timeout=20)
+        for line in (recent or "(no output yet)").rstrip().splitlines():
+            print(f"  {line}")
+
+        # ── 4. Error details only when job actually failed ───────────────────
+        job_failed = done_val not in ("", "0")
         if job_failed:
-            print("\n" + "-" * 60)
-            print("ERROR DETAILS")
-            print("-" * 60)
+            print()
+            print("  --- Error log (last 60 lines) ---")
+            err_tail, _, _ = self.run_command(
+                f"tail -60 {job_errlog} 2>/dev/null || echo '(empty)'", timeout=20)
+            for line in (err_tail or "(empty)").rstrip().splitlines():
+                print(f"  {line}")
 
-            # Show last part of error log
-            err_log_out, _, _ = self.run_command(f"tail -100 {job_error_log} 2>/dev/null", timeout=30)
-            if err_log_out.strip():
-                print("\n--- Error Log (last 100 lines) ---")
-                print(err_log_out)
-                print("--- End Error Log ---")
+            tb_out, _, _ = self.run_command(
+                f"grep -n 'Traceback\\|FATAL\\|Error:\\|Exception:' {job_out} 2>/dev/null"
+                f" | tail -20",
+                timeout=15)
+            if tb_out.strip():
+                print()
+                print("  --- Errors found in output ---")
+                for line in tb_out.strip().splitlines():
+                    print(f"  {line}")
 
-            # Show stderr
-            stderr_out, _, _ = self.run_command(f"tail -50 {job_err_file} 2>/dev/null", timeout=30)
-            if stderr_out.strip():
-                print("\n--- STDERR (last 50 lines) ---")
-                print(stderr_out)
-                print("--- End STDERR ---")
-
-            # Look for Python tracebacks in output
-            traceback_out, _, _ = self.run_command(
-                f"grep -A 20 'Traceback\\|Error:\\|Exception:' {job_out_file} 2>/dev/null | tail -50",
-                timeout=30
-            )
-            if traceback_out.strip():
-                print("\n--- Python Errors Found ---")
-                print(traceback_out)
-                print("--- End Python Errors ---")
-
-            print("\nFull logs available at:")
-            print(f"  Output: {job_out_file}")
-            print(f"  Stderr: {job_err_file}")
-            print(f"  Error log: {job_error_log}")
-
-        else:
-            # Optionally show recent output for non-failed jobs
-            show_output = input("\nShow recent job output? (y/n): ").strip().lower()
-            if show_output == 'y':
-                tail_out, _, _ = self.run_command(f"tail -50 {job_out_file} 2>/dev/null", timeout=30)
-                print("\n--- Recent Output ---")
-                print(tail_out if tail_out else "(no output yet)")
-                print("--- End Output ---")
-
-        # Check for pipeline error log in output directory
-        if output_dir:
-            family = job_info.get('FAMILY', 'unknown').lower()
-            pipeline_error_log = f"{output_dir}/pipeline_errors.log"
-            pipe_err_out, _, _ = self.run_command(f"cat {pipeline_error_log} 2>/dev/null", timeout=30)
-            if pipe_err_out.strip():
-                print("\n" + "-" * 60)
-                print("PIPELINE ERROR LOG")
-                print("-" * 60)
-                print(pipe_err_out)
-                print("-" * 60)
-
+        print()
+        print(f"  Full log : {job_out}")
+        if job_failed:
+            print(f"  Err log  : {job_errlog}")
         print("=" * 60)
         return job_info
 
@@ -1341,82 +1529,511 @@ exit $EXIT_CODE
         return local_path
 
     def watch_job(self):
-        """Watch job progress in real-time (polling mode)."""
-        job_info_file = f"{self.remote_work_dir}/te_analysis_job.info"
-        job_done_file = f"{self.remote_work_dir}/te_analysis_job.done"
-        job_out_file = f"{self.remote_work_dir}/te_analysis_job.out"
+        """Watch the most recently submitted job live (line-based polling)."""
+        import time as _time
 
-        # Get job info
-        out, err, code = self.run_command(f"cat {job_info_file} 2>/dev/null", timeout=10)
-        if code != 0 or not out.strip():
-            print("No job information found. Have you submitted a job?")
+        job_info, job_out, job_err, job_done, job_errlog = self._find_latest_job_info()
+
+        if job_info is None:
+            print("\nNo job information found. Submit a batch job first.")
             return False
 
-        job_id = "unknown"
-        for line in out.strip().split('\n'):
-            if line.startswith('JOB_ID='):
-                job_id = line.split('=', 1)[1]
-                break
+        job_id   = job_info.get("JOB_ID",   "unknown")
+        job_type = job_info.get("TYPE",      "pipeline")
 
-        print("\n" + "=" * 60)
-        print(f"WATCHING JOB {job_id} (polling every 10 seconds)")
-        print("Press Ctrl+C to stop watching (job will continue running)")
-        print("=" * 60 + "\n")
+        print()
+        print("=" * 60)
+        print(f"  WATCHING JOB {job_id}  [{job_type}]  (polling every 15s)")
+        print(f"  Log file: {job_out}")
+        print("  Press Ctrl+C to stop — job will keep running on cluster")
+        print("=" * 60)
 
-        import time
-        last_output_size = 0
-        poll_interval = 10
+        # ── Show last 25 lines already written ───────────────────────────────
+        existing, _, _ = self.run_command(
+            f"tail -25 {job_out} 2>/dev/null", timeout=15)
+        if existing.strip():
+            print("\n  [-- last 25 lines already written --]")
+            for line in existing.rstrip().splitlines():
+                print(f"  {line}")
+            print("  [-- live output below --]\n")
+        else:
+            print("\n  (output file empty — waiting for job to start...)\n")
+
+        # Seed line counter from current file length
+        lc_out, _, _ = self.run_command(
+            f"wc -l < {job_out} 2>/dev/null || echo 0", timeout=10)
+        try:
+            last_line = int(lc_out.strip())
+        except ValueError:
+            last_line = 0
+
+        poll_interval  = 15
+        stale_polls    = 0   # consecutive polls with no new output
+        no_output_warn = 6   # warn after ~90s of silence
 
         try:
             while True:
-                # Check if job is done
-                done_out, _, _ = self.run_command(f"cat {job_done_file} 2>/dev/null || echo 'running'", timeout=10)
-                if done_out.strip() != 'running':
-                    print(f"\n\nJob completed with exit code: {done_out.strip()}")
-                    break
+                _time.sleep(poll_interval)
 
-                # Check job status with scheduler-specific command
-                if job_id != 'unknown':
-                    check_cmd = self._check_running_cmd(job_id)
-                    status_out, _, _ = self.run_command(f"{check_cmd} 2>&1 | tail -1", timeout=10)
-                    if not status_out.strip() or 'not found' in status_out.lower():
-                        time.sleep(2)
-                        done_out, _, _ = self.run_command(f"cat {job_done_file} 2>/dev/null || echo 'running'", timeout=10)
-                        if done_out.strip() != 'running':
-                            print(f"\n\nJob completed with exit code: {done_out.strip()}")
-                            break
-                        print("\nJob finished but no done marker found.")
-                        break
+                # ── Query scheduler ───────────────────────────────────────────
+                sched_state = self._get_scheduler_state(job_id)
 
-                # Stream new output
-                size_out, _, _ = self.run_command(f"wc -c < {job_out_file} 2>/dev/null || echo 0", timeout=10)
+                # ── Fetch new lines ───────────────────────────────────────────
+                new_lc_out, _, _ = self.run_command(
+                    f"wc -l < {job_out} 2>/dev/null || echo {last_line}", timeout=10)
                 try:
-                    current_size = int(size_out.strip())
+                    current_line = int(new_lc_out.strip())
                 except ValueError:
-                    current_size = 0
+                    current_line = last_line
 
-                if current_size > last_output_size:
-                    skip_bytes = last_output_size
-                    new_out, _, _ = self.run_command(
-                        f"tail -c +{skip_bytes + 1} {job_out_file} 2>/dev/null",
-                        timeout=30
-                    )
-                    if new_out:
-                        print(new_out, end='', flush=True)
-                    last_output_size = current_size
+                if current_line > last_line:
+                    stale_polls = 0
+                    new_lines, _, _ = self.run_command(
+                        f"sed -n '{last_line + 1},{current_line}p' {job_out} 2>/dev/null",
+                        timeout=30)
+                    if new_lines.strip():
+                        for line in new_lines.rstrip().splitlines():
+                            print(f"  {line}")
+                    last_line = current_line
+                else:
+                    stale_polls += 1
+                    if stale_polls >= no_output_warn:
+                        sched_label = {
+                            "RUNNING": "still RUNNING",
+                            "PENDING": "PENDING (queued)",
+                        }.get(sched_state, sched_state)
+                        print(f"  [no new output for {stale_polls * poll_interval}s — scheduler: {sched_label}]",
+                              flush=True)
+                        stale_polls = 0
 
-                time.sleep(poll_interval)
+                # ── Check if job has left the queue ───────────────────────────
+                if sched_state in ("DONE", "FAILED"):
+                    # Drain any final lines
+                    final_lc, _, _ = self.run_command(
+                        f"wc -l < {job_out} 2>/dev/null || echo {last_line}", timeout=10)
+                    try:
+                        final_line = int(final_lc.strip())
+                    except ValueError:
+                        final_line = last_line
+                    if final_line > last_line:
+                        tail_final, _, _ = self.run_command(
+                            f"sed -n '{last_line + 1},{final_line}p' {job_out} 2>/dev/null",
+                            timeout=30)
+                        if tail_final.strip():
+                            for line in tail_final.rstrip().splitlines():
+                                print(f"  {line}")
+
+                    # Read .done marker written by the job script
+                    done_out, _, _ = self.run_command(
+                        f"cat {job_done} 2>/dev/null", timeout=10)
+                    done_val = done_out.strip()
+
+                    print()
+                    print("=" * 60)
+                    if done_val == "0":
+                        print("  Job COMPLETED SUCCESSFULLY  ✓")
+                    elif done_val:
+                        print(f"  Job FAILED  ✗  (exit code: {done_val})")
+                        err_tail, _, _ = self.run_command(
+                            f"tail -30 {job_errlog} 2>/dev/null", timeout=15)
+                        if err_tail.strip():
+                            print("\n  --- Last 30 lines of error log ---")
+                            for line in err_tail.strip().splitlines():
+                                print(f"  {line}")
+                    else:
+                        if sched_state == "DONE":
+                            print("  Job left the queue (DONE state; no exit-code marker written)")
+                        else:
+                            print("  Job left the queue in FAILED/EXIT state; no exit-code marker written")
+                    print(f"\n  Full log : {job_out}")
+                    print("=" * 60)
+                    return done_val == "0"
 
         except KeyboardInterrupt:
-            print(f"\n\nStopped watching. Job {job_id} is still running on the cluster.")
-            print(f"Use 'Check job status' to check progress later.")
+            print(f"\n\n  Stopped watching. Job {job_id} is still running on the cluster.")
+            print(f"  Use 'Check job status' to see progress later.")
             return False
-
-        return True
 
     def run_analysis(self):
         """Run the analysis - just calls submit_batch_job for backwards compatibility."""
         return self.submit_batch_job()
+
+    # ── Motif-only batch job ──────────────────────────────────────────────────
+
+    def submit_motif_batch_job(self):
+        """Submit a standalone motif+GO analysis batch job starting from a BED file.
+
+        Uploads te_motif.py + te_go.py, builds a comprehensive batch script
+        that runs bedtools intersect, Fisher enrichment, and GO annotation, then
+        submits it via the cluster scheduler (LSF bsub or Slurm sbatch).
+        """
+        print()
+        print("=" * 60)
+        print("  Submit Motif+GO Batch Job  (from TE loci BED)")
+        print("=" * 60)
+
+        # ── Collect parameters interactively ──────────────────────────────────
+        default_bed = f"{self.remote_work_dir}/results/motif_analysis/te_loci.bed"
+        bed_path = input(f"\nRemote path to TE loci BED [{default_bed}]: ").strip()
+        if not bed_path:
+            bed_path = default_bed
+
+        # Prefer the tabix-indexed path; fall back to plain BED path.
+        default_jaspar = (str(self.params.get("JASPAR_TABIX_PATH", "")).strip()
+                          or str(self.params.get("JASPAR_BED_PATH", "")).strip())
+        jaspar_bed = input(f"Remote path to JASPAR BED / tabix .bed.gz [{default_jaspar or 'auto-resolve'}]: ").strip()
+        if not jaspar_bed:
+            jaspar_bed = default_jaspar
+
+        build_default = self.params.get("ASSEMBLY", "hg38")
+        build = input(f"Genome build [{build_default}]: ").strip() or build_default
+
+        default_out = f"{self.remote_work_dir}/results"
+        out_dir = input(f"Output directory on cluster [{default_out}]: ").strip()
+        if not out_dir:
+            out_dir = default_out
+
+        p_thresh = input("Fisher p-value threshold [0.05]: ").strip() or "0.05"
+        run_go   = input("Also run GO annotation after motif analysis? [y]: ").strip().lower()
+        run_go   = run_go not in ("n", "no", "0", "false")
+
+        mem_mb   = int(input(f"Memory (MB) [{self.params['MEM_MB']}]: ").strip() or self.params["MEM_MB"])
+        cpus     = int(input(f"CPUs [{self.params['CPUS']}]: ").strip() or self.params["CPUS"])
+        walltime = input(f"Walltime HH:MM [{self.params['WALLTIME']}]: ").strip() or self.params["WALLTIME"]
+        queue    = input(f"Queue/partition [{self.params['QUEUE']}]: ").strip() or self.params["QUEUE"]
+
+        confirm = input(
+            f"\nSubmit motif batch job?\n"
+            f"  BED:     {bed_path}\n"
+            f"  JASPAR:  {jaspar_bed or '(auto-resolve)'}\n"
+            f"  build:   {build}   out: {out_dir}\n"
+            f"  mem={mem_mb}MB  cpus={cpus}  walltime={walltime}  queue={queue}\n"
+            f"  run-go:  {run_go}\n"
+            f"\nProceed? (y/n): "
+        ).strip().lower()
+        if confirm != "y":
+            print("Cancelled.")
+            return False
+
+        # ── Upload scripts ─────────────────────────────────────────────────────
+        _log("Uploading te_motif.py, te_go.py, requirements.txt ...")
+        for name in ["te_motif.py", "te_go.py", "requirements.txt"]:
+            local_path = Path(__file__).parent / name
+            if not local_path.exists():
+                _log(f"  Warning: {name} not found locally — skipping upload")
+                continue
+            remote_path = f"{self.remote_work_dir}/{name}"
+            if not self._upload_text_file(local_path, remote_path, name):
+                print(f"Error: failed to upload {name}")
+                return False
+
+        # ── Build job script paths ─────────────────────────────────────────────
+        job_name   = "te_motif_go"
+        job_script = f"{self.remote_work_dir}/te_motif_job.sh"
+        job_out    = f"{self.remote_work_dir}/te_motif_job.out"
+        job_err    = f"{self.remote_work_dir}/te_motif_job.err"
+        job_done   = f"{self.remote_work_dir}/te_motif_job.done"
+        job_info   = f"{self.remote_work_dir}/te_motif_job.info"
+        job_errlog = f"{self.remote_work_dir}/te_motif_job.error.log"
+        scratch    = f"{self.remote_work_dir}/tmp_motif"
+
+        sched_header = self._job_script_header(
+            job_name, job_out, job_err,
+            mem_mb=mem_mb, cpus=cpus, walltime=walltime, queue=queue,
+        )
+        module_block = self._module_load_block()
+        venv_block   = self._venv_setup_block()
+
+        # Build te_motif.py CLI
+        motif_cmd = (
+            f"python -u {self.remote_work_dir}/te_motif.py"
+            f" --bed-input {bed_path}"
+            f" --build {build}"
+            f" --out-dir {out_dir}"
+            f" --p-threshold {p_thresh}"
+        )
+        if jaspar_bed:
+            motif_cmd += f" --jaspar-bed {jaspar_bed}"
+        if run_go:
+            motif_cmd += f" --run-go"
+
+        # Build te_go.py CLI (explicit fallback if --run-go fails)
+        go_cmd = (
+            f"python -u {self.remote_work_dir}/te_go.py"
+            f" --enrichment-dir {out_dir}/enrichment_results"
+            f" --build {build}"
+            f" --out-dir {out_dir}"
+            f" --p-threshold {p_thresh}"
+        )
+
+        batch_script = f'''#!/bin/bash
+{sched_header}
+{module_block}
+
+# ── Virtual environment + package setup ───────────────────────────────────────
+{venv_block}
+
+# ── Install bedtools via conda if missing ─────────────────────────────────────
+if ! command -v bedtools >/dev/null 2>&1; then
+    if command -v conda >/dev/null 2>&1; then
+        echo "[$(date +%H:%M:%S)] bedtools not found — installing via conda ..."
+        conda install -y -c bioconda bedtools 2>/dev/null \\
+            && echo "[$(date +%H:%M:%S)] bedtools installed" \\
+            || echo "[$(date +%H:%M:%S)] conda bedtools install failed; job will abort at intersect"
+    else
+        echo "[$(date +%H:%M:%S)] WARNING: bedtools not found and conda unavailable"
+    fi
+fi
+
+# ── Job banner ─────────────────────────────────────────────────────────────────
+echo "=========================================================="
+echo "  GAMECA — Motif+GO Batch Job"
+echo "=========================================================="
+echo "  Job script : {job_script}"
+echo "  Job ID     : ${{LSB_JOBID:-${{SLURM_JOB_ID:-unknown}}}}"
+echo "  Host       : $(hostname)"
+echo "  Date       : $(date)"
+echo "  CPUs alloc : $(nproc 2>/dev/null || echo N/A)"
+echo "  Mem req    : {mem_mb} MB"
+echo "  Python     : $(python --version 2>&1)"
+echo "  bedtools   : $(bedtools --version 2>/dev/null || echo 'not found')"
+echo "=========================================================="
+echo "  BED input  : {bed_path}"
+echo "  JASPAR BED : {jaspar_bed or '(auto-resolve)'}"
+echo "  Build      : {build}"
+echo "  Out dir    : {out_dir}"
+echo "  p-thresh   : {p_thresh}"
+echo "  Run GO     : {str(run_go).lower()}"
+echo "  Scratch    : {scratch}"
+echo "=========================================================="
+
+# ── Error log init ─────────────────────────────────────────────────────────────
+ERROR_LOG="{job_errlog}"
+echo "=== te_motif+GO Error Log ===" > "$ERROR_LOG"
+echo "Job ID   : ${{LSB_JOBID:-${{SLURM_JOB_ID:-unknown}}}}" >> "$ERROR_LOG"
+echo "Host     : $(hostname)" >> "$ERROR_LOG"
+echo "Started  : $(date)"     >> "$ERROR_LOG"
+echo "" >> "$ERROR_LOG"
+
+# ── Pre-flight checks ──────────────────────────────────────────────────────────
+echo ""
+echo "[$(date +%H:%M:%S)] === PRE-FLIGHT CHECKS ==="
+
+# 1. BED input
+if [ ! -f "{bed_path}" ]; then
+    echo "[$(date +%H:%M:%S)] FATAL: BED file not found: {bed_path}" | tee -a "$ERROR_LOG"
+    echo "1" > "{job_done}"; exit 1
+fi
+BED_LINES=$(wc -l < "{bed_path}" 2>/dev/null || echo "?")
+BED_SIZE=$(du -sh "{bed_path}" 2>/dev/null | cut -f1)
+echo "[$(date +%H:%M:%S)]   BED file  : OK  ($BED_LINES lines, $BED_SIZE)"
+echo "[$(date +%H:%M:%S)]   BED head  :"
+head -3 "{bed_path}" | sed 's/^/    /'
+
+# 2. JASPAR BED (if provided)
+JASPAR_ARG="{jaspar_bed}"
+if [ -n "$JASPAR_ARG" ]; then
+    if [ ! -f "$JASPAR_ARG" ]; then
+        echo "[$(date +%H:%M:%S)] FATAL: JASPAR BED not found: $JASPAR_ARG" | tee -a "$ERROR_LOG"
+        echo "1" > "{job_done}"; exit 1
+    fi
+    JASP_SIZE=$(du -sh "$JASPAR_ARG" 2>/dev/null | cut -f1)
+    echo "[$(date +%H:%M:%S)]   JASPAR BED: OK ($JASP_SIZE)"
+else
+    echo "[$(date +%H:%M:%S)]   JASPAR BED: will be auto-resolved by te_motif.py"
+fi
+
+# 3. bedtools
+if ! command -v bedtools >/dev/null 2>&1; then
+    echo "[$(date +%H:%M:%S)] FATAL: bedtools not found on PATH" | tee -a "$ERROR_LOG"
+    echo "  PATH=$PATH" >> "$ERROR_LOG"
+    echo "1" > "{job_done}"; exit 1
+fi
+echo "[$(date +%H:%M:%S)]   bedtools  : $(bedtools --version 2>&1 | head -1)"
+
+# 4. Python packages
+echo "[$(date +%H:%M:%S)]   Checking Python packages ..."
+python - <<'PKGCHECK'
+import sys
+missing = []
+for pkg in ["pandas", "numpy", "scipy", "matplotlib", "requests"]:
+    try:
+        __import__(pkg)
+    except ImportError:
+        missing.append(pkg)
+if missing:
+    print(f"  [WARN] Missing packages: {{missing}}")
+else:
+    print("  [OK] All required packages available")
+PKGCHECK
+
+# 5. Disk space
+mkdir -p "{scratch}"
+FREE_GB=$(python3 -c "import shutil; t,u,f=shutil.disk_usage('{scratch}'); print(f'{{f/1e9:.1f}}')" 2>/dev/null || echo "?")
+echo "[$(date +%H:%M:%S)]   Scratch   : {scratch} (free: ${{FREE_GB}} GB)"
+
+if python3 -c "import shutil,sys; t,u,f=shutil.disk_usage('{scratch}'); sys.exit(0 if f>2e9 else 1)" 2>/dev/null; then
+    echo "[$(date +%H:%M:%S)]   Disk      : OK"
+else
+    echo "[$(date +%H:%M:%S)] WARNING: Less than 2 GB free in scratch — bedtools may fail" | tee -a "$ERROR_LOG"
+fi
+
+# 6. Output directory
+mkdir -p "{out_dir}"
+echo "[$(date +%H:%M:%S)]   Out dir   : {out_dir} (created/exists)"
+
+echo "[$(date +%H:%M:%S)] === PRE-FLIGHT COMPLETE ==="
+echo ""
+
+cd {self.remote_work_dir}
+
+# ── Stage 1: te_motif.py ───────────────────────────────────────────────────────
+echo "[$(date +%H:%M:%S)] =============================="
+echo "[$(date +%H:%M:%S)] STAGE 1: te_motif.py"
+echo "[$(date +%H:%M:%S)]   Command: {motif_cmd}"
+echo "[$(date +%H:%M:%S)] =============================="
+SECONDS=0
+export TMPDIR="{scratch}"
+
+{motif_cmd} 2>&1 | tee -a "$ERROR_LOG"
+MOTIF_EXIT=${{PIPESTATUS[0]}}
+MOTIF_SECS=$SECONDS
+
+echo ""
+echo "[$(date +%H:%M:%S)] te_motif.py exit code: $MOTIF_EXIT  (runtime: ${{MOTIF_SECS}}s)"
+
+if [ $MOTIF_EXIT -ne 0 ]; then
+    echo "[$(date +%H:%M:%S)] FATAL: te_motif.py failed (exit=$MOTIF_EXIT)" | tee -a "$ERROR_LOG"
+    echo "1" > "{job_done}"; exit $MOTIF_EXIT
+fi
+
+# Log output file inventory after motif stage
+echo ""
+echo "[$(date +%H:%M:%S)] --- Motif stage output files ---"
+find "{out_dir}/motif_analysis" "{out_dir}/enrichment_results" \\
+     -type f \\( -name "*.csv" -o -name "*.tsv" -o -name "*.png" -o -name "*.log" \\) \\
+     -exec ls -lh {{}} \\; 2>/dev/null | awk '{{print "  "$0}}'
+echo ""
+
+''' + (f'''
+# ── Stage 2 (explicit): te_go.py ──────────────────────────────────────────────
+# Only runs if te_motif.py did NOT already chain GO internally
+GO_DONE_MARKER="{out_dir}/go_annotations/gene_functions.csv"
+if [ -f "$GO_DONE_MARKER" ]; then
+    echo "[$(date +%H:%M:%S)] GO annotation already completed (--run-go chained by te_motif)."
+else
+    echo "[$(date +%H:%M:%S)] =============================="
+    echo "[$(date +%H:%M:%S)] STAGE 2: te_go.py (standalone)"
+    echo "[$(date +%H:%M:%S)]   Command: {go_cmd}"
+    echo "[$(date +%H:%M:%S)] =============================="
+    SECONDS=0
+    {go_cmd} 2>&1 | tee -a "$ERROR_LOG"
+    GO_EXIT=${{PIPESTATUS[0]}}
+    GO_SECS=$SECONDS
+    echo "[$(date +%H:%M:%S)] te_go.py exit code: $GO_EXIT  (runtime: ${{GO_SECS}}s)"
+    if [ $GO_EXIT -ne 0 ]; then
+        echo "[$(date +%H:%M:%S)] WARNING: te_go.py failed (exit=$GO_EXIT) — continuing" | tee -a "$ERROR_LOG"
+    fi
+fi
+''' if run_go else '''
+# GO annotation not requested (run_go=false)
+echo "[$(date +%H:%M:%S)] GO annotation skipped (not requested)."
+''') + f'''
+
+# ── Final output inventory ─────────────────────────────────────────────────────
+echo ""
+echo "[$(date +%H:%M:%S)] === FINAL OUTPUT INVENTORY ==="
+find "{out_dir}" -maxdepth 4 \\
+     -type f \\( -name "*.csv" -o -name "*.tsv" -o -name "*.png" -o -name "*.log" -o -name "*.txt" \\) \\
+     -exec ls -lh {{}} \\; 2>/dev/null | sort | awk '{{print "  "$0}}'
+
+RESULT_SIZE=$(du -sh "{out_dir}" 2>/dev/null | cut -f1)
+echo ""
+echo "[$(date +%H:%M:%S)] Total output size: $RESULT_SIZE at {out_dir}"
+
+TOTAL_SECS=$SECONDS
+echo ""
+echo "=========================================================="
+echo "  Job complete"
+echo "  Total runtime : $((TOTAL_SECS / 60))m $((TOTAL_SECS % 60))s"
+echo "  Date          : $(date)"
+echo "=========================================================="
+
+echo "" >> "$ERROR_LOG"
+echo "=== JOB SUCCEEDED ===" >> "$ERROR_LOG"
+echo "Ended: $(date)" >> "$ERROR_LOG"
+
+echo "0" > "{job_done}"
+exit 0
+'''
+
+        # ── Write job script to cluster ────────────────────────────────────────
+        _log(f"Writing batch job script to {job_script}")
+        # Write via echo-to-file in chunks to avoid heredoc quoting issues
+        import base64 as _b64
+        encoded = _b64.b64encode(batch_script.encode()).decode()
+        chunk   = 60000
+        chunks  = [encoded[i:i+chunk] for i in range(0, len(encoded), chunk)]
+
+        cmd0 = f"echo '{chunks[0]}' | base64 -d > {job_script}"
+        out, err, code = self.run_command(cmd0, timeout=30)
+        if code != 0:
+            print(f"Error writing job script (chunk 1): {err}")
+            return False
+        for i, ch in enumerate(chunks[1:], 2):
+            cmd_i = f"echo '{ch}' | base64 -d >> {job_script}"
+            out, err, code = self.run_command(cmd_i, timeout=30)
+            if code != 0:
+                print(f"Error writing job script (chunk {i}/{len(chunks)}): {err}")
+                return False
+
+        self.run_command(f"chmod +x {job_script}", timeout=10)
+        self.run_command(f"rm -f {job_out} {job_err} {job_done} {job_info}", timeout=10)
+
+        # ── Submit ─────────────────────────────────────────────────────────────
+        sched_label = (self.scheduler or "lsf").upper()
+        print(f"\nSubmitting motif batch job via {sched_label}...")
+        _log(f"Submit command: {self._submit_job_cmd(job_script)}")
+        out, err, code = self.run_command(self._submit_job_cmd(job_script), timeout=30)
+
+        if code != 0:
+            print(f"Error submitting job: {err}")
+            return False
+
+        job_id = self._parse_job_id(out)
+        if job_id:
+            self.current_job_id = job_id
+            print(f"\nJob submitted successfully!  Job ID: {job_id}")
+        else:
+            print(f"Job submitted (could not parse ID from: {out})")
+            job_id = "unknown"
+            self.current_job_id = None
+
+        info = (f"JOB_ID={job_id}\nTYPE=motif_go\n"
+                f"BED={bed_path}\nOUTPUT_DIR={out_dir}\nSUBMITTED=$(date)")
+        self.run_command(f"echo '{info}' > {job_info}", timeout=10)
+
+        print()
+        print("=" * 60)
+        print("MOTIF+GO BATCH JOB SUBMITTED")
+        print("=" * 60)
+        print(f"  Job ID     : {job_id}")
+        print(f"  Job output : {job_out}")
+        print(f"  Job errors : {job_err}")
+        print(f"  Error log  : {job_errlog}")
+        print(f"  Results    : {out_dir}")
+        sched = self.scheduler or "lsf"
+        print()
+        if sched == "slurm":
+            print(f"  squeue -j {job_id}   # status")
+            print(f"  tail -f {job_out}     # live log")
+            print(f"  scancel {job_id}      # cancel")
+        else:
+            print(f"  bjobs {job_id}        # status")
+            print(f"  bpeek {job_id}        # live log")
+            print(f"  bkill {job_id}        # cancel")
+        print("=" * 60)
+        return True
 
     # ── te_prep / te_enrichment remote launchers ────────────────────────────
 

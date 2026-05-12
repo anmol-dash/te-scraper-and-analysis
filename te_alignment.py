@@ -91,10 +91,33 @@ def consensus_from_alignment(aligned_fasta):
 
 def save_consensus(consensus_str, out_path, label):
     """Write consensus FASTA."""
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w") as f:
         f.write(f">{label}\n")
         for i in range(0, len(consensus_str), 80):
             f.write(consensus_str[i:i + 80] + "\n")
+
+
+def consensus_from_sequences(seqs):
+    """Return a majority consensus directly from unaligned sequences."""
+    clean = [
+        "".join(ch for ch in str(seq).upper() if ch in "ACGTN")
+        for seq in seqs
+        if isinstance(seq, str) and str(seq).strip()
+    ]
+    if not clean:
+        return ""
+    max_len = max(len(seq) for seq in clean)
+    chars = []
+    for i in range(max_len):
+        counts = {}
+        for seq in clean:
+            if i < len(seq):
+                ch = seq[i]
+                counts[ch] = counts.get(ch, 0) + 1
+        chars.append(max(counts, key=counts.get) if counts else "N")
+    return "".join(chars)
 
 
 def alignment_stats(aligned_fasta):
@@ -218,11 +241,9 @@ def run_alignment_pipeline(df, out_dir, family_name="FAMILY"):
     mafft_ok = check_mafft()
     cialign_ok = check_cialign()
 
-    if not mafft_ok:
-        _pp("  MAFFT not found — skipping alignment. Install with: conda install -c bioconda mafft")
-        return {"mafft_available": False, "cialign_available": cialign_ok}
-
     family_lower = family_name.lower()
+    consensus_dir = out_dir / "05_consensus"
+    consensus_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Write global FASTA ─────────────────────────────────────────────────
     global_fasta = out_dir / f"{family_lower}_seqs.fa"
@@ -231,8 +252,12 @@ def run_alignment_pipeline(df, out_dir, family_name="FAMILY"):
 
     # ── Global alignment ───────────────────────────────────────────────────
     global_aligned = out_dir / f"{family_lower}_aligned.fa"
-    _pp(f"  Running global MAFFT alignment ({len(df)} sequences)...")
-    aln_ok = run_mafft(global_fasta, global_aligned)
+    if mafft_ok:
+        _pp(f"  Running global MAFFT alignment ({len(df)} sequences)...")
+        aln_ok = run_mafft(global_fasta, global_aligned)
+    else:
+        _pp("  MAFFT not found — writing unaligned majority consensuses")
+        aln_ok = False
 
     global_consensus = None
     if aln_ok:
@@ -240,6 +265,8 @@ def run_alignment_pipeline(df, out_dir, family_name="FAMILY"):
             consensus = consensus_from_alignment(global_aligned)
             cons_path = out_dir / f"{family_lower}_consensus.fa"
             save_consensus(consensus, cons_path, f"{family_name}_consensus")
+            save_consensus(consensus, consensus_dir / f"{family_lower}_consensus.fa",
+                           f"{family_name}_consensus")
             _pp(f"  Global consensus → {cons_path.name}")
             global_consensus = cons_path
 
@@ -255,6 +282,15 @@ def run_alignment_pipeline(df, out_dir, family_name="FAMILY"):
             _pp(f"  Alignment stats → {stats_file.name}")
         except Exception as e:
             _pp(f"  WARNING: consensus generation failed: {e}")
+    else:
+        consensus = consensus_from_sequences(df["Seq"].tolist())
+        if consensus:
+            cons_path = out_dir / f"{family_lower}_consensus.fa"
+            save_consensus(consensus, cons_path, f"{family_name}_consensus")
+            save_consensus(consensus, consensus_dir / f"{family_lower}_consensus.fa",
+                           f"{family_name}_consensus")
+            _pp(f"  Global fallback consensus → {cons_path.name}")
+            global_consensus = cons_path
 
     # ── Per-cluster alignments ─────────────────────────────────────────────
     cluster_dir = out_dir / "cluster_alignments"
@@ -263,27 +299,42 @@ def run_alignment_pipeline(df, out_dir, family_name="FAMILY"):
 
     for cluster in sorted(df["Cluster"].unique()):
         c_df = df[df["Cluster"] == cluster]
-        if len(c_df) < 2:
-            continue
         clabel = f"noise_{abs(cluster)}" if cluster == -1 else str(cluster)
         c_fasta = cluster_dir / f"cluster_{cluster}_seqs.fa"
         c_aligned = cluster_dir / f"cluster_{cluster}_aligned.fa"
         write_fasta(c_df, c_fasta, family_name)
-        _pp(f"  Cluster {clabel} alignment ({len(c_df)} seqs)...")
-        ok = run_mafft(c_fasta, c_aligned)
-        if ok:
-            try:
-                con = consensus_from_alignment(c_aligned)
-                con_path = cluster_dir / f"cluster_{cluster}_consensus.fa"
-                save_consensus(con, con_path, f"{family_name}_cluster{cluster}_consensus")
-                stats = alignment_stats(c_aligned)
-                cluster_summaries.append({
-                    "cluster": cluster, "size": len(c_df),
-                    "consensus_length": len(con.replace("-", "")),
-                    **stats,
-                })
-            except Exception as e:
-                _pp(f"    WARNING cluster {clabel} consensus failed: {e}")
+        if mafft_ok and len(c_df) >= 2:
+            _pp(f"  Cluster {clabel} alignment ({len(c_df)} seqs)...")
+            ok = run_mafft(c_fasta, c_aligned)
+        else:
+            ok = False
+            reason = "single sequence" if len(c_df) < 2 else "MAFFT unavailable"
+            _pp(f"  Cluster {clabel}: writing fallback consensus ({reason})")
+
+        try:
+            con = consensus_from_alignment(c_aligned) if ok else consensus_from_sequences(c_df["Seq"].tolist())
+            if not con:
+                continue
+            con_path = cluster_dir / f"cluster_{cluster}_consensus.fa"
+            save_consensus(con, con_path, f"{family_name}_cluster{cluster}_consensus")
+            save_consensus(con, consensus_dir / f"cluster_{cluster}_consensus.fa",
+                           f"{family_name}_cluster{cluster}_consensus")
+            stats = alignment_stats(c_aligned) if ok else {
+                "n_sequences": len(c_df),
+                "alignment_length": len(con),
+                "consensus_length_no_gaps": len(con),
+                "avg_gaps_per_col": 0.0,
+                "cols_no_gaps": len(con),
+                "cols_majority_gap": 0,
+            }
+            cluster_summaries.append({
+                "cluster": cluster, "size": len(c_df),
+                "consensus_length": len(con.replace("-", "")),
+                "fallback": "" if ok else "unaligned_majority",
+                **stats,
+            })
+        except Exception as e:
+            _pp(f"    WARNING cluster {clabel} consensus failed: {e}")
 
     # Combined cluster consensuses FASTA
     if cluster_summaries:
@@ -296,6 +347,9 @@ def run_alignment_pipeline(df, out_dir, family_name="FAMILY"):
         _pp(f"  All cluster consensuses → {all_cons.name}")
         pd.DataFrame(cluster_summaries).to_csv(
             cluster_dir / "cluster_consensus_summary.csv", index=False
+        )
+        pd.DataFrame(cluster_summaries).to_csv(
+            consensus_dir / "cluster_consensus_summary.csv", index=False
         )
 
     # ── CIAlign ────────────────────────────────────────────────────────────
@@ -310,7 +364,7 @@ def run_alignment_pipeline(df, out_dir, family_name="FAMILY"):
         _pp("  Running CIAlign...")
 
         # Global
-        if global_aligned.exists():
+        if global_aligned.exists() and global_aligned.stat().st_size > 0 and aln_ok:
             run_cialign(global_aligned, cialign_dir / "global_alignment", "global")
             gc_cleaned = cialign_dir / "global_alignment_cleaned.fasta"
             if gc_cleaned.exists():
@@ -325,7 +379,7 @@ def run_alignment_pipeline(df, out_dir, family_name="FAMILY"):
         all_cleaned = []
         for cl in sorted(df["Cluster"].unique()):
             ca = cluster_dir / f"cluster_{cl}_aligned.fa"
-            if ca.exists():
+            if ca.exists() and ca.stat().st_size > 0:
                 run_cialign(ca, cialign_dir / f"cluster_{cl}_alignment", f"cluster {cl}")
                 cl_cleaned = cialign_dir / f"cluster_{cl}_alignment_cleaned.fasta"
                 if cl_cleaned.exists():

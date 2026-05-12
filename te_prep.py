@@ -257,6 +257,25 @@ def _revcomp(seq):
     return seq.translate(comp)[::-1]
 
 
+def _row_strand(row):
+    for col in ("strand", "Strand"):
+        if col in row and pd.notna(row.get(col)):
+            val = str(row.get(col)).strip()
+            if val in {"+", "-"}:
+                return val
+    for col in ("TE_ID", "TE_name", "name", "Name", "id", "ID"):
+        if col not in row or pd.isna(row.get(col)):
+            continue
+        text = str(row.get(col)).strip()
+        if not text:
+            continue
+        import re
+        m = re.search(r"(?:^|[|:,\s])([+-])$", text)
+        if m:
+            return m.group(1)
+    return "+"
+
+
 def extract_sequences_pysam(genome_fa, df):
     """Use pysam for fast indexed FASTA access (auto-builds .fai index)."""
     fai = genome_fa + ".fai"
@@ -280,7 +299,7 @@ def extract_sequences_pysam(genome_fa, df):
             continue
         try:
             seq = fasta.fetch(chrom, int(row["Start"]), int(row["Stop"]))
-            if row.get("strand") == "-":
+            if _row_strand(row) == "-":
                 seq = _revcomp(seq)
             seqs.append(seq)
         except Exception:
@@ -319,7 +338,7 @@ def extract_sequences_fasta(genome_fa, df):
     for _, row in df.iterrows():
         ch = row["Chromosome"]
         seq = genomes.get(ch, "")[int(row["Start"]):int(row["Stop"])]
-        if seq and row.get("strand") == "-":
+        if seq and _row_strand(row) == "-":
             seq = _revcomp(seq)
         seqs.append(seq)
     return seqs
