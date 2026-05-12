@@ -27,7 +27,7 @@ pybedtools>=0.10,<0.11
 CIAlign>=1.0,<2.0
 
 # SSH client for HPC mode
-paramiko>=3.4,<4.0
+paramiko>=3.4
 
 # Build helper for optional te_fast Cython extension
 Cython>=3.0,<4.0
