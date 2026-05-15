@@ -453,7 +453,11 @@ def validate_jaspar_bed(bed_path, sample=500, raise_on_error=False):
         if raise_on_error:
             raise ValueError(msg)
         return False
-    opener = gzip.open if str(bed_path).endswith(".gz") else open
+    def _is_gz(p):
+        try:
+            with open(p, "rb") as _f: return _f.read(2) == b"\x1f\x8b"
+        except Exception: return False
+    opener = gzip.open if _is_gz(bed_path) else open
     col_counts = []
     try:
         with opener(str(bed_path), "rt") as fh:

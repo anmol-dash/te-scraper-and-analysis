@@ -543,6 +543,7 @@ MENU = [
     ("13", "Retrieve results to local machine",           "action"),
     ("14", "View local results summary",                  "action"),
     (None, "Session",                                     "section"),
+    ("17", "Test email  (set sender / receiver / password)","action"),
     ("15", "Disconnect and exit",                         "action"),
 ]
 
@@ -610,18 +611,22 @@ def interactive_menu(client):
             input(f"  {dim('Press Enter to return to menu…')}")
 
         elif choice == '13':
-            if client.local_output_dir:
-                default_dir = str(client.local_output_dir)
-                local_dir = _ask("Local output directory", default_dir)
-            else:
-                local_dir = _ask("Local output directory (e.g. ~/Documents/output)")
+            cached_remote = client._state.get("last_remote_dir", "").strip()
+            remote_override = _ask("Remote path (leave blank to auto-detect)", cached_remote) or cached_remote or None
+
+            default_local = str(client.local_output_dir) if client.local_output_dir else "./hpc_results"
+            local_dir = _ask("Local output directory", default_local)
             if local_dir:
-                client.retrieve_results(local_dir)
+                client.retrieve_results(local_dir, remote_out_override=remote_override)
             input(f"  {dim('Press Enter to return to menu…')}")
 
         elif choice == '14':
             out_dir = _ask("Local results directory", "./results")
             display_results(Path(out_dir))
+            input(f"  {dim('Press Enter to return to menu…')}")
+
+        elif choice == '17':
+            client.test_email_interactive()
             input(f"  {dim('Press Enter to return to menu…')}")
 
         elif choice == '15':
@@ -1871,7 +1876,8 @@ def _post_connect_launch_action(client):
         f"1  Configure + run interactively  {dim(f'({sched}, live output)')}",
         f"2  Configure + submit batch job   {dim(f'({sched}, background)')}",
         "3  Open full HPC menu",
-        "4  Disconnect",
+        "4  Download results",
+        "5  Disconnect",
     ]))
     print()
 
@@ -1892,7 +1898,22 @@ def _post_connect_launch_action(client):
             input(f"  {dim('Press Enter to open the full HPC menu…')}")
             return True
 
-        if choice in ("4", "d", "disconnect", "q", "quit", "exit"):
+        if choice in ("4", "dl", "download"):
+            # Show cached remote dir and let user override
+            cached_remote = client._state.get("last_remote_dir", "").strip()
+            if cached_remote:
+                remote_prompt = f"  Remote path [{cached_remote}]: "
+            else:
+                remote_prompt = "  Remote path (leave blank to auto-detect): "
+            remote_override = input(remote_prompt).strip() or cached_remote or None
+
+            cached_local = str(client.local_output_dir) if client.local_output_dir else "./hpc_results"
+            local_dir = input(f"  Local destination directory [{cached_local}]: ").strip() or cached_local
+            client.retrieve_results(local_dir, remote_out_override=remote_override)
+            input(f"  {dim('Press Enter to open the full HPC menu…')}")
+            return True
+
+        if choice in ("5", "d", "disconnect", "q", "quit", "exit"):
             return False
 
         print(red("  Invalid selection."))

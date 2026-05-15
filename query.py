@@ -168,6 +168,44 @@ def progress_print(msg, newline=True):
         print(f"[{ts}] {msg}", end="", flush=True)
 
 
+def _safe_input(prompt, default=""):
+    """input() that falls back to `default` on EOFError (batch/non-interactive mode)."""
+    try:
+        val = input(prompt)
+        return val
+    except EOFError:
+        progress_print(f"[non-interactive] stdin closed — using default for: {prompt.strip()!r}  → {default!r}")
+        return default
+
+
+_DIAG_LOG_PATH = None   # set by run_pipeline
+
+def _diag(msg):
+    """Write a timestamped diagnostic line to pipeline_diagnostic.log."""
+    if _DIAG_LOG_PATH is None:
+        return
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{ts}] {msg}\n"
+    try:
+        with open(_DIAG_LOG_PATH, "a") as _f:
+            _f.write(line)
+    except Exception:
+        pass
+    print(line, end="", flush=True)
+
+
+def _checkpoint(out_dir, stage_name, details=""):
+    """Write a STAGE_<name>_COMPLETE.txt checkpoint and log it."""
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    txt = f"COMPLETED: {stage_name}\nTimestamp: {ts}\n{details}\n"
+    try:
+        path = out_dir / f"CHECKPOINT_{stage_name.upper().replace(' ', '_')}.txt"
+        path.write_text(txt)
+    except Exception:
+        pass
+    _diag(f"CHECKPOINT {stage_name} — {details}")
+
+
 def progress_bar(cur, tot, prefix="Progress", length=40):
     pct = cur / tot if tot else 0
     filled = int(length * pct)
@@ -976,7 +1014,7 @@ def run_motif_stage_full(args, out_dir, dirs, family_name,
     Can be driven from either a clustered CSV (normal pipeline) or a raw BED file
     (bed_input, for when no clustered CSV is available).
     """
-    import gzip as _gzip, shutil as _shutil
+    import gzip as _gzip, shutil as _shutil, subprocess
     from collections import Counter as _Counter
     from scipy import stats as _stats
     import requests as _requests
@@ -1004,12 +1042,16 @@ def run_motif_stage_full(args, out_dir, dirs, family_name,
 
     # ── 1. Pre-built tabix-indexed JASPAR file ───────────────
     jaspar_bed_arg = getattr(args, "jaspar_bed", None) or ""
+    # Strip accidental .tbi suffix — the arg should point to the .bed.gz, not its index
+    if jaspar_bed_arg.endswith(".tbi"):
+        jaspar_bed_arg = jaspar_bed_arg[:-4]
     print("  [Tabix JASPAR index]")
     print("  Supply a pre-built bgzip+tabix JASPAR .bed.gz (.tbi alongside it)")
     print("  to skip the re-index step.  The index is reusable across ALL TE")
     print(f"  families on the same build ({build}) — tabix only reads your loci.")
-    _tx_raw = input(
-        f"  Path to pre-built tabix .bed.gz  [{jaspar_bed_arg or 'blank = auto-build'}]: "
+    _tx_raw = _safe_input(
+        f"  Path to pre-built tabix .bed.gz  [{jaspar_bed_arg or 'blank = auto-build'}]: ",
+        default=jaspar_bed_arg,
     ).strip()
 
     PREBUILT_TABIX = None
@@ -1033,7 +1075,7 @@ def run_motif_stage_full(args, out_dir, dirs, family_name,
     # ── 2. Significance threshold ────────────────────────────
     p_default = getattr(args, "p_threshold", 0.05) or 0.05
     print("  [Significance threshold]")
-    _pv_raw = input(f"  Fisher p-value threshold  [{p_default}]: ").strip()
+    _pv_raw = _safe_input(f"  Fisher p-value threshold  [{p_default}]: ", default="").strip()
     P_THRESHOLD = p_default
     if _pv_raw:
         try:
@@ -1150,11 +1192,32 @@ def run_motif_stage_full(args, out_dir, dirs, family_name,
     else:
         from te_motif import validate_jaspar_bed
 
+    # Guard: if jasp_raw accidentally resolved to the .tbi index, recover the .bed.gz
+    if str(jasp_raw).endswith(".tbi"):
+        _bed_candidate = Path(str(jasp_raw)[:-4])  # strip .tbi → .bed.gz
+        print(f"  ⚠  jasp_raw points to .tbi index — recovering bed: {_bed_candidate}")
+        if _bed_candidate.exists():
+            jasp_raw = _bed_candidate
+        else:
+            raise FileNotFoundError(
+                f"jasp_raw resolved to a .tbi file ({jasp_raw}) and the sibling "
+                f".bed.gz was not found at {_bed_candidate}. "
+                f"Check --jaspar-bed path."
+            )
+
     jasp_bytes = jasp_raw.stat().st_size
     print(f"  File  : {jasp_raw}")
     print(f"  Size  : {jasp_bytes/1e6:.1f} MB")
 
-    _opener = _gzip.open if str(jasp_raw).endswith(".gz") else open
+    # Detect gzip by magic bytes rather than extension (.tbi is also gzip-encoded)
+    def _is_gzip_file(p):
+        try:
+            with open(p, "rb") as _f:
+                return _f.read(2) == b"\x1f\x8b"
+        except Exception:
+            return False
+
+    _opener = _gzip.open if _is_gzip_file(jasp_raw) else open
     _sample, _ccounts = [], []
     with _opener(str(jasp_raw), "rt") as _fh:
         for _i, _ln in enumerate(_fh):
@@ -1777,7 +1840,7 @@ def run_motif_tfbs_go(args, out_dir, dirs, family_name, run_motif=True, run_tfbs
 
 def run_pipeline(args):
     """Execute the full TE analysis pipeline."""
-    global OUT_DIR
+    global OUT_DIR, _DIAG_LOG_PATH
 
     FAMILY_NAME = args.family
     HG38_FA = args.genome
@@ -1785,6 +1848,16 @@ def run_pipeline(args):
 
     OUT_DIR = BASE_OUT_DIR / FAMILY_NAME.lower()
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    # ── Diagnostic log ──────────────────────────────────────────────────────
+    _DIAG_LOG_PATH = str(OUT_DIR / "pipeline_diagnostic.log")
+    _diag("=" * 70)
+    _diag(f"PIPELINE START  family={FAMILY_NAME}  out={OUT_DIR.resolve()}")
+    _diag(f"Python: {sys.version}")
+    _diag(f"Args: {vars(args)}")
+    _diag(f"CWD: {os.getcwd()}")
+    _diag(f"sys.stdin.isatty={getattr(sys.stdin, 'isatty', lambda: False)()}")
+    _diag("=" * 70)
 
     DIRS = {
         "data":          OUT_DIR / "01_data",
@@ -1801,6 +1874,7 @@ def run_pipeline(args):
     }
     for d in DIRS.values():
         d.mkdir(parents=True, exist_ok=True)
+    _diag(f"Output dirs created: {[str(d) for d in DIRS.values()]}")
 
     if args.validate_existing:
         validate_existing_outputs(OUT_DIR, FAMILY_NAME)
@@ -1833,6 +1907,7 @@ def run_pipeline(args):
     print(f"TE ANALYSIS PIPELINE")
     print(f"  Family:  {FAMILY_NAME}")
     print(f"  Output:  {OUT_DIR.resolve()}")
+    print(f"  DiagLog: {_DIAG_LOG_PATH}")
     print(f"  Genome:  {HG38_FA or '(not provided)'}")
     if getattr(args, "local", False):
         print(f"  Mode:    LOCAL  (assembly={getattr(args, 'assembly', 'hg38')})")
@@ -1849,23 +1924,29 @@ def run_pipeline(args):
     print("=" * 60)
 
     # ── 1. Load genome ──────────────────────────────────────────────────────
+    _diag("STAGE 1: Load genome")
     print("\n=== LOADING REFERENCE GENOME ===")
     progress_print(f"Genome path argument: {HG38_FA or '(none)'}")
     genome_cache = GenomeCache(HG38_FA, cache_dir=str(OUT_DIR))
     genome_cache.load()
     if genome_cache.is_loaded:
         progress_print("Genome loaded — local extraction + fast primer search enabled")
+        _diag("Genome: loaded OK")
     else:
         progress_print("Genome not available — UCSC API fallback for sequences")
+        _diag("Genome: NOT loaded — will use UCSC API")
+    _checkpoint(OUT_DIR, "stage1_genome", f"loaded={genome_cache.is_loaded}")
 
     # ── 2. Load data ────────────────────────────────────────────────────────
     t0 = time.time()
+    _diag("STAGE 2: Load data")
     print("\n=== LOADING DATA ===")
     try:
         progress_print(
             f"Data source: test={args.test}, local={getattr(args, 'local', False)}, "
             f"input={args.input or '(auto)'}"
         )
+        _diag(f"  test={args.test}  local={getattr(args,'local',False)}  input={args.input or '(auto)'}")
         if args.test:
             progress_print("Creating mock test data...")
             df_family = create_test_data()
@@ -1902,18 +1983,26 @@ def run_pipeline(args):
             )
 
         if len(df_family) == 0:
+            _diag(f"  ERROR: No sequences found for family '{FAMILY_NAME}'")
             print(f"ERROR: No sequences found for family '{FAMILY_NAME}'")
             sys.exit(1)
         progress_print(f"  {len(df_family)} sequences to analyze")
+        _diag(f"  Loaded {len(df_family)} rows  columns={list(df_family.columns)}")
+        _diag(f"  dtypes: {dict(df_family.dtypes)}")
+        _diag(f"  head(2): {df_family.head(2).to_dict()}")
     except Exception as e:
+        _diag(f"  FAILED: {type(e).__name__}: {e}\n{traceback.format_exc()}")
         log_error("LOAD DATA", e)
         sys.exit(1)
     stage_times["Load Data"] = time.time() - t0
+    _checkpoint(OUT_DIR, "stage2_load_data", f"rows={len(df_family)}  cols={list(df_family.columns)}")
 
     # ── 3. Fetch sequences ──────────────────────────────────────────────────
     t0 = time.time()
+    _diag("STAGE 3: Fetch sequences")
     print("\n=== FETCHING SEQUENCES ===")
     try:
+        _diag(f"  has_seq={'Seq' in df_family.columns}  genome_loaded={genome_cache.is_loaded}")
         if "Seq" in df_family.columns and df_family["Seq"].notna().all():
             progress_print("Sequences already present — normalizing strand orientation")
             df_family["Seq"] = [
@@ -1958,41 +2047,81 @@ def run_pipeline(args):
                 )
                 df_family["Seq"] = seqlist
 
+        _seq_ok = df_family["Seq"].notna().sum() if "Seq" in df_family.columns else 0
+        _diag(f"  Sequences filled: {_seq_ok}/{len(df_family)}")
         df_family.to_csv(DIRS["data"] / f"{FAMILY_NAME.lower()}_with_sequences.csv", index=False)
+        _diag(f"  Saved: {DIRS['data'] / (FAMILY_NAME.lower() + '_with_sequences.csv')}")
     except Exception as e:
+        _diag(f"  FAILED: {type(e).__name__}: {e}\n{traceback.format_exc()}")
         log_error("FETCH SEQUENCES", e)
         sys.exit(1)
     stage_times["Sequences"] = time.time() - t0
+    _checkpoint(OUT_DIR, "stage3_sequences", f"seq_ok={_seq_ok}/{len(df_family)}")
 
     # ── 4. Statistics ───────────────────────────────────────────────────────
     t0 = time.time()
+    _diag("STAGE 4: Statistics")
     print("\n=== BASIC STATISTICS ===")
-    expr_cols = compute_basic_stats(
-        df_family,
-        label=f" — {FAMILY_NAME}",
-        output_file=DIRS["stats"] / "overall_statistics.txt"
-    )
+    try:
+        expr_cols = compute_basic_stats(
+            df_family,
+            label=f" — {FAMILY_NAME}",
+            output_file=DIRS["stats"] / "overall_statistics.txt"
+        )
+        _diag(f"  expr_cols={expr_cols}")
+    except Exception as e:
+        _diag(f"  Statistics FAILED (non-fatal): {type(e).__name__}: {e}\n{traceback.format_exc()}")
+        expr_cols = []
     stage_times["Statistics"] = time.time() - t0
+    _checkpoint(OUT_DIR, "stage4_statistics", f"expr_cols={expr_cols}")
 
     # ── 5. Clustering ───────────────────────────────────────────────────────
     t0 = time.time()
+    _diag("STAGE 5: Clustering")
     print("\n=== CLUSTERING ===")
+
+    # Interactive min_cluster_size prompt
+    _n_seqs = len(df_family)
+    _mcs_default = max(5, _n_seqs // 5)
+    print(f"  [Min cluster size]  (N = {_n_seqs} sequences)")
+    print(f"  Enter an integer, or an expression using N (e.g. N/3, N/10).")
+    _mcs_raw = _safe_input(f"  min_cluster_size  [N/5 = {_mcs_default}]: ", default="").strip()
+    _min_cluster_size = _mcs_default
+    if _mcs_raw:
+        try:
+            _mcs_val = int(eval(_mcs_raw.upper().replace("N", str(_n_seqs)), {"__builtins__": {}}))
+            if _mcs_val < 2:
+                raise ValueError("must be >= 2")
+            _min_cluster_size = _mcs_val
+            print(f"  ✓  min_cluster_size: {_min_cluster_size}")
+        except Exception as _e:
+            print(f"  ⚠  '{_mcs_raw}' invalid ({_e})  — using default {_min_cluster_size}")
+    else:
+        print(f"  → min_cluster_size: {_min_cluster_size}")
+    print()
+
+    _diag(f"  min_cluster_size={_min_cluster_size}  n_seqs={len(df_family)}  min_sequences={args.min_sequences}")
     try:
         if len(df_family) < args.min_sequences:
             progress_print(
                 f"  Too few sequences ({len(df_family)} < {args.min_sequences}) "
                 "— assigning all to Cluster 0"
             )
+            _diag(f"  Skipping HDBSCAN: too few sequences")
             df_family["Cluster"] = 0
         else:
             rs = args.random_state if args.random_state != 0 else None
             progress_print(
                 "Clustering settings: "
                 f"kmer={args.kmer}, pca_dims={args.pca_dims}, n_epochs={args.n_epochs}, "
-                f"random_state={rs}, compute_tsne={not args.skip_tsne}"
+                f"random_state={rs}, compute_tsne={not args.skip_tsne}, "
+                f"min_cluster_size={_min_cluster_size}"
             )
+            _diag(f"  Calling clustering_analysis(kmer={args.kmer}, pca_dims={args.pca_dims}, "
+                  f"n_epochs={args.n_epochs}, rs={rs}, mcs={_min_cluster_size})")
             df_family, cluster_labels = clustering_analysis(
                 df_family, kmer=args.kmer,
+                min_cluster_size=_min_cluster_size,
                 out_dir=DIRS["clustering"],
                 family_name=FAMILY_NAME,
                 debug=args.debug,
@@ -2001,16 +2130,35 @@ def run_pipeline(args):
                 random_state=rs,
                 compute_tsne=not args.skip_tsne,
             )
+            _diag(f"  clustering_analysis returned — Cluster col present: {'Cluster' in df_family.columns}")
 
         df_family.to_csv(DIRS["data"] / f"{FAMILY_NAME.lower()}_clustered.csv", index=False)
         n_clusters = len([c for c in df_family["Cluster"].unique() if c >= 0])
         progress_print(f"  {n_clusters} clusters, {(df_family['Cluster']==-1).sum()} noise")
+        _diag(f"  n_clusters={n_clusters}  noise={(df_family['Cluster']==-1).sum()}")
+
+        # Write coordinates/strand/sequence summary to base output dir
+        _seq_csv = OUT_DIR / f"{FAMILY_NAME.lower()}_sequences.csv"
+        _strand_series = df_family.apply(_row_strand, axis=1)
+        _seq_out = pd.DataFrame({
+            "chr":      df_family["chr"].values,
+            "start":    df_family["start"].values,
+            "stop":     df_family["stop"].values,
+            "strand":   _strand_series.values,
+            "sequence": df_family["Seq"].values,
+        })
+        _seq_out.to_csv(_seq_csv, index=False)
+        progress_print(f"  Sequence summary → {_seq_csv}")
     except Exception as e:
+        _diag(f"  CLUSTERING FAILED: {type(e).__name__}: {e}\n{traceback.format_exc()}")
         log_error("CLUSTERING", e)
         df_family["Cluster"] = 0
+        n_clusters = 0
     stage_times["Clustering"] = time.time() - t0
+    _checkpoint(OUT_DIR, "stage5_clustering", f"n_clusters={n_clusters}")
 
     # Per-cluster stats: text files written per cluster, summary via SQL
+    _diag("  Writing per-cluster stats")
     cs_dir = DIRS["stats"] / "per_cluster"
     cs_dir.mkdir(exist_ok=True)
     for cl in sorted(df_family["Cluster"].unique()):
@@ -2021,49 +2169,71 @@ def run_pipeline(args):
         )
     sql_summary = _cluster_summary_sql(df_family)
     sql_summary.to_csv(DIRS["stats"] / "cluster_summary.csv", index=False)
+    _diag(f"  cluster_summary.csv written  shape={sql_summary.shape}")
 
     # ── 6. Dashboard ────────────────────────────────────────────────────────
     t0 = time.time()
+    _diag("STAGE 6: Dashboard")
     print("\n=== VISUALIZATION DASHBOARD ===")
-    build_dashboard(df_family, expr_cols, DIRS["visualizations"], FAMILY_NAME)
+    try:
+        build_dashboard(df_family, expr_cols, DIRS["visualizations"], FAMILY_NAME)
+        _diag("  Dashboard built OK")
+    except Exception as e:
+        _diag(f"  Dashboard FAILED (non-fatal): {type(e).__name__}: {e}\n{traceback.format_exc()}")
     stage_times["Dashboard"] = time.time() - t0
+    _checkpoint(OUT_DIR, "stage6_dashboard")
 
     # ── 7. Alignment ────────────────────────────────────────────────────────
     if not args.skip_alignment:
         t0 = time.time()
+        _diag("STAGE 7: Alignment")
         print("\n=== ALIGNMENT ===")
         try:
             run_alignment_pipeline(df_family, OUT_DIR, FAMILY_NAME)
+            _diag("  Alignment OK")
         except Exception as e:
+            _diag(f"  Alignment FAILED (non-fatal): {type(e).__name__}: {e}\n{traceback.format_exc()}")
             log_error("ALIGNMENT", e)
         stage_times["Alignment"] = time.time() - t0
+        _checkpoint(OUT_DIR, "stage7_alignment")
+    else:
+        _diag("STAGE 7: Alignment SKIPPED (--skip-alignment)")
 
     # ── 9. JASPAR motif / TF binding / GO analysis ─────────────────────────
     if not args.skip_motif:
         t0 = time.time()
+        _diag("STAGE 9: Motif / TFBS / GO")
         clustered_csv = DIRS["data"] / f"{FAMILY_NAME.lower()}_clustered.csv"
+        _diag(f"  clustered_csv={clustered_csv}  exists={clustered_csv.exists()}")
+        _diag(f"  jaspar_bed={getattr(args,'jaspar_bed',None)}  p_threshold={getattr(args,'p_threshold',None)}")
         try:
             run_motif_stage_full(args, OUT_DIR, DIRS, FAMILY_NAME,
                                  clustered_csv=str(clustered_csv))
+            _diag("  Motif stage completed OK")
         except SystemExit as e:
+            _diag(f"  Motif stage SystemExit code={e.code}")
             progress_print(f"  Motif/GO stage did not complete (exit={e.code})")
             (DIRS["motif"] / "MOTIF_ANALYSIS_FAILED.txt").write_text(
                 f"Motif stage exited with code {e.code}.\n"
                 "Check the log, genome build, JASPAR BED path, and bedtools availability.\n"
             )
         except Exception as e:
+            _diag(f"  Motif FAILED: {type(e).__name__}: {e}\n{traceback.format_exc()}")
             log_error("MOTIF / TFBS / GO", e)
             (DIRS["motif"] / "MOTIF_ANALYSIS_FAILED.txt").write_text(
                 f"Motif stage failed: {type(e).__name__}: {e}\n"
             )
         stage_times["Motif+TFBS+GO"] = time.time() - t0
+        _checkpoint(OUT_DIR, "stage9_motif")
+    else:
+        _diag("STAGE 9: Motif SKIPPED (--skip-motif)")
 
     # ── 10. Primer design ───────────────────────────────────────────────────
     if not args.skip_primers:
         t0 = time.time()
+        _diag("STAGE 10: Primer design")
         print("\n=== PRIMER DESIGN ===")
         try:
-            # Enable parallel genome search when --parallel-primers is set
             if getattr(args, "parallel_primers", False) and genome_cache.is_loaded:
                 genome_cache._default_parallel = True
             design_primers(
@@ -2077,9 +2247,14 @@ def run_pipeline(args):
                 out_dir=DIRS["primers"],
                 family_name=FAMILY_NAME,
             )
+            _diag("  Primer design OK")
         except Exception as e:
+            _diag(f"  Primer design FAILED: {type(e).__name__}: {e}\n{traceback.format_exc()}")
             log_error("PRIMER DESIGN", e)
         stage_times["Primers"] = time.time() - t0
+        _checkpoint(OUT_DIR, "stage10_primers")
+    else:
+        _diag("STAGE 10: Primers SKIPPED (--skip-primers)")
 
     # ── Summary ─────────────────────────────────────────────────────────────
     total = time.time() - pipeline_start
@@ -2096,10 +2271,12 @@ def run_pipeline(args):
     for stage, seconds in stage_times.items():
         print(f"    {stage:<14} {seconds:>8.1f}s")
     print()
+    print(f"  Sequences:     {FAMILY_NAME.lower()}_sequences.csv")
     print(f"  Dashboard:     07_visualizations/index.html")
     print(f"  CIAlign:       cialign_plots/index.html")
     print(f"  Primers:       06_primers/selected_primers_summary.csv")
     print(f"  Clustering:    03_clustering/clustering_visualization.html")
+    print(f"  Expr clusters: 03_clustering/clustering_visualization_expr.html  (if expression data present)")
     print(f"  Consensus:     05_consensus/")
     print(f"  Motifs:        motif_analysis/overall_top_motifs.png")
     print(f"  TF binding:    05_tfbs/cluster_tf_binding_heatmap.html")

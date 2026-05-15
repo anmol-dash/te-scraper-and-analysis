@@ -246,40 +246,59 @@ def clustering_analysis(df, kmer=6, min_cluster_size=None, out_dir=None,
 
 def _save_clustering_viz(df, pca_emb, pca_lbl, umap_emb, umap_lbl,
                           tsne_emb, tsne_lbl, out_dir, family_name, kmer):
-    """Save interactive Plotly clustering visualisation."""
+    """Save interactive Plotly clustering visualisation (+ expression-sized variant if available)."""
     try:
         import plotly.graph_objects as go
         from plotly.subplots import make_subplots
 
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        fig = make_subplots(
-            rows=1, cols=3,
-            subplot_titles=[f"PCA (k={kmer})", f"UMAP (k={kmer})", f"t-SNE (k={kmer})"]
-        )
 
-        def _add(emb, col, labels):
-            uq   = sorted(set(labels))
-            cmap = {c: i for i, c in enumerate(uq)}
-            htexts = []
-            for i, lbl in enumerate(labels):
-                row = df.iloc[i]
-                coord = (f"{row.get('chr','?')}:"
-                         f"{row.get('start','?')}-{row.get('stop','?')}")
-                htexts.append(f"<b>Row {i}</b><br>{coord}<br>Cluster: {lbl}")
-            fig.add_trace(
-                go.Scatter(
-                    x=emb[:, 0], y=emb[:, 1], mode="markers",
-                    marker=dict(size=5, color=[cmap[l] for l in labels],
-                                colorscale="Viridis"),
-                    text=htexts, hovertemplate="%{text}<extra></extra>",
-                ),
-                row=1, col=col,
+        # Detect expression columns (numeric, not coordinate/cluster/embedding cols)
+        _excl = {"start", "stop", "Unnamed: 0", "Cluster", "_total_expr",
+                 "pca_x", "pca_y", "umap_x", "umap_y", "tsne_x", "tsne_y"}
+        expr_cols = [c for c in df.select_dtypes(include=[np.number]).columns
+                     if c not in _excl]
+        expr_vals = None
+        if expr_cols:
+            raw = df[expr_cols].fillna(0).sum(axis=1).values.astype(float)
+            mn, mx = raw.min(), raw.max()
+            if mx > mn:
+                expr_vals = 4 + 16 * (raw - mn) / (mx - mn)  # scale 4–20 px
+            else:
+                expr_vals = np.full(len(raw), 8.0)
+
+        def _build_fig(marker_size):
+            f = make_subplots(
+                rows=1, cols=3,
+                subplot_titles=[f"PCA (k={kmer})", f"UMAP (k={kmer})", f"t-SNE (k={kmer})"]
             )
 
-        _add(pca_emb, 1, pca_lbl)
-        _add(umap_emb, 2, umap_lbl)
-        _add(tsne_emb, 3, tsne_lbl)
+            def _add(emb, col, labels):
+                uq   = sorted(set(labels))
+                cmap = {c: i for i, c in enumerate(uq)}
+                htexts = []
+                for i, lbl in enumerate(labels):
+                    row = df.iloc[i]
+                    coord = (f"{row.get('chr','?')}:"
+                             f"{row.get('start','?')}-{row.get('stop','?')}")
+                    htexts.append(f"<b>Row {i}</b><br>{coord}<br>Cluster: {lbl}")
+                f.add_trace(
+                    go.Scatter(
+                        x=emb[:, 0], y=emb[:, 1], mode="markers",
+                        marker=dict(size=marker_size, color=[cmap[l] for l in labels],
+                                    colorscale="Viridis"),
+                        text=htexts, hovertemplate="%{text}<extra></extra>",
+                    ),
+                    row=1, col=col,
+                )
+
+            _add(emb=pca_emb,  col=1, labels=pca_lbl)
+            _add(emb=umap_emb, col=2, labels=umap_lbl)
+            _add(emb=tsne_emb, col=3, labels=tsne_lbl)
+            return f
+
+        fig = _build_fig(marker_size=5)
         fig.update_layout(
             width=1500, height=450, showlegend=False,
             title=f"{family_name} Clustering (k={kmer})",
@@ -287,6 +306,17 @@ def _save_clustering_viz(df, pca_emb, pca_lbl, umap_emb, umap_lbl,
         out_path = out_dir / "clustering_visualization.html"
         fig.write_html(out_path)
         _pp(f"    Clustering visualisation → {out_path}")
+
+        if expr_vals is not None:
+            fig_expr = _build_fig(marker_size=expr_vals.tolist())
+            fig_expr.update_layout(
+                width=1500, height=450, showlegend=False,
+                title=f"{family_name} Clustering — dot size = expression (k={kmer})",
+            )
+            expr_path = out_dir / "clustering_visualization_expr.html"
+            fig_expr.write_html(expr_path)
+            _pp(f"    Expression-sized visualisation → {expr_path}")
+
     except Exception as e:
         _pp(f"    WARNING: could not save clustering viz: {e}")
 

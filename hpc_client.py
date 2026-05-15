@@ -23,18 +23,24 @@ Requirements:
     pip install paramiko
 """
 
-import os
-import sys
-import stat
+import base64
+import datetime
 import getpass
 import argparse
-import base64
 import io
+import json
+import os
 import re
 import shlex
+import stat
+import sys
 import tarfile
-import datetime
+import tempfile
+import zipfile
+from email.mime.text import MIMEText
 from pathlib import Path
+
+_STATE_FILE = Path.home() / ".hpc_te_state.json"
 
 try:
     import paramiko
@@ -59,9 +65,9 @@ class HPCClient:
 
         # Default parameters
         self.params = {
-            "FAMILY_NAME": "HERVK9",
-            "SPECIES": "human",
-            "ASSEMBLY": "hg38",      # UCSC assembly/build used for automatic loading
+            "FAMILY_NAME": "MT2_Mm",
+            "SPECIES": "mouse",
+            "ASSEMBLY": "mm10",      # UCSC assembly/build used for automatic loading
             "LOCAL_ASSEMBLY_PATH": "",  # Optional genome FASTA path on HPC
             "JASPAR_BED_PATH": "",      # Optional pre-downloaded JASPAR BED/BED.GZ on HPC
             "JASPAR_TABIX_PATH": "",    # bgzip+tabix-indexed JASPAR .bed.gz (reusable across families)
@@ -88,9 +94,14 @@ class HPCClient:
             "QUEUE": "normal",       # LSF queue / Slurm partition
             # Optional module loads (space-separated, e.g. "python/3.11 gcc/12")
             "MODULES": "",
+            # Skip flags
+            "SKIP_JASPAR": 0,
+            "SKIP_PRIMERS": 0,
+            "SKIP_GO": 0,
+            # Notification
+            "NOTIFY_EMAIL": "",
         }
 
-        self.local_output_dir = None
         self.remote_script_path = None
         self.remote_work_dir = None
         self.remote_output_dir = None  # Where results are stored on HPC
@@ -98,6 +109,13 @@ class HPCClient:
         self._transport = None
         self._password = None
         self.use_sftp = False
+
+        self._state = self._load_state()
+        self.local_output_dir = (
+            Path(self._state["last_local_dir"])
+            if self._state.get("last_local_dir")
+            else None
+        )
 
     def connect(self, hostname: str, username: str, password: str, port: int = 22):
         """Connect to the HPC cluster via SSH."""
@@ -403,20 +421,34 @@ fi
         last_output_time = time.time()
         line_buffer = ""
 
+        # Lines to always suppress — shell boilerplate, not pipeline progress
+        _NOISE = re.compile(
+            r"^(echo |host$|hostname|nproc|df -|ls -|cat |#|set -|"
+            r"export |source |module |conda |pip |which |command -v|"
+            r"Host diagnostics|venv|virtual.?env|activate|deactivate|"
+            r"script running|Running script|ulimit|umask|\s*$)",
+            re.IGNORECASE,
+        )
+
         def _important_stream_line(line):
             s = line.strip()
-            if not s:
+            if not s or _NOISE.match(s):
                 return False
-            patterns = (
-                "===", "TE Analysis", "PIPELINE", "Pipeline", "STEP ",
-                "FATAL", "ERROR", "Error", "Exception", "Traceback",
-                "WARNING", "[WARN]", "[SKIP]", "Saved ", "Results:",
-                "Exit code:", "Runtime:", "Starting pipeline", "Command:",
-                "Dashboard:", "Consensus:", "Motifs:", "TF binding:", "GO:",
-            )
-            if s.startswith(patterns):
-                return True
-            return bool(re.match(r"^\[\d{2}:\d{2}:\d{2}\].*(Starting|complete|done|failed|skipped|Loading|Fetching|Clustering|Running|Saved|Output|Results)", s))
+            # Drop known verbose-only diagnostic dump lines
+            if re.match(r"(^Args: \{|dtypes:|head\(2\):|Output dirs created:|"
+                        r"sys\.stdin\.isatty|CWD: /)", s):
+                return False
+            # Pass everything that looks like real pipeline output:
+            # any timestamped line, stage headers, step/arrow progress, errors
+            return bool(re.match(
+                r"(^\[|=== |─{5,}|STAGE |CHECKPOINT|PIPELINE|"
+                r"Step [0-9]/|→ |Scanned |Fetching |Extracting |Parsing |"
+                r"Scanning |Written |Saved |Running |"
+                r"FATAL|ERROR|Error|Exception|Traceback|WARNING|"
+                r"Exit code:|Runtime:|Results:|"
+                r"sequences|clusters,|noise )",
+                s, re.IGNORECASE,
+            ))
 
         def _emit_summary(chunk):
             nonlocal line_buffer, last_output_time
@@ -568,6 +600,7 @@ fi
             "19": "LOCAL_ASSEMBLY_PATH",
             "24": "JASPAR_BED_PATH",
             "25": "JASPAR_TABIX_PATH",
+            "27": "NOTIFY_EMAIL",
         }
         int_params = {
             "4": "K", "5": "PRIMER_K", "6": "TOP_N_GLOBAL",
@@ -576,6 +609,7 @@ fi
             "18": "FETCH_WORKERS",
             "20": "PCA_DIMS", "21": "N_EPOCHS", "22": "RANDOM_STATE",
             "23": "SKIP_TSNE",
+            "28": "SKIP_JASPAR", "29": "SKIP_PRIMERS", "30": "SKIP_GO",
         }
         float_params = {
             "26": "P_THRESHOLD",
@@ -622,7 +656,12 @@ fi
             print("         same build — tabix only reads your loci regions, not the whole file.")
             print("    [26] P_THRESHOLD: Fisher exact test p-value cutoff for motif/GO significance")
             print("         (default 0.05; lower = stricter, e.g. 0.01 or 0.001)")
+            print("    [27] NOTIFY_EMAIL: Email address for job-complete notification (requires Gmail App Password)")
+            print("    [28] SKIP_JASPAR: 1 = skip JASPAR motif/TFBS analysis")
+            print("    [29] SKIP_PRIMERS: 1 = skip primer design")
+            print("    [30] SKIP_GO: 1 = skip GO enrichment")
             print()
+            print("  [g]  Set up Gmail App Password  (run once to enable email notifications)")
             print("  [p]  Preview family count")
             print("  [r]  Run analysis")
             print("  [q]  Back")
@@ -632,6 +671,8 @@ fi
 
             if choice == "q":
                 return False
+            elif choice == "g":
+                self.setup_email_auth()
             elif choice == "p":
                 self.preview_family_count()
             elif choice == "r":
@@ -713,6 +754,15 @@ fi
 
         if int(self.params.get("SKIP_TSNE", 1)):
             args.append("--skip-tsne")
+
+        if int(self.params.get("SKIP_JASPAR", 0)):
+            args.append("--skip-motif")
+
+        if int(self.params.get("SKIP_PRIMERS", 0)):
+            args.append("--skip-primers")
+
+        if int(self.params.get("SKIP_GO", 0)):
+            args.append("--skip-go")
 
         # Prefer the tabix-indexed copy when set; fall back to plain BED path.
         jaspar = (str(self.params.get("JASPAR_TABIX_PATH", "")).strip()
@@ -885,15 +935,15 @@ echo "  Input data: OK ({quoted})"'''
         self.remote_output_dir = f"{self.remote_work_dir}/{self.params['BASE_OUT_DIR']}/{family}"
 
         # Create bsub job script
+        import datetime as _dt
+        _ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
         job_name = f"te_analysis_{self.params['FAMILY_NAME']}"
-        job_script = f"{self.remote_work_dir}/te_analysis_job.sh"
-        job_out = f"{self.remote_work_dir}/te_analysis_job.out"
-        job_err = f"{self.remote_work_dir}/te_analysis_job.err"
-        job_done = f"{self.remote_work_dir}/te_analysis_job.done"
-        job_info = f"{self.remote_work_dir}/te_analysis_job.info"
-
-        # Error log file
-        job_error_log = f"{self.remote_work_dir}/te_analysis_job.error.log"
+        job_script    = f"{self.remote_work_dir}/te_analysis_job_{_ts}.sh"
+        job_out       = f"{self.remote_work_dir}/te_analysis_job_{_ts}.out"
+        job_err       = f"{self.remote_work_dir}/te_analysis_job_{_ts}.err"
+        job_done      = f"{self.remote_work_dir}/te_analysis_job_{_ts}.done"
+        job_info      = f"{self.remote_work_dir}/te_analysis_job_{_ts}.info"
+        job_error_log = f"{self.remote_work_dir}/te_analysis_job_{_ts}.error.log"
 
         # Build the scheduler-agnostic job script
         sched_header = self._job_script_header(job_name, job_out, job_err)
@@ -1046,8 +1096,17 @@ exit $EXIT_CODE
             job_id = "unknown"
             self.current_job_id = None
 
-        # Save job info for later retrieval
-        job_info_content = f"JOB_ID={job_id}\nFAMILY={self.params['FAMILY_NAME']}\nOUTPUT_DIR={self.remote_output_dir}\nSUBMITTED=$(date)"
+        # Save job info for later retrieval (paths embedded so finder can reconstruct them)
+        job_info_content = (
+            f"JOB_ID={job_id}\n"
+            f"FAMILY={self.params['FAMILY_NAME']}\n"
+            f"OUTPUT_DIR={self.remote_output_dir}\n"
+            f"LOG_OUT={job_out}\n"
+            f"LOG_ERR={job_err}\n"
+            f"LOG_DONE={job_done}\n"
+            f"LOG_ERRLOG={job_error_log}\n"
+            f"SUBMITTED=$(date)"
+        )
         self.run_command(f"echo '{job_info_content}' > {job_info}", timeout=10)
 
         print("\n" + "=" * 60)
@@ -1259,55 +1318,40 @@ exit $EXIT_CODE
     def _find_latest_job_info(self):
         """Return info for the most recently submitted job (pipeline or motif-only).
 
-        Checks both te_analysis_job.info and te_motif_job.info and picks the
-        one with the newer mtime so the right files are used regardless of which
-        job type was last submitted.
+        Globs for te_analysis_job_*.info and te_motif_job_*.info (timestamped),
+        picks the one with the newest mtime, and reads log paths from its content.
 
         Returns
         -------
         (info_dict, out_path, err_path, done_path, errlog_path)
         All paths are None when no info file is found.
         """
-        candidates = [
-            ("te_analysis_job", f"{self.remote_work_dir}/te_analysis_job.info"),
-            ("te_motif_job",    f"{self.remote_work_dir}/te_motif_job.info"),
-        ]
-
-        best_mtime  = -1
-        best_prefix = None
-        best_info   = None
-
-        for prefix, info_path in candidates:
-            mtime_out, _, _ = self.run_command(
-                f"stat -c %Y {info_path} 2>/dev/null || echo -1", timeout=10)
-            try:
-                mtime = int(mtime_out.strip())
-            except (ValueError, AttributeError):
-                mtime = -1
-
-            if mtime <= 0:
-                continue
-
-            content, _, ccode = self.run_command(f"cat {info_path} 2>/dev/null", timeout=10)
-            if ccode != 0 or not content.strip():
-                continue
-
-            info = {}
-            for line in content.strip().splitlines():
-                if "=" in line:
-                    k, v = line.split("=", 1)
-                    info[k.strip()] = v.strip()
-
-            if mtime > best_mtime:
-                best_mtime  = mtime
-                best_prefix = prefix
-                best_info   = info
-
-        if best_info is None:
+        # Find the newest .info file across both job types
+        glob_cmd = (
+            f"ls -t {self.remote_work_dir}/te_analysis_job_*.info "
+            f"{self.remote_work_dir}/te_motif_job_*.info 2>/dev/null | head -1"
+        )
+        latest_path, _, _ = self.run_command(glob_cmd, timeout=10)
+        latest_path = latest_path.strip()
+        if not latest_path:
             return None, None, None, None, None
 
-        base = f"{self.remote_work_dir}/{best_prefix}"
-        return best_info, f"{base}.out", f"{base}.err", f"{base}.done", f"{base}.error.log"
+        content, _, ccode = self.run_command(f"cat {latest_path} 2>/dev/null", timeout=10)
+        if ccode != 0 or not content.strip():
+            return None, None, None, None, None
+
+        info = {}
+        for line in content.strip().splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                info[k.strip()] = v.strip()
+
+        out_path    = info.get("LOG_OUT")
+        err_path    = info.get("LOG_ERR")
+        done_path   = info.get("LOG_DONE")
+        errlog_path = info.get("LOG_ERRLOG")
+
+        return info, out_path, err_path, done_path, errlog_path
 
     def _get_scheduler_state(self, job_id):
         """Return a normalised job state string by querying the scheduler.
@@ -1365,6 +1409,8 @@ exit $EXIT_CODE
 
     def check_job_status(self):
         """Check the status of the most recently submitted batch job."""
+        import time as _time
+        _status_t0 = _time.time()
         job_info, job_out, job_err, job_done, job_errlog = self._find_latest_job_info()
 
         if job_info is None:
@@ -1415,81 +1461,117 @@ exit $EXIT_CODE
             else:
                 print("  State     : UNKNOWN  (scheduler silent, no done marker)")
 
-        # ── 2. Output file stats ──────────────────────────────────────────────
+        # ── 2. Stage progress from checkpoint files ───────────────────────────
         print()
-        lines_out, _, _ = self.run_command(
-            f"wc -l < {job_out} 2>/dev/null || echo 0", timeout=10)
-        size_out, _, _ = self.run_command(
-            f"du -sh {job_out} 2>/dev/null || echo '?'", timeout=10)
-        print(f"  Log lines : {lines_out.strip()}")
-        print(f"  Log size  : {size_out.strip()}")
-
+        print("  --- Stage progress ---")
         if out_dir:
-            dir_size, _, _ = self.run_command(
-                f"du -sh {out_dir} 2>/dev/null || echo '(not found)'", timeout=10)
-            print(f"  Results   : {dir_size.strip()}")
+            # One command: list all CHECKPOINT files with timestamps
+            ckpt_out, _, _ = self.run_command(
+                f"find {out_dir} -maxdepth 1 -name 'CHECKPOINT_*.txt'"
+                f" -printf '%TH:%TM  %f\\n' 2>/dev/null | sort -k2",
+                timeout=10)
+            if ckpt_out.strip():
+                for cline in ckpt_out.strip().splitlines():
+                    # CHECKPOINT_STAGE5_CLUSTERING.txt → "Stage5 Clustering"
+                    ts, fname = cline.strip().split(None, 1)
+                    label = fname.replace("CHECKPOINT_", "").replace(".txt", "").replace("_", " ").title()
+                    print(f"    ✓  {ts}  {label}")
+            else:
+                print("    (no stage checkpoints yet — pipeline may still be initialising)")
 
-            files_out, _, _ = self.run_command(
-                f"find {out_dir} -maxdepth 4 -type f"
-                r" \( -name '*.csv' -o -name '*.tsv' -o -name '*.png' -o -name '*.log' \)"
-                f" 2>/dev/null | sort | head -25",
-                timeout=15)
-            if files_out.strip():
-                print("  Key files :")
-                for fline in files_out.strip().splitlines():
-                    sz, _, _ = self.run_command(f"du -sh {fline} 2>/dev/null | cut -f1", timeout=8)
-                    print(f"    {fline}  ({sz.strip()})")
+            # What stage is currently running: last === STAGE === header in the log
+            cur_stage, _, _ = self.run_command(
+                f"grep -E '^=== |^\\[.+\\] STAGE [0-9]' {job_out} 2>/dev/null | tail -1",
+                timeout=10)
+            if cur_stage.strip():
+                print(f"    ▶  Currently: {cur_stage.strip()}")
 
-        # ── 3. Recent job output — always shown, no prompt ───────────────────
+            # Result files with sizes — one find+stat call, no per-file round trips
+            results_out, _, _ = self.run_command(
+                f"find {out_dir} -maxdepth 4 -type f "
+                r"\( -name '*.csv' -o -name '*.tsv' -o -name '*.html' -o -name '*.png' \) "
+                f"-printf '%s %P\\n' 2>/dev/null | sort -k2 | head -20",
+                timeout=12)
+            if results_out.strip():
+                print()
+                print("  --- Output files ---")
+                for rline in results_out.strip().splitlines():
+                    parts = rline.split(None, 1)
+                    if len(parts) == 2:
+                        sz_bytes, relpath = int(parts[0]), parts[1]
+                        sz = (f"{sz_bytes/1e6:.1f}MB" if sz_bytes > 1e6
+                              else f"{sz_bytes//1024}KB" if sz_bytes > 1024
+                              else f"{sz_bytes}B")
+                        print(f"    {sz:>8}  {relpath}")
+        else:
+            print("    (output directory unknown)")
+
+        # ── 3. What is actually happening right now ───────────────────────────
+        # Strategy: skip the shell preamble (everything before Python starts),
+        # strip only the handful of extremely verbose diagnostic-only lines,
+        # then show the last 35 lines of real pipeline output.
         print()
-        print("  --- Recent output (last 50 lines) ---")
-        recent, _, _ = self.run_command(
-            f"tail -50 {job_out} 2>/dev/null || echo '(no output yet)'", timeout=20)
-        for line in (recent or "(no output yet)").rstrip().splitlines():
-            print(f"  {line}")
+        print("  --- Live pipeline output (last 35 lines) ---")
+        activity_cmd = (
+            # Find the line where Python was launched and keep only from there on
+            f"awk '/Starting pipeline\\.\\.\\.|python -u /{{found=1}} found' {job_out} 2>/dev/null"
+            # Strip blank lines and a small set of known verbose-only diag lines
+            f" | grep -vE '(^\\s*$"
+            f"|^Args: \\{{"
+            f"|dtypes:"
+            f"|head\\(2\\):"
+            f"|Output dirs created:"
+            f"|sys\\.stdin\\.isatty"
+            f"|CWD: /"
+            f"|^={60}"
+            f")'"
+            f" | tail -35"
+        )
+        activity_out, _, _ = self.run_command(activity_cmd, timeout=15)
+        if activity_out.strip():
+            for line in activity_out.strip().splitlines():
+                print(f"  {line}")
+        else:
+            # Nothing after the Python start marker — job is still in preamble or hasn't started
+            preamble, _, _ = self.run_command(
+                f"tail -10 {job_out} 2>/dev/null || echo '(no output yet)'", timeout=10)
+            for line in (preamble or "(no output yet)").rstrip().splitlines():
+                print(f"  {line}")
 
         # ── 4. Error details only when job actually failed ───────────────────
         job_failed = done_val not in ("", "0")
         if job_failed:
             print()
-            print("  --- Error log (last 60 lines) ---")
+            print("  --- Errors ---")
+            # Show last traceback block from the output log
+            tb_out, _, _ = self.run_command(
+                f"grep -n 'Traceback\\|FATAL\\|Error:\\|Exception:\\|ERROR in stage' "
+                f"{job_out} 2>/dev/null | tail -20",
+                timeout=12)
+            if tb_out.strip():
+                for line in tb_out.strip().splitlines():
+                    print(f"  {line}")
+            # Show tail of the error log
             err_tail, _, _ = self.run_command(
-                f"tail -60 {job_errlog} 2>/dev/null || echo '(empty)'", timeout=20)
+                f"tail -30 {job_errlog} 2>/dev/null || echo '(empty)'", timeout=15)
             for line in (err_tail or "(empty)").rstrip().splitlines():
                 print(f"  {line}")
 
-            tb_out, _, _ = self.run_command(
-                f"grep -n 'Traceback\\|FATAL\\|Error:\\|Exception:' {job_out} 2>/dev/null"
-                f" | tail -20",
-                timeout=15)
-            if tb_out.strip():
-                print()
-                print("  --- Errors found in output ---")
-                for line in tb_out.strip().splitlines():
-                    print(f"  {line}")
-
         print()
-        print(f"  Full log : {job_out}")
+        print(f"  Full log  : {job_out}")
         if job_failed:
-            print(f"  Err log  : {job_errlog}")
+            print(f"  Error log : {job_errlog}")
+        elapsed = _time.time() - _status_t0
+        print(f"  Checked in {elapsed:.1f}s")
         print("=" * 60)
         return job_info
 
     def download_error_logs(self, local_dir: str = None):
         """Download just the error logs from the HPC for debugging."""
-        job_info_file = f"{self.remote_work_dir}/te_analysis_job.info"
-        job_out_file = f"{self.remote_work_dir}/te_analysis_job.out"
-        job_err_file = f"{self.remote_work_dir}/te_analysis_job.err"
-        job_error_log = f"{self.remote_work_dir}/te_analysis_job.error.log"
+        job_info, job_out_file, job_err_file, job_done_file, job_error_log = \
+            self._find_latest_job_info()
 
-        # Get job info
-        info_out, _, _ = self.run_command(f"cat {job_info_file} 2>/dev/null", timeout=10)
-        output_dir = None
-        if info_out.strip():
-            for line in info_out.strip().split('\n'):
-                if line.startswith('OUTPUT_DIR='):
-                    output_dir = line.split('=', 1)[1]
-                    break
+        output_dir = (job_info or {}).get("OUTPUT_DIR")
 
         if not local_dir:
             local_dir = "./hpc_error_logs"
@@ -1507,11 +1589,9 @@ exit $EXIT_CODE
             (job_error_log, "job_error.log"),
         ]
 
-        # Add pipeline error log if output dir exists
         if output_dir:
-            log_files.append((f"{output_dir}/pipeline_errors.log", "pipeline_errors.log"))
-            # Also try UCSC fetch errors
-            family = output_dir.split('/')[-1]
+            log_files.append((f"{output_dir}/pipeline_errors.log",     "pipeline_errors.log"))
+            log_files.append((f"{output_dir}/pipeline_diagnostic.log", "pipeline_diagnostic.log"))
             log_files.append((f"{output_dir}/01_data/ucsc_fetch_errors.log", "ucsc_fetch_errors.log"))
 
         for remote_file, local_name in log_files:
@@ -1728,13 +1808,15 @@ exit $EXIT_CODE
                 return False
 
         # ── Build job script paths ─────────────────────────────────────────────
+        import datetime as _dt
+        _ts        = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
         job_name   = "te_motif_go"
-        job_script = f"{self.remote_work_dir}/te_motif_job.sh"
-        job_out    = f"{self.remote_work_dir}/te_motif_job.out"
-        job_err    = f"{self.remote_work_dir}/te_motif_job.err"
-        job_done   = f"{self.remote_work_dir}/te_motif_job.done"
-        job_info   = f"{self.remote_work_dir}/te_motif_job.info"
-        job_errlog = f"{self.remote_work_dir}/te_motif_job.error.log"
+        job_script = f"{self.remote_work_dir}/te_motif_job_{_ts}.sh"
+        job_out    = f"{self.remote_work_dir}/te_motif_job_{_ts}.out"
+        job_err    = f"{self.remote_work_dir}/te_motif_job_{_ts}.err"
+        job_done   = f"{self.remote_work_dir}/te_motif_job_{_ts}.done"
+        job_info   = f"{self.remote_work_dir}/te_motif_job_{_ts}.info"
+        job_errlog = f"{self.remote_work_dir}/te_motif_job_{_ts}.error.log"
         scratch    = f"{self.remote_work_dir}/tmp_motif"
 
         sched_header = self._job_script_header(
@@ -1838,7 +1920,19 @@ if [ -n "$JASPAR_ARG" ]; then
         echo "1" > "{job_done}"; exit 1
     fi
     JASP_SIZE=$(du -sh "$JASPAR_ARG" 2>/dev/null | cut -f1)
+    JASP_SIZE="${{JASP_SIZE:-$(wc -c < "$JASPAR_ARG" 2>/dev/null | awk '{{print $1" B"}}')}}"
     echo "[$(date +%H:%M:%S)]   JASPAR BED: OK ($JASP_SIZE)"
+    # Check for required .tbi index alongside the .bed.gz
+    JASPAR_TBI="${{JASPAR_ARG}}.tbi"
+    if [ ! -f "$JASPAR_TBI" ]; then
+        echo "[$(date +%H:%M:%S)] FATAL: .tbi index not found alongside JASPAR file: $JASPAR_TBI" | tee -a "$ERROR_LOG"
+        echo "  Expected: ${{JASPAR_ARG}}.tbi" | tee -a "$ERROR_LOG"
+        echo "  Run: tabix -p bed $JASPAR_ARG   to build the index" | tee -a "$ERROR_LOG"
+        echo "1" > "{job_done}"; exit 1
+    fi
+    TBI_SIZE=$(du -sh "$JASPAR_TBI" 2>/dev/null | cut -f1)
+    TBI_SIZE="${{TBI_SIZE:-$(wc -c < "$JASPAR_TBI" 2>/dev/null | awk '{{print $1" B"}}')}}"
+    echo "[$(date +%H:%M:%S)]   JASPAR .tbi: OK ($TBI_SIZE)"
 else
     echo "[$(date +%H:%M:%S)]   JASPAR BED: will be auto-resolved by te_motif.py"
 fi
@@ -2010,7 +2104,10 @@ exit 0
             self.current_job_id = None
 
         info = (f"JOB_ID={job_id}\nTYPE=motif_go\n"
-                f"BED={bed_path}\nOUTPUT_DIR={out_dir}\nSUBMITTED=$(date)")
+                f"BED={bed_path}\nOUTPUT_DIR={out_dir}\n"
+                f"LOG_OUT={job_out}\nLOG_ERR={job_err}\n"
+                f"LOG_DONE={job_done}\nLOG_ERRLOG={job_errlog}\n"
+                f"SUBMITTED=$(date)")
         self.run_command(f"echo '{info}' > {job_info}", timeout=10)
 
         print()
@@ -2231,14 +2328,196 @@ exit 0
         print(out)
         return True
 
+    # ------------------------------------------------------------------
+    # Gmail App Password + email notifications
+    # ------------------------------------------------------------------
+
+    _APP_PASSWORD_STATE_KEY = "gmail_app_password"
+    _SENDER_EMAIL_STATE_KEY = "gmail_sender_email"
+
+    def _get_email_creds(self) -> tuple[str, str]:
+        """Return (sender_email, app_password), prompting and saving any missing values."""
+        sender = self._state.get(self._SENDER_EMAIL_STATE_KEY, "").strip()
+        pw = self._state.get(self._APP_PASSWORD_STATE_KEY, "").strip()
+
+        if sender and pw:
+            return sender, pw
+
+        print("\n" + "="*60)
+        print("GMAIL CREDENTIALS REQUIRED")
+        print("="*60)
+        print()
+
+        if not sender:
+            sender = input("Gmail address to send FROM: ").strip()
+            if not sender:
+                print("  No email entered — notifications disabled.")
+                return "", ""
+            self._state[self._SENDER_EMAIL_STATE_KEY] = sender
+            self._save_state()
+            print(f"  Sender email saved: {sender}")
+
+        if not pw:
+            print()
+            print("An App Password is needed (not your regular Gmail password).")
+            print("Generate one at: myaccount.google.com/apppasswords")
+            print("(16-character password, spaces optional)")
+            print()
+            pw = getpass.getpass("Paste your Gmail App Password: ").strip().replace(" ", "")
+            if not pw:
+                print("  No password entered — notifications disabled.")
+                return "", ""
+            self._state[self._APP_PASSWORD_STATE_KEY] = pw
+            self._save_state()
+            print("  App password saved to state file.")
+
+        return sender, pw
+
+    def setup_email_auth(self):
+        """Clear stored Gmail credentials and prompt for fresh ones."""
+        print("\n" + "="*60)
+        print("GMAIL APP PASSWORD SETUP")
+        print("="*60)
+        print()
+        print("Steps (one-time):")
+        print("  1. Go to myaccount.google.com/apppasswords")
+        print("  2. Create an app password (select 'Mail' / 'Other')")
+        print("  3. Copy the 16-character password shown")
+        print()
+        self._state.pop(self._APP_PASSWORD_STATE_KEY, None)
+        self._state.pop(self._SENDER_EMAIL_STATE_KEY, None)
+        sender, pw = self._get_email_creds()
+        if sender and pw:
+            print("  Setup complete — notifications are enabled.")
+
+    def _send_notification_email(self, to: str, local_path: str, remote_dir: str):
+        """Send job-complete notification via Gmail SMTP with App Password."""
+        import smtplib
+
+        sender, pw = self._get_email_creds()
+        if not sender or not pw:
+            return
+
+        family = self.params.get("FAMILY_NAME", "")
+        subject = f"TE Analysis Complete: {family}"
+        body = (
+            f"Your TE analysis pipeline has completed.\n\n"
+            f"Family:        {family}\n"
+            f"Remote output: {remote_dir}\n"
+            f"Local path:    {local_path}\n"
+        )
+
+        msg = MIMEText(body)
+        msg["Subject"] = subject
+        msg["From"] = sender
+        msg["To"] = to
+
+        try:
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+                smtp.login(sender, pw)
+                smtp.send_message(msg)
+            print(f"  Notification email sent to {to}")
+        except smtplib.SMTPAuthenticationError:
+            print("  Email auth failed — run option [g] to update your credentials.")
+            self._state.pop(self._APP_PASSWORD_STATE_KEY, None)
+            self._state.pop(self._SENDER_EMAIL_STATE_KEY, None)
+            self._save_state()
+        except Exception as e:
+            print(f"  Email send failed: {e}")
+
+    # ------------------------------------------------------------------
+    # tmpfiles.org upload
+    # ------------------------------------------------------------------
+
+    def _upload_to_tmpfiles(self, local_path: Path) -> str:
+        """Zip local_path and upload to tmpfiles.org; return download URL or ''."""
+        try:
+            import requests as _req
+        except ImportError:
+            print("  tmpfiles upload requires: pip install requests")
+            return ""
+
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+                zip_path = tmp.name
+
+            print("  Compressing results...")
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                if local_path.is_dir():
+                    for f in sorted(local_path.rglob("*")):
+                        if f.is_file():
+                            zf.write(f, f.relative_to(local_path))
+                else:
+                    zf.write(local_path, local_path.name)
+
+            size_mb = os.path.getsize(zip_path) / 1024 / 1024
+            print(f"  Uploading {size_mb:.1f} MB to tmpfiles.org ...")
+
+            with open(zip_path, "rb") as f:
+                resp = _req.post(
+                    "https://tmpfiles.org/api/v1/upload",
+                    files={"file": f},
+                    timeout=300,
+                )
+            resp.raise_for_status()
+            url = resp.json()["data"]["url"]
+            return url.replace("tmpfiles.org/", "tmpfiles.org/dl/")
+
+        except Exception as e:
+            print(f"  Upload failed: {e}")
+            return ""
+        finally:
+            if "zip_path" in dir() and os.path.exists(zip_path):
+                os.unlink(zip_path)
+
+    def _notify_job_complete(self, local_path: Path, remote_dir: str):
+        """Email a completion notification with the local path if NOTIFY_EMAIL is set."""
+        to = str(self.params.get("NOTIFY_EMAIL", "")).strip()
+        if not to:
+            return
+        print(f"\nSending completion notification to {to} ...")
+        self._send_notification_email(to, str(local_path), remote_dir)
+
+    # ------------------------------------------------------------------
+    # State persistence
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _load_state() -> dict:
+        try:
+            with open(_STATE_FILE) as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+    def _save_state(self):
+        state = dict(self._state)
+        if self.remote_output_dir:
+            state["last_remote_dir"] = self.remote_output_dir
+        if self.local_output_dir:
+            state["last_local_dir"] = str(self.local_output_dir)
+        try:
+            with open(_STATE_FILE, "w") as f:
+                json.dump(state, f, indent=2)
+        except OSError:
+            pass
+        self._state = state
+
+    # ------------------------------------------------------------------
+    # Remote directory helpers
+    # ------------------------------------------------------------------
+
     def _find_last_remote_dir(self) -> str:
-        """Return the most recently created subdirectory under BASE_OUT_DIR, or ''."""
+        """Return the most recently created subdirectory under BASE_OUT_DIR, falling back to cached state."""
         base = f"{self.remote_work_dir}/{self.params['BASE_OUT_DIR']}"
         out, _, _ = self.run_command(
             f"ls -td {base}/*/ 2>/dev/null | head -1 | tr -d '\\n'",
             timeout=10,
         )
-        return out.strip().rstrip('/') if out.strip() else ""
+        live = out.strip().rstrip('/')
+        if live:
+            return live
+        return self._state.get("last_remote_dir", "")
 
     def retrieve_results(self, local_dir: str, remote_out_override: str = None):
         """Download results from HPC to local directory."""
@@ -2279,6 +2558,10 @@ exit 0
             if not remote_out:
                 family = self.params["FAMILY_NAME"].lower()
                 remote_out = f"{self.remote_work_dir}/{self.params['BASE_OUT_DIR']}/{family}"
+
+        # Cache the resolved remote directory for future sessions
+        self._state["last_remote_dir"] = remote_out
+        self._save_state()
 
         # Verify remote directory exists
         check_out, _, _ = self.run_command(f"test -d '{remote_out}' && echo 'exists'", timeout=10)
@@ -2375,6 +2658,254 @@ exit 0
 
         print(f"\nResults saved to {local_path}")
         self.local_output_dir = local_path
+        self._save_state()
+        self._notify_job_complete(local_path, remote_out)
+
+    # ------------------------------------------------------------------
+    # Selective file download
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _fmt_size(n: int) -> str:
+        for unit in ("B", "KB", "MB", "GB"):
+            if n < 1024:
+                return f"{n:.0f} {unit}"
+            n /= 1024
+        return f"{n:.1f} GB"
+
+    @staticmethod
+    def _parse_file_selection(sel: str, max_n: int):
+        """Parse '1,3-5,7' into a sorted list of 0-based indices, or None on error."""
+        indices: set[int] = set()
+        for part in sel.split(","):
+            part = part.strip()
+            if "-" in part:
+                a, _, b = part.partition("-")
+                try:
+                    lo, hi = int(a), int(b)
+                    if not (1 <= lo <= hi <= max_n):
+                        raise ValueError
+                    indices.update(range(lo - 1, hi))
+                except ValueError:
+                    print(f"Invalid range: {part!r}")
+                    return None
+            else:
+                try:
+                    i = int(part)
+                    if not (1 <= i <= max_n):
+                        raise ValueError
+                    indices.add(i - 1)
+                except ValueError:
+                    print(f"Invalid selection: {part!r}")
+                    return None
+        return sorted(indices)
+
+    def download_selected_files(self):
+        """Browse any remote path (file or folder) and download a user-selected subset."""
+        # Use last_download_path as default, falling back to last output dir
+        last = self._state.get("last_download_path") or self._find_last_remote_dir()
+        prompt = f"Remote path (file or folder) [{last}]: " if last else "Remote path (file or folder): "
+        remote_path = input(prompt).strip() or last
+        if not remote_path:
+            print("No remote path specified.")
+            return
+
+        # Determine if it's a file or directory
+        type_out, _, _ = self.run_command(
+            f"if [ -f '{remote_path}' ]; then echo file; elif [ -d '{remote_path}' ]; then echo dir; fi",
+            timeout=10,
+        )
+        path_type = type_out.strip()
+        if not path_type:
+            print(f"Path not found on HPC: {remote_path}")
+            return
+
+        if path_type == "file":
+            # Single file — download directly
+            files = [(os.path.basename(remote_path), 0)]
+            remote_dir = os.path.dirname(remote_path)
+            chosen = files
+        else:
+            # Directory — list contents and let user pick
+            remote_dir = remote_path
+            print(f"\nListing files in {remote_dir} ...")
+            out, _, _ = self.run_command(
+                f"find '{remote_dir}' -type f -printf '%P\\t%s\\n' 2>/dev/null | sort",
+                timeout=30,
+            )
+            lines = [l for l in out.strip().split("\n") if l.strip()]
+            if not lines:
+                print("No files found.")
+                return
+
+            files: list[tuple[str, int]] = []
+            for line in lines:
+                parts = line.split("\t", 1)
+                rel = parts[0]
+                size = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+                files.append((rel, size))
+
+            print(f"\n  {'#':>4}  {'Size':>10}  File")
+            print("  " + "-" * 58)
+            for i, (rel, size) in enumerate(files, 1):
+                print(f"  [{i:>3}]  {self._fmt_size(size):>10}  {rel}")
+            print("\n  [all]  Download all files")
+
+            sel = input("\nSelect files to download (e.g., 1,3-5 or all): ").strip().lower()
+            if not sel:
+                return
+
+            if sel == "all":
+                chosen = files
+            else:
+                indices = self._parse_file_selection(sel, len(files))
+                if indices is None:
+                    return
+                chosen = [files[i] for i in indices]
+
+        default_local = str(self.local_output_dir) if self.local_output_dir else ""
+        prompt = f"Local directory [{default_local}]: " if default_local else "Local directory: "
+        local_dir = input(prompt).strip() or default_local
+        if not local_dir:
+            print("No local directory specified.")
+            return
+
+        local_path = Path(local_dir).expanduser()
+        local_path.mkdir(parents=True, exist_ok=True)
+
+        print(f"\nDownloading {len(chosen)} file(s) to {local_path} ...")
+
+        if self.use_sftp and self.sftp:
+            for rel, _ in chosen:
+                remote_file = f"{remote_dir}/{rel}"
+                local_file = local_path / rel
+                local_file.parent.mkdir(parents=True, exist_ok=True)
+                print(f"  {rel}")
+                try:
+                    self.sftp.get(remote_file, str(local_file))
+                except Exception as e:
+                    print(f"    Error: {e}")
+        else:
+            file_args = " ".join(shlex.quote(r) for r, _ in chosen)
+            try:
+                channel = self._transport.open_session()
+                channel.exec_command(f"cd '{remote_dir}' && tar -cf - {file_args}")
+                buf = io.BytesIO()
+                received = 0
+                while True:
+                    data = channel.recv(262144)
+                    if not data:
+                        break
+                    buf.write(data)
+                    received += len(data)
+                    print(f"  Received: {received / 1024 / 1024:.1f} MB", end="\r")
+                channel.close()
+                print()
+                buf.seek(0)
+                tf = tarfile.open(fileobj=buf, mode="r:")
+                tf.extractall(local_path)
+                tf.close()
+            except Exception as e:
+                print(f"\nTransfer error: {e}")
+                return
+
+        self.local_output_dir = local_path
+        self._state["last_download_path"] = remote_path
+        self._save_state()
+        print(f"\nDone. {len(chosen)} file(s) saved to {local_path}")
+
+    def test_email_interactive(self):
+        """Interactively set sender/receiver/password, print the test script, then run it."""
+        import smtplib
+
+        print("\n" + "="*60)
+        print("EMAIL TEST")
+        print("="*60)
+        print()
+
+        # Sender
+        stored_sender = self._state.get(self._SENDER_EMAIL_STATE_KEY, "").strip()
+        prompt = f"  Sender Gmail address [{stored_sender}]: " if stored_sender else "  Sender Gmail address: "
+        sender = input(prompt).strip() or stored_sender
+        if not sender:
+            print("  No sender address — aborting.")
+            return
+        self._state[self._SENDER_EMAIL_STATE_KEY] = sender
+
+        # Receiver
+        stored_receiver = self._state.get("test_receiver_email", "").strip()
+        prompt = f"  Receiver email address [{stored_receiver}]: " if stored_receiver else "  Receiver email address: "
+        receiver = input(prompt).strip() or stored_receiver
+        if not receiver:
+            print("  No receiver address — aborting.")
+            return
+        self._state["test_receiver_email"] = receiver
+
+        # App password (masked input; show if already stored)
+        stored_pw = self._state.get(self._APP_PASSWORD_STATE_KEY, "").strip()
+        if stored_pw:
+            replace = input(f"  App password already stored. Replace it? (y/n) [n]: ").strip().lower()
+            if replace == "y":
+                stored_pw = ""
+        if not stored_pw:
+            print("  Generate an App Password at: myaccount.google.com/apppasswords")
+            stored_pw = getpass.getpass("  Paste Gmail App Password: ").strip().replace(" ", "")
+            if not stored_pw:
+                print("  No password entered — aborting.")
+                return
+        self._state[self._APP_PASSWORD_STATE_KEY] = stored_pw
+        self._save_state()
+
+        # Print the exact script that will run
+        script = f"""\
+import smtplib
+from email.mime.text import MIMEText
+
+SENDER   = "{sender}"
+RECEIVER = "{receiver}"
+PASSWORD = "{'*' * len(stored_pw)}"  # actual password loaded from state file
+
+msg = MIMEText("Test email from HPC TE Analysis Client.")
+msg["Subject"] = "HPC TE Client — Email Test"
+msg["From"]    = SENDER
+msg["To"]      = RECEIVER
+
+with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+    smtp.login(SENDER, PASSWORD)
+    smtp.send_message(msg)
+
+print("Email sent successfully.")"""
+
+        print()
+        print("-"*60)
+        print("TEST SCRIPT (password masked):")
+        print("-"*60)
+        print(script)
+        print("-"*60)
+        print()
+
+        confirm = input("Send test email now? (y/n) [y]: ").strip().lower()
+        if confirm == "n":
+            print("  Aborted.")
+            return
+
+        msg = MIMEText("Test email from HPC TE Analysis Client.")
+        msg["Subject"] = "HPC TE Client — Email Test"
+        msg["From"] = sender
+        msg["To"] = receiver
+
+        try:
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+                smtp.login(sender, stored_pw)
+                smtp.send_message(msg)
+            print(f"  Email sent successfully to {receiver}.")
+        except smtplib.SMTPAuthenticationError:
+            print("  Auth failed — check that the App Password is correct and that")
+            print("  2-Step Verification is enabled on the sender account.")
+            self._state.pop(self._APP_PASSWORD_STATE_KEY, None)
+            self._save_state()
+        except Exception as e:
+            print(f"  Send failed: {e}")
 
     def main_menu(self):
         """Main interactive menu after connection."""
@@ -2390,35 +2921,33 @@ exit 0
                 print("  --- Prepare & Fetch Data ---")
                 print("  [3]  Run te_prep  (download rmsk / extract sequences)")
                 print("  --- Core Analysis ---")
-                print(f"  [4]  Run interactively ({sched_label} interactive, real-time output)")
-                print(f"  [5]  Submit batch job  ({sched_label}, runs in background)")
+                print(f"  [4]  Submit batch job  ({sched_label})")
+                print("  --- Download ---")
+                print("  [5]  Browse & download files  (any path, selective)")
                 print("  --- Enrichment & Motifs ---")
                 print("  [6]  Run te_enrichment (UMAP / JASPAR / Fisher / GO)")
                 print("  --- Monitor & Retrieve ---")
                 print("  [7]  Check batch job status")
                 print("  [8]  Watch batch job progress (live)")
-                print("  [9]  Retrieve results")
+                print("  [9]  Retrieve results  (all files)")
                 print("  [10] Download error logs only")
                 print("  [11] Disconnect and exit")
+                print("  [12] Test email (set sender / receiver / password and send test)")
                 print("="*60)
 
-                choice = input("\nSelect option (1-11): ").strip()
+                choice = input("\nSelect option (1-12): ").strip()
 
                 if choice == '1':
                     if self.set_parameter_interactive():
-                        mode = input("\nRun interactively (i) or submit batch job (b)? [i]: ").strip().lower()
-                        if mode == 'b':
-                            self.submit_batch_job()
-                        else:
-                            self.run_interactive_job()
+                        self.submit_batch_job()
                 elif choice == '2':
                     self.preview_family_count()
                 elif choice == '3':
                     self._run_te_prep_interactive()
                 elif choice == '4':
-                    self.run_interactive_job()
-                elif choice == '5':
                     self.submit_batch_job()
+                elif choice == '5':
+                    self.download_selected_files()
                 elif choice == '6':
                     self._run_te_enrichment_interactive()
                 elif choice == '7':
@@ -2445,6 +2974,8 @@ exit 0
                     self.download_error_logs(local_dir if local_dir else None)
                 elif choice == '11':
                     break
+                elif choice == '12':
+                    self.test_email_interactive()
                 else:
                     print("Invalid option")
 
@@ -2474,6 +3005,10 @@ Examples:
     parser.add_argument("-p", "--port", type=int, default=22, help="SSH port (default: 22)")
     parser.add_argument("-u", "--user", help="Username")
     parser.add_argument("-o", "--output", help="Local output directory for results")
+    parser.add_argument(
+        "--setup-email", action="store_true",
+        help="Run one-time Gmail OAuth2 setup for email notifications, then exit",
+    )
     args = parser.parse_args()
 
     print("="*60)
@@ -2483,12 +3018,20 @@ Examples:
 
     client = HPCClient()
 
-    # Get connection details (use args or prompt)
+    if args.setup_email:
+        client.setup_email_auth()
+        sys.exit(0)
+
+    state = client._state
+
+    # Get connection details (use args > cached state > prompt)
     print("\nEnter HPC connection details:")
 
     hostname = args.host
     if not hostname:
-        hostname = input("  Hostname: ").strip()
+        cached_host = state.get("last_hostname", "")
+        prompt = f"  Hostname [{cached_host}]: " if cached_host else "  Hostname: "
+        hostname = input(prompt).strip() or cached_host
     else:
         print(f"  Hostname: {hostname}")
 
@@ -2503,7 +3046,9 @@ Examples:
 
     username = args.user
     if not username:
-        username = input("  Username: ").strip()
+        cached_user = state.get("last_username", "")
+        prompt = f"  Username [{cached_user}]: " if cached_user else "  Username: "
+        username = input(prompt).strip() or cached_user
     else:
         print(f"  Username: {username}")
 
@@ -2517,6 +3062,11 @@ Examples:
     if not client.connect(hostname, username, password, port):
         print("Failed to connect. Exiting.")
         sys.exit(1)
+
+    # Persist connection details for next session
+    client._state["last_hostname"] = hostname
+    client._state["last_username"] = username
+    client._save_state()
 
     # Store output directory if provided
     if args.output:
