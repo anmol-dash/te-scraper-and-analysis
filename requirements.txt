@@ -23,11 +23,14 @@ numba>=0.58,<0.62
 # Bioinformatics
 biopython>=1.81,<2.0
 pysam>=0.22,<0.24
-pybedtools>=0.10,<0.11
 CIAlign>=1.0,<2.0
 
 # SSH client for HPC mode
 paramiko>=3.4
+
+# Build helpers
+setuptools>=68.0
+wheel>=0.41
 
 # Build helper for optional te_fast Cython extension
 Cython>=3.0,<4.0

@@ -1,0 +1,204 @@
+# Release: tag v*.*.* → matrix Tauri build → GitHub Release + latest.json + .sig files
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+env:
+  PNPM_VERSION: 9
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+      - name: Verify tag matches package.json and tauri.conf.json
+        run: ./scripts/sync-version.sh --check
+
+  build:
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux-x86_64
+          - os: macos-13
+            platform: darwin-x86_64
+          - os: macos-14
+            platform: darwin-aarch64
+          - os: windows-latest
+            platform: windows-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf file libssl-dev build-essential curl
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Pip cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-release-${{ runner.os }}-${{ hashFiles('backend/requirements.txt') }}
+          restore-keys: pip-release-${{ runner.os }}-
+
+      - name: Build Python sidecar (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          pip install pyinstaller
+          bash scripts/build-python.sh
+
+      - name: Build Python sidecar (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          pip install pyinstaller
+          powershell -ExecutionPolicy Bypass -File scripts/build-python.ps1
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Tauri app (updater artifacts)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          AzureTrustedSigningAccount: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          AzureTrustedSigningEndpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+        run: pnpm tauri build
+
+      - name: Stage platform assets + updater fragment
+        run: node scripts/prepare-platform-release.mjs ${{ matrix.platform }} src-tauri/target/release/bundle staging
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}
+          path: staging/
+
+  publish:
+    needs: [preflight, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: release-*
+
+      - name: Release metadata (draft/prerelease)
+        id: meta
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          if [[ "$V" == *-* ]]; then
+            echo "draft=true" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "draft=false" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Write release_notes.md from annotated tag
+        run: |
+          git tag -l --format='%(contents:body)' "${GITHUB_REF_NAME}" > release_notes.md || true
+
+      - name: Assemble latest.json
+        run: |
+          set -euo pipefail
+          VER="${GITHUB_REF_NAME#v}"
+          export PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          export RELEASE_VERSION="$VER"
+          export RELEASE_NOTES="$(cat release_notes.md)"
+          export TAG_NAME="${GITHUB_REF_NAME}"
+          export GITHUB_REPOSITORY="${{ github.repository }}"
+          mapfile -t FRAGS < <(find artifacts -name fragment.json | sort)
+          if [[ "${#FRAGS[@]}" -lt 1 ]]; then
+            echo "::error::No fragment.json files found under artifacts/ — all platform builds may have failed"
+            exit 1
+          fi
+          node scripts/merge-latest-json.mjs "${FRAGS[@]}" | tee latest.json
+
+      - name: Upload installers, signatures, and latest.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          mapfile -t BINS < <(find artifacts -type f -path '*/assets/*' | sort)
+          if [[ "${#BINS[@]}" -lt 1 ]]; then
+            echo "::error::No release binaries found under artifacts/**/assets/ — check platform build logs"
+            exit 1
+          fi
+          EXTRA=( )
+          if [[ "${{ steps.meta.outputs.draft }}" == "true" ]]; then EXTRA+=( --draft ); fi
+          if [[ "${{ steps.meta.outputs.prerelease }}" == "true" ]]; then EXTRA+=( --prerelease ); fi
+          gh release create "$TAG" \
+            --repo "${{ github.repository }}" \
+            --title "$TAG" \
+            --notes-file release_notes.md \
+            --verify-tag \
+            "${EXTRA[@]}" \
+            latest.json "${BINS[@]}"
+
+  report-failure:
+    needs: [preflight, build, publish]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report failed jobs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "::error::Release pipeline failed for tag ${GITHUB_REF_NAME}."
+          echo ""
+          echo "Workflow run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo ""
+          echo "Check the individual job logs above for the specific failure."
+          echo "Common causes:"
+          echo "  - Missing TAURI_SIGNING_PRIVATE_KEY secret"
+          echo "  - Python sidecar build error (PyInstaller spec or import issue)"
+          echo "  - Frontend build error (TypeScript / pnpm)"
+          echo "  - Version mismatch between tag, package.json, and tauri.conf.json"
+          exit 1

@@ -511,8 +511,8 @@ def _normalise_bed(src, dst, n_cols=6):
 def bedtools_intersect_safe(v_bed, jaspar_bed, scratch=None):
     """Run bedtools intersect, writing output to a temp file to avoid OOM/SIGBUS.
 
-    Always uses the CLI path (streaming to disk) to avoid pybedtools mmap issues
-    on HPC scratch filesystems.  pybedtools is only used as a last resort.
+    Uses the bedtools CLI directly. This avoids pybedtools' Python packaging
+    overhead and its temp-file/mmap failure modes on HPC scratch filesystems.
     """
     import subprocess, shutil as _shutil
 
@@ -520,6 +520,39 @@ def bedtools_intersect_safe(v_bed, jaspar_bed, scratch=None):
         def to_dataframe(self, names=None, header=None):
             rows = [str(x).rstrip("\n").split("\t") for x in self]
             return pd.DataFrame(rows, columns=names)
+
+    def _tabix_subset(a, b):
+        if not str(b).endswith(".gz"):
+            return b
+        if _shutil.which("tabix") is None:
+            log.info("tabix not found; bedtools will scan full JASPAR BED")
+            return b
+        if not Path(f"{b}.tbi").exists():
+            log.info("tabix index not found for %s; bedtools will scan full JASPAR BED", b)
+            return b
+
+        tmp_dir = scratch or os.environ.get("TMPDIR") or str(Path(a).parent)
+        subset = Path(tmp_dir) / f"jaspar_subset_{os.getpid()}.bed"
+        cmd = ["tabix", "-R", str(a), str(b)]
+        log.info("Subsetting indexed JASPAR BED with tabix before bedtools ...")
+        log.debug("tabix command: %s", " ".join(cmd))
+        t0 = time.time()
+        with open(subset, "w") as fh:
+            proc = subprocess.run(cmd, stdout=fh, stderr=subprocess.PIPE, text=True)
+        if proc.returncode != 0:
+            subset.unlink(missing_ok=True)
+            log.warning("tabix subset failed; falling back to full JASPAR BED: %s",
+                        proc.stderr[:1000])
+            return b
+        if subset.stat().st_size == 0:
+            subset.unlink(missing_ok=True)
+            raise RuntimeError(
+                "tabix returned zero JASPAR rows for the TE loci. This usually "
+                "means chromosome names or genome build do not match."
+            )
+        log.info("tabix subset done in %.1fs: %.1f MB at %s",
+                 time.time() - t0, subset.stat().st_size / 1e6, subset)
+        return str(subset)
 
     def _run_cli(a, b):
         """Stream bedtools output to a temp file; return (_OverlapResult, stderr)."""
@@ -550,50 +583,26 @@ def bedtools_intersect_safe(v_bed, jaspar_bed, scratch=None):
         return result, ""
 
     if _shutil.which("bedtools") is None:
-        log.warning("bedtools not found on PATH — falling back to pybedtools")
-    else:
-        log.info("Running bedtools intersect (CLI, streaming to disk) ...")
-        log.debug("  -a: %s  -b: %s", v_bed, jaspar_bed)
-        overlaps, stderr_text = _run_cli(v_bed, jaspar_bed)
-        if overlaps is None and "fields" in stderr_text.lower():
-            log.warning("Column mismatch detected — normalising JASPAR BED to 6 cols ...")
-            norm = str(jaspar_bed).replace(".bed.gz", ".norm6.bed").replace(".bed", ".norm6.bed")
-            _normalise_bed(str(jaspar_bed), norm, 6)
-            overlaps, stderr_text = _run_cli(v_bed, norm)
-        if overlaps is not None:
-            log.info("bedtools intersect: %d overlaps", len(overlaps))
-            return overlaps
-        log.error("bedtools CLI failed; stderr: %s", stderr_text[:1000])
+        raise EnvironmentError(
+            "bedtools not found on PATH. Load it on the cluster with "
+            "`module load bedtools`, install it via conda/bioconda, or use a "
+            "container that includes bedtools."
+        )
 
-    # pybedtools fallback — only reached if bedtools CLI is unavailable or failed
-    try:
-        import pybedtools
-    except ImportError:
-        log.error("FATAL: bedtools not found on PATH and pybedtools not installed.")
-        sys.exit(1)
-
-    log.info("Running bedtools intersect (pybedtools fallback) ...")
-    if scratch:
-        pybedtools.set_tempdir(scratch)
-        log.debug("pybedtools tempdir: %s", scratch)
-    v_bt = pybedtools.BedTool(str(v_bed))
-    m_bt = pybedtools.BedTool(str(jaspar_bed))
-    t0 = time.time()
-    try:
-        overlaps = v_bt.intersect(m_bt, wa=True, wb=True)
-        log.info("pybedtools intersect: %d overlaps in %.1fs", len(overlaps), time.time() - t0)
+    log.info("Running bedtools intersect (CLI, streaming to disk) ...")
+    intersect_b = _tabix_subset(v_bed, jaspar_bed)
+    log.debug("  -a: %s  -b: %s", v_bed, intersect_b)
+    overlaps, stderr_text = _run_cli(v_bed, intersect_b)
+    if overlaps is None and "fields" in stderr_text.lower():
+        log.warning("Column mismatch detected — normalising JASPAR BED to 6 cols ...")
+        norm = str(intersect_b).replace(".bed.gz", ".norm6.bed").replace(".bed", ".norm6.bed")
+        _normalise_bed(str(intersect_b), norm, 6)
+        overlaps, stderr_text = _run_cli(v_bed, norm)
+    if overlaps is not None:
+        log.info("bedtools intersect: %d overlaps", len(overlaps))
         return overlaps
-    except Exception as exc:
-        if "fields" in str(exc).lower():
-            log.warning("pybedtools column mismatch — normalising JASPAR BED to 6 cols ...")
-            norm = str(jaspar_bed).replace(".bed.gz", ".norm6.bed.gz").replace(".bed", ".norm6.bed")
-            _normalise_bed(str(jaspar_bed), norm, 6)
-            overlaps = v_bt.intersect(pybedtools.BedTool(norm), wa=True, wb=True)
-            log.info("pybedtools retry: %d overlaps", len(overlaps))
-            return overlaps
-        log.error("pybedtools intersect failed: %s", exc)
-        log.debug(traceback.format_exc())
-        raise
+
+    raise RuntimeError(f"bedtools intersect failed:\n{stderr_text[:2000]}")
 
 
 # ── coordinate column detection ───────────────────────────────────────────────

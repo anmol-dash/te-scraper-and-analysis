@@ -1,0 +1,48 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "GAMECA",
+  "version": "0.1.0",
+  "identifier": "com.gameca.gameca",
+  "build": {
+    "beforeDevCommand": "pnpm --dir frontend dev",
+    "beforeBuildCommand": "pnpm --dir frontend build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../frontend/dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "main",
+        "title": "GAMECA",
+        "width": 1100,
+        "height": 720,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data: asset: https://asset.localhost; font-src 'self'; connect-src 'self' ipc: tauri: http://ipc.localhost http://localhost:* ws://localhost:*;",
+      "capabilities": ["default"]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "../background.icns",
+      "icons/icon.ico"
+    ],
+    "resources": ["resources/demo_runner.py"],
+    "externalBin": ["binaries/pytool"]
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/<OWNER>/<REPO>/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}

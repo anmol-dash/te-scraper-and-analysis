@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Main window capability","local":true,"windows":["main"],"permissions":["core:default","core:event:default","core:window:default","dialog:default","shell:allow-open","shell:allow-spawn","shell:allow-stdin-write","shell:allow-kill",{"identifier":"shell:allow-execute","allow":[{"name":"pytool","sidecar":true}]}]}}

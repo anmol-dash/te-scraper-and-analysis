@@ -1,0 +1,7 @@
+# Build / packaging
+pyinstaller==6.13.0
+
+# --- Paste dependencies from your existing CLI project below ---
+# Tip: paste the output of `pip freeze`, or copy `[project].dependencies`
+# entries from another pyproject/requirements lockfile you're already using.
+

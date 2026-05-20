@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+_SCRIPT_BUILD = "20260519-3"  # bump this when changing job script logic
 """
 HPC Client for TE Analysis Pipeline
 
@@ -77,6 +78,10 @@ class HPCClient:
             "PCA_DIMS": 40,
             "N_EPOCHS": 120,
             "RANDOM_STATE": 0,       # 0 => multicore UMAP
+            "N_NEIGHBORS": 30,
+            "MIN_DIST": 0.0,
+            "MIN_CLUSTER_SIZE": None,  # None => auto (N//5)
+            "MIN_SAMPLES": 7,
             "SKIP_TSNE": 1,
             "PRIMER_K": 18,
             "TOP_N_GLOBAL": 8,
@@ -108,6 +113,7 @@ class HPCClient:
         self.current_job_id = None  # Track submitted job
         self._transport = None
         self._password = None
+        self._username = None
         self.use_sftp = False
 
         self._state = self._load_state()
@@ -117,12 +123,13 @@ class HPCClient:
             else None
         )
 
-    def connect(self, hostname: str, username: str, password: str, port: int = 22):
+    def connect(self, hostname: str, username: str, password: str, port: int = 22, work_dir: str = ""):
         """Connect to the HPC cluster via SSH."""
         print(f"\nConnecting to {hostname}...")
 
         # Store password for keyboard-interactive auth
         self._password = password
+        self._username = username
         self._transport = None
 
         def keyboard_interactive_handler(title, instructions, prompt_list):
@@ -183,16 +190,15 @@ class HPCClient:
             self.connected = True
             print(f"Successfully connected to {hostname}")
 
-            # Get user's home directory
-            channel = self._transport.open_session()
-            channel.exec_command("echo $HOME")
-            self.remote_work_dir = channel.recv(1024).decode().strip()
-            channel.close()
-            print(f"Remote home directory: {self.remote_work_dir}")
+            self.remote_work_dir = self._select_remote_work_dir(username, work_dir)
+            print(f"Remote work directory: {self.remote_work_dir}")
 
             # Auto-detect scheduler
             self.scheduler = self._detect_scheduler()
-            print(f"Scheduler detected: {self.scheduler.upper()}")
+            if self.scheduler:
+                print(f"Scheduler detected: {self.scheduler.upper()}")
+            else:
+                print("Scheduler detected: NONE (bsub/sbatch not visible in login shell)")
 
             return True
 
@@ -204,6 +210,113 @@ class HPCClient:
             if self._transport:
                 self._transport.close()
             return False
+
+    def _select_remote_work_dir(self, username: str, requested: str = "") -> str:
+        """Pick a writable directory that is likely visible to batch compute nodes."""
+        if requested.strip():
+            candidate = requested.strip()
+            if self._try_remote_work_dir(candidate):
+                return candidate
+            print(f"Warning: remote work directory is not writable, ignoring override: {candidate}")
+
+        probe = r'''
+set +e
+for target in "/project/amodzlab/${USER:-__USER__}/gameca" "/project/amodzlab/gameca_${USER:-__USER__}" "/project/${USER:-__USER__}/gameca" "/scratch/${USER:-__USER__}/gameca" "/work/${USER:-__USER__}/gameca"; do
+  mkdir -p "$target" >/dev/null 2>&1 || continue
+  [ -d "$target" ] && [ -w "$target" ] || continue
+  printf '%s\n' "$target"
+  exit 0
+done
+for base in "${GAMECA_WORKDIR:-}" "${SCRATCH:-}" "${WORK:-}" "${PROJECT:-}" "${PWD:-}" "${HOME:-}"; do
+  [ -n "$base" ] || continue
+  [ "$base" = "/" ] && continue
+  target="$base/gameca"
+  mkdir -p "$target" >/dev/null 2>&1 || continue
+  [ -d "$target" ] && [ -w "$target" ] || continue
+  printf '%s\n' "$target"
+  exit 0
+done
+target="/tmp/__USER___gameca"
+mkdir -p "$target" >/dev/null 2>&1 && printf '%s\n' "$target" && exit 0
+exit 1
+'''.replace("__USER__", username)
+        out, err, code = self.run_command(probe, timeout=30)
+        if code == 0 and out.strip():
+            selected = out.strip().splitlines()[-1]
+            if selected.startswith("/tmp/"):
+                print(
+                    f"Warning: using {selected}; login-node /tmp may not be visible to batch jobs. "
+                    "Set Remote work dir to a shared scratch/project path if submission files disappear."
+                )
+            return selected
+        fallback = f"/tmp/{username}_gameca"
+        print(
+            "Warning: could not auto-detect a shared work directory; "
+            f"falling back to {fallback}."
+        )
+        self.run_command(f"mkdir -p {shlex.quote(fallback)}", timeout=30)
+        return fallback
+
+    def _try_remote_work_dir(self, candidate: str) -> bool:
+        if not candidate or candidate == "/":
+            return False
+        out, err, code = self.run_command(
+            f"mkdir -p {shlex.quote(candidate)} && [ -d {shlex.quote(candidate)} ] && [ -w {shlex.quote(candidate)} ] && echo OK",
+            timeout=30,
+        )
+        if code == 0 and "OK" in out:
+            return True
+        _log(f"Rejected remote work dir {candidate!r}: exit={code} stdout={out.strip()!r} stderr={err.strip()!r}")
+        return False
+
+    def _batch_work_dir_candidates(self) -> list[str]:
+        user = self._username or "$USER"
+        candidates = [
+            f"/project/amodzlab/{user}/gameca",
+            f"/project/amodzlab/gameca_{user}",
+            f"/project/{user}/gameca",
+            f"/scratch/{user}/gameca",
+            f"/work/{user}/gameca",
+        ]
+        for key in ("JASPAR_BED_PATH", "JASPAR_TABIX_PATH", "LOCAL_ASSEMBLY_PATH", "all_te_file", "te_counts"):
+            raw = str(self.params.get(key, "") or "").strip()
+            if not raw.startswith("/"):
+                continue
+            p = Path(raw)
+            ancestors = list(p.parents)
+            for base in ancestors[:5]:
+                base_s = str(base)
+                if base_s in {"/", "/project", "/scratch", "/work"}:
+                    continue
+                candidates.extend([
+                    f"{base_s}/{user}/gameca",
+                    f"{base_s}/gameca_{user}",
+                ])
+        seen = set()
+        unique = []
+        for c in candidates:
+            if c not in seen:
+                seen.add(c)
+                unique.append(c)
+        return unique
+
+    def _ensure_batch_shared_work_dir(self) -> bool:
+        """Batch jobs must not rely on login-node /tmp."""
+        if self.remote_work_dir and not self.remote_work_dir.startswith("/tmp/"):
+            return True
+
+        print()
+        print("[HPC DIAG] Current work dir is login-node /tmp; trying shared batch-safe directories.")
+        for candidate in self._batch_work_dir_candidates():
+            print(f"[HPC DIAG] Trying shared work dir: {candidate}")
+            if self._try_remote_work_dir(candidate):
+                self.remote_work_dir = candidate
+                print(f"[HPC DIAG] Using shared work dir for batch: {self.remote_work_dir}")
+                return True
+
+        print("[HPC DIAG] No shared work directory candidate was writable.")
+        print("[HPC DIAG] Batch submission from /tmp is unsafe because compute nodes may not see uploaded files.")
+        return False
 
     def disconnect(self):
         """Close SSH connection."""
@@ -220,11 +333,18 @@ class HPCClient:
             out, _, code = self.run_command(cmd, timeout=10)
             if code == 0 and out.strip():
                 return sched
-        return "lsf"  # default fallback
+        return None
+
+    def _remote_exec_command(self, command: str) -> str:
+        """Run commands through a login shell so scheduler PATH/modules match ui.py sessions.
+        HOME=/tmp prevents bash -l from failing when the NFS home dir is missing/unmounted."""
+        return f"HOME=/tmp bash -lc {shlex.quote(command)}"
 
     def _job_script_header(self, job_name, job_out, job_err, mem_mb=None, cpus=None,
                             walltime=None, queue=None):
         """Return scheduler-specific directives for the job script."""
+        if self.scheduler not in {"lsf", "slurm"}:
+            raise RuntimeError("Scheduler was not detected. Ensure bsub/sbatch is available after login or set scheduler explicitly.")
         mem_mb   = mem_mb   or self.params["MEM_MB"]
         cpus     = cpus     or self.params["CPUS"]
         walltime = walltime or self.params["WALLTIME"]
@@ -263,6 +383,7 @@ class HPCClient:
     def _venv_setup_block(self):
         """Return robust virtualenv setup for login/compute node differences."""
         return f'''# --- Virtual environment setup ---
+echo "[GAMECA] hpc_client build={_SCRIPT_BUILD}"
 echo "[$(date +%H:%M:%S)] Host diagnostics before venv:"
 echo "  hostname=$(hostname)"
 echo "  pwd=$(pwd)"
@@ -312,23 +433,16 @@ echo "[$(date +%H:%M:%S)] Thread env: OMP=$OMP_NUM_THREADS MKL=$MKL_NUM_THREADS 
 echo "[$(date +%H:%M:%S)] Python: $(python --version 2>&1)"
 echo "[$(date +%H:%M:%S)] Pip: $(python -m pip --version 2>&1)"
 REQ_FILE="{self.remote_work_dir}/requirements.txt"
-REQ_HASH_FILE="$VENV_DIR/.gameca_requirements.sha256"
-REQ_HASH=$(python - "$REQ_FILE" <<'PYHASH'
-import hashlib, pathlib, sys
-p = pathlib.Path(sys.argv[1])
-print(hashlib.sha256(p.read_bytes()).hexdigest() if p.exists() else "missing")
-PYHASH
-)
-PIP_START=$SECONDS
-if [ ! -f "$REQ_HASH_FILE" ] || [ "$(cat "$REQ_HASH_FILE" 2>/dev/null)" != "$REQ_HASH" ]; then
-    echo "[$(date +%H:%M:%S)] Requirements changed or first run; installing dependencies ..."
-    python -m pip install --quiet --upgrade pip
-    python -m pip install --quiet --prefer-binary -r "$REQ_FILE"
-    echo "$REQ_HASH" > "$REQ_HASH_FILE"
-    echo "[$(date +%H:%M:%S)] Dependency install took $((SECONDS - PIP_START))s"
-else
-    echo "[$(date +%H:%M:%S)] Requirements unchanged; skipping pip install"
+if [ ! -f "$REQ_FILE" ]; then
+    echo "FATAL: Requirements file is missing: $REQ_FILE"
+    echo "       The remote work directory must be shared between the login node and batch compute nodes."
+    exit 1
 fi
+PIP_START=$SECONDS
+echo "[$(date +%H:%M:%S)] Installing dependencies ..."
+python -m pip install --quiet --upgrade pip setuptools wheel || exit 1
+python -m pip install --quiet --prefer-binary -r "$REQ_FILE" || exit 1
+echo "[$(date +%H:%M:%S)] Dependency install took $((SECONDS - PIP_START))s"
 python - <<'PYINFO'
 import importlib, os, sys
 print(f"[PYINFO] executable={{sys.executable}}")
@@ -360,7 +474,9 @@ fi
         """Return the scheduler command to submit a job script."""
         if self.scheduler == "slurm":
             return f"sbatch {job_script}"
-        return f"bsub < {job_script}"
+        if self.scheduler == "lsf":
+            return f"bsub < {job_script}"
+        raise RuntimeError("Scheduler was not detected. Ensure bsub/sbatch is available after login or set scheduler explicitly.")
 
     def _parse_job_id(self, submit_output):
         """Extract job ID from scheduler submission output."""
@@ -410,7 +526,7 @@ fi
         _log(f"Remote command start (timeout={timeout}s, stream={stream_output}): {command[:240]}")
         channel = self._transport.open_session()
         channel.settimeout(timeout)
-        channel.exec_command(command)
+        channel.exec_command(self._remote_exec_command(command))
 
         # Read output
         out = b""
@@ -537,15 +653,42 @@ fi
             print(f"[HPC OUTPUT] {line_buffer.strip()}", flush=True)
         channel.close()
         elapsed = time.time() - start_time
+        out_text = out.decode("utf-8", errors="replace")
+        err_text = err.decode("utf-8", errors="replace")
         if summary_stream:
             state = "NOT RUNNING — completed successfully" if exit_code == 0 else f"NOT RUNNING — failed with exit {exit_code}"
             print(f"[HPC STATUS] {state} after {elapsed/60:.1f} min.", flush=True)
+            if exit_code != 0:
+                if out_text.strip():
+                    print("[HPC DEBUG] stdout tail:", flush=True)
+                    for line in out_text.strip().splitlines()[-40:]:
+                        print(f"[HPC DEBUG] STDOUT: {line}", flush=True)
+                if err_text.strip():
+                    print("[HPC DEBUG] stderr tail:", flush=True)
+                    for line in err_text.strip().splitlines()[-80:]:
+                        print(f"[HPC DEBUG] STDERR: {line}", flush=True)
         _log(
             f"Remote command done exit={exit_code} elapsed={elapsed:.1f}s "
             f"stdout={len(out):,}B stderr={len(err):,}B"
         )
 
-        return out.decode("utf-8", errors="replace"), err.decode("utf-8", errors="replace"), exit_code
+        return out_text, err_text, exit_code
+
+    def _diagnostic_command(self, label: str, command: str, timeout: int = 30):
+        """Run a short diagnostic command and print all useful output."""
+        print(f"\n[HPC DIAG] {label}")
+        print(f"[HPC DIAG] $ {command}")
+        out, err, code = self.run_command(command, timeout=timeout, stream_output=False)
+        print(f"[HPC DIAG] exit={code} stdout={len(out)}B stderr={len(err)}B")
+        if out.strip():
+            print("[HPC DIAG] stdout:")
+            for line in out.rstrip().splitlines():
+                print(f"[HPC DIAG]   {line}")
+        if err.strip():
+            print("[HPC DIAG] stderr:")
+            for line in err.rstrip().splitlines():
+                print(f"[HPC DIAG]   {line}")
+        return out, err, code
 
     def preview_family_count(self) -> int:
         """Preview the number of sequences matching the family name."""
@@ -625,6 +768,16 @@ fi
             for num, key in sorted(str_params.items(), key=lambda x: int(x[0])):
                 val = self.params.get(key, "") or "[NOT SET]"
                 print(f"  [{num:>2}] {key:<35} = {val}")
+                if key == "BASE_OUT_DIR":
+                    family = str(self.params.get("FAMILY_NAME", "") or "").strip()
+                    base   = str(self.params.get("BASE_OUT_DIR", "") or "").strip()
+                    if base and family:
+                        full = f"{self.remote_work_dir}/{base}/{family.lower()}"
+                    elif base:
+                        full = f"{self.remote_work_dir}/{base}/<family>"
+                    else:
+                        full = f"{self.remote_work_dir}/<base_out_dir>/<family>"
+                    print(f"       {'':35}  → {full}")
             print()
             for num, key in sorted(int_params.items(), key=lambda x: int(x[0])):
                 val = self.params.get(key, "")
@@ -728,6 +881,9 @@ fi
             "--pca-dims", str(self.params["PCA_DIMS"]),
             "--n-epochs", str(self.params["N_EPOCHS"]),
             "--random-state", str(self.params["RANDOM_STATE"]),
+            "--n-neighbors", str(self.params.get("N_NEIGHBORS", 30)),
+            "--min-dist", str(self.params.get("MIN_DIST", 0.0)),
+            "--min-samples", str(self.params.get("MIN_SAMPLES", 7)),
             "--primer-kmer", str(self.params["PRIMER_K"]),
             "--top-global", str(self.params["TOP_N_GLOBAL"]),
             "--top-cluster", str(self.params["TOP_N_CLUSTER"]),
@@ -770,6 +926,10 @@ fi
         if jaspar:
             args += ["--jaspar-bed", jaspar]
 
+        mcs = self.params.get("MIN_CLUSTER_SIZE")
+        if mcs is not None:
+            args += ["--min-cluster-size", str(mcs)]
+
         p_thresh = self.params.get("P_THRESHOLD", 0.05)
         args += ["--p-threshold", str(p_thresh)]
 
@@ -810,26 +970,36 @@ echo "  Input data: OK ({quoted})"'''
 
         if self.use_sftp and self.sftp:
             _log(f"Uploading {label} via SFTP ({len(content):,} bytes)")
-            with self.sftp.file(remote_path, 'w') as f:
-                f.write(content)
-        else:
-            encoded_full = base64.b64encode(content.encode()).decode()
-            chunk_size = 65000
-            chunks = [encoded_full[i:i+chunk_size] for i in range(0, len(encoded_full), chunk_size)]
-            _log(f"Uploading {label} via shell base64 ({len(content):,} bytes, {len(chunks)} chunk(s))")
+            try:
+                with self.sftp.file(remote_path, 'w') as f:
+                    f.write(content)
+                _log(f"Uploaded {label} to {remote_path}")
+                return True
+            except Exception as e:
+                _log(f"SFTP upload failed for {label} ({e}); falling back to shell base64")
+                self.use_sftp = False
+                self.sftp = None
 
-            cmd = f"echo '{chunks[0]}' | base64 -d > {remote_path}"
+        encoded_full = base64.b64encode(content.encode()).decode()
+        chunk_size = 65000
+        chunks = [encoded_full[i:i+chunk_size] for i in range(0, len(encoded_full), chunk_size)] or [""]
+        _log(f"Uploading {label} via shell base64 ({len(content):,} bytes, {len(chunks)} chunk(s))")
+
+        parent = remote_path.rsplit("/", 1)[0] if "/" in remote_path else "."
+        remote_q = shlex.quote(remote_path)
+        self.run_command(f"mkdir -p {shlex.quote(parent)}", timeout=30)
+        cmd = f"printf %s {shlex.quote(chunks[0])} | base64 -d > {remote_q}"
+        out, err, code = self.run_command(cmd, timeout=30)
+        if code != 0:
+            print(f"Failed to upload {label} (chunk 1): {err}")
+            return False
+
+        for i, chunk in enumerate(chunks[1:], 2):
+            cmd = f"printf %s {shlex.quote(chunk)} | base64 -d >> {remote_q}"
             out, err, code = self.run_command(cmd, timeout=30)
             if code != 0:
-                print(f"Failed to upload {label} (chunk 1): {err}")
+                print(f"Failed to upload {label} (chunk {i}/{len(chunks)}): {err}")
                 return False
-
-            for i, chunk in enumerate(chunks[1:], 2):
-                cmd = f"echo '{chunk}' | base64 -d >> {remote_path}"
-                out, err, code = self.run_command(cmd, timeout=30)
-                if code != 0:
-                    print(f"Failed to upload {label} (chunk {i}/{len(chunks)}): {err}")
-                    return False
 
         _log(f"Uploaded {label} to {remote_path}")
         return True
@@ -906,6 +1076,12 @@ echo "  Input data: OK ({quoted})"'''
     def submit_batch_job(self):
         """Submit the analysis as a batch job on HPC. Returns immediately after submission."""
         self._log_run_configuration("Batch")
+        if not self._ensure_batch_shared_work_dir():
+            print(
+                "Error: could not find a shared writable remote work directory for batch submission. "
+                "Set Remote work dir to a project/scratch path visible from compute nodes."
+            )
+            return False
         if self._using_auto_family_load():
             print(
                 "\nNo all_te_file set. The job will automatically load loci "
@@ -1076,14 +1252,27 @@ exit $EXIT_CODE
         self.run_command(f"rm -f {job_out} {job_err} {job_done} {job_info}", timeout=10)
 
         # Submit the job
-        sched_label = getattr(self, "scheduler", "lsf").upper()
-        print(f"\nSubmitting job via {sched_label}...")
-        _log(f"Submitting scheduler command: {self._submit_job_cmd(job_script)}")
         submit_cmd = self._submit_job_cmd(job_script)
+        sched_label = (getattr(self, "scheduler", None) or "unknown").upper()
+        print(f"\nSubmitting job via {sched_label}...")
+        _log(f"Submitting scheduler command: {submit_cmd}")
         out, err, code = self.run_command(submit_cmd, timeout=30)
+        print("\n[HPC DIAG] Submit command completed")
+        print(f"[HPC DIAG] command: {submit_cmd}")
+        print(f"[HPC DIAG] exit={code} stdout={len(out)}B stderr={len(err)}B")
+        if out.strip():
+            print("[HPC DIAG] submit stdout:")
+            for line in out.rstrip().splitlines():
+                print(f"[HPC DIAG]   {line}")
+        if err.strip():
+            print("[HPC DIAG] submit stderr:")
+            for line in err.rstrip().splitlines():
+                print(f"[HPC DIAG]   {line}")
 
         if code != 0:
             print(f"Error submitting job: {err}")
+            self._diagnostic_command("Scheduler availability", "command -v bsub; command -v sbatch; echo PATH=$PATH", timeout=15)
+            self._diagnostic_command("Job script listing", f"ls -l {shlex.quote(job_script)} {shlex.quote(self.remote_work_dir)}/requirements.txt 2>&1", timeout=15)
             return False
 
         # Parse job ID
@@ -1091,6 +1280,11 @@ exit $EXIT_CODE
         if job_id:
             self.current_job_id = job_id
             print(f"Job submitted successfully! Job ID: {job_id}")
+            if self.scheduler == "lsf":
+                self._diagnostic_command("LSF job immediately after submit", f"bjobs -l {shlex.quote(job_id)} 2>&1", timeout=20)
+                self._diagnostic_command("LSF queue summary", f"bjobs {shlex.quote(job_id)} 2>&1", timeout=20)
+            elif self.scheduler == "slurm":
+                self._diagnostic_command("Slurm job immediately after submit", f"squeue -j {shlex.quote(job_id)} -o '%i %T %R' 2>&1", timeout=20)
         else:
             print(f"Job submitted but could not parse job ID from: {out}")
             job_id = "unknown"
@@ -1108,6 +1302,13 @@ exit $EXIT_CODE
             f"SUBMITTED=$(date)"
         )
         self.run_command(f"echo '{job_info_content}' > {job_info}", timeout=10)
+        self._diagnostic_command(
+            "Submitted file inventory",
+            f"ls -lh {shlex.quote(self.remote_work_dir)} | sed -n '1,120p'; "
+            f"echo '--- job info ---'; cat {shlex.quote(job_info)} 2>&1; "
+            f"echo '--- job script head ---'; sed -n '1,220p' {shlex.quote(job_script)} 2>&1",
+            timeout=30,
+        )
 
         print("\n" + "=" * 60)
         print("BATCH JOB SUBMITTED SUCCESSFULLY")
@@ -1364,9 +1565,10 @@ exit $EXIT_CODE
             return "UNKNOWN"
 
         if self.scheduler == "slurm":
-            out, _, _ = self.run_command(
+            out, err, code = self.run_command(
                 f"squeue -j {job_id} --format=%T --noheader 2>&1 | head -1",
                 timeout=15)
+            print(f"[HPC DIAG] scheduler state probe: scheduler=slurm job={job_id} exit={code} out={out.strip()!r} err={err.strip()!r}")
             text = out.strip().upper()
             if "RUNNING" in text:
                 return "RUNNING"
@@ -1376,9 +1578,10 @@ exit $EXIT_CODE
                 # Some other state (COMPLETING, SUSPENDED, etc.)
                 return "RUNNING"
             # Job gone from squeue — check sacct for final state
-            acct, _, _ = self.run_command(
+            acct, acct_err, acct_code = self.run_command(
                 f"sacct -j {job_id} --format=State --noheader 2>/dev/null | head -1",
                 timeout=15)
+            print(f"[HPC DIAG] sacct probe: job={job_id} exit={acct_code} out={acct.strip()!r} err={acct_err.strip()!r}")
             state = acct.strip().upper()
             if "COMPLETED" in state:
                 return "DONE"
@@ -1387,7 +1590,8 @@ exit $EXIT_CODE
             return "DONE"  # gone from squeue, assume finished
 
         else:  # LSF
-            out, _, _ = self.run_command(f"bjobs {job_id} 2>&1", timeout=15)
+            out, err, code = self.run_command(f"bjobs {job_id} 2>&1", timeout=15)
+            print(f"[HPC DIAG] scheduler state probe: scheduler=lsf job={job_id} exit={code} out={out.strip()!r} err={err.strip()!r}")
             low = out.lower()
             if "not found" in low or "is not found" in low:
                 return "DONE"   # gone from LSF queue
@@ -1565,6 +1769,51 @@ exit $EXIT_CODE
         print(f"  Checked in {elapsed:.1f}s")
         print("=" * 60)
         return job_info
+
+    def peek_job_output(self, job_id_override: str = ""):
+        """Print scheduler diagnostics and tails of known job log files."""
+        job_info, job_out, job_err, job_done, job_errlog = self._find_latest_job_info()
+        if job_info is None:
+            print("\nNo job information found. Submit a batch job first.")
+            if job_id_override:
+                if self.scheduler == "lsf":
+                    self._diagnostic_command("LSF job lookup without info file", f"bjobs -l {shlex.quote(job_id_override)} 2>&1", timeout=20)
+                elif self.scheduler == "slurm":
+                    self._diagnostic_command("Slurm job lookup without info file", f"squeue -j {shlex.quote(job_id_override)} -o '%i %T %R' 2>&1", timeout=20)
+            return False
+
+        job_id = job_id_override.strip() or job_info.get("JOB_ID", "unknown")
+        print()
+        print("=" * 60)
+        print(f"  JOB DEBUG / LOG PEEK  {job_id}")
+        print("=" * 60)
+        print(f"  Work dir  : {self.remote_work_dir}")
+        print(f"  Output dir: {job_info.get('OUTPUT_DIR', '(unknown)')}")
+        print(f"  Log out   : {job_out}")
+        print(f"  Log err   : {job_err}")
+        print(f"  Done file : {job_done}")
+        print(f"  Error log : {job_errlog}")
+
+        self._diagnostic_command("Scheduler commands visible", "command -v bsub; command -v bjobs; command -v bpeek; command -v sbatch; command -v squeue; echo PATH=$PATH", timeout=20)
+        if self.scheduler == "lsf":
+            self._diagnostic_command("bjobs summary", f"bjobs {shlex.quote(job_id)} 2>&1", timeout=20)
+            self._diagnostic_command("bjobs long", f"bjobs -l {shlex.quote(job_id)} 2>&1", timeout=30)
+            self._diagnostic_command("bhist", f"bhist -l {shlex.quote(job_id)} 2>&1 | tail -120", timeout=30)
+        elif self.scheduler == "slurm":
+            self._diagnostic_command("squeue summary", f"squeue -j {shlex.quote(job_id)} -o '%i %T %R' 2>&1", timeout=20)
+            self._diagnostic_command("sacct", f"sacct -j {shlex.quote(job_id)} --format=JobID,State,ExitCode,Elapsed,NodeList,Reason 2>&1", timeout=30)
+
+        for label, path in [
+            ("job stdout", job_out),
+            ("job stderr", job_err),
+            ("pipeline error log", job_errlog),
+            ("done marker", job_done),
+        ]:
+            if path:
+                self._diagnostic_command(label, f"echo FILE={shlex.quote(path)}; ls -lh {shlex.quote(path)} 2>&1; tail -200 {shlex.quote(path)} 2>&1", timeout=30)
+
+        print("=" * 60)
+        return True
 
     def download_error_logs(self, local_dir: str = None):
         """Download just the error logs from the HPC for debugging."""

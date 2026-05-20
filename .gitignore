@@ -1,5 +1,13 @@
 __pycache__/
 .DS_Store
+node_modules/
+frontend/dist/
+src-tauri/target/
+backend/build/
+backend/dist/
+src-tauri/binaries/*
+!src-tauri/binaries/.gitkeep
+*.dmg
 __pycache__/
 results/
 results4/l1mdtf_i/l1mdtf_i_aligned.fa

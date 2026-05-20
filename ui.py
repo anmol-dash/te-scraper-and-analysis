@@ -519,11 +519,188 @@ def _step_enrichment(client):
     _remote_run(client, "te_enrichment", cmd, timeout=3600)
 
 
+# ── Remote file viewer ────────────────────────────────────────────────────────
+
+def _file_viewer(client):
+    """Interactive directory browser for the remote HPC cluster."""
+    cwd = client.remote_work_dir
+
+    _TEXT_EXTS = {
+        ".py", ".sh", ".txt", ".log", ".out", ".err", ".csv", ".tsv",
+        ".json", ".yaml", ".yml", ".md", ".fa", ".fasta", ".bed", ".gtf",
+        ".gff", ".r", ".R", ".conf", ".cfg", ".ini", ".env",
+    }
+
+    def _ls(path):
+        out, err, code = client.run_command(
+            f"ls -la --time-style=long-iso {path!r} 2>&1", timeout=15
+        )
+        if code != 0 or not out.strip():
+            return None, err or "Could not list directory."
+        entries = []
+        for line in out.splitlines():
+            if line.startswith("total") or not line.strip():
+                continue
+            parts = line.split(None, 8)
+            if len(parts) < 9:
+                continue
+            perms, _, _, _, size, date, time_, *rest = parts
+            name = rest[0] if rest else ""
+            if name in (".", ".."):
+                continue
+            is_dir  = perms.startswith("d")
+            is_link = perms.startswith("l")
+            link_target = ""
+            if is_link and " -> " in name:
+                name, link_target = name.split(" -> ", 1)
+            entries.append({
+                "name": name,
+                "perms": perms,
+                "size": size,
+                "date": date,
+                "time": time_,
+                "is_dir": is_dir,
+                "is_link": is_link,
+                "link_target": link_target,
+            })
+        entries.sort(key=lambda e: (not e["is_dir"], e["name"].lower()))
+        return entries, None
+
+    def _print_listing(path, entries):
+        os.system("clear" if sys.stdout.isatty() else ":")
+        print()
+        print(_header("Remote File Viewer"))
+        print()
+        print(f"  {dim('Location:')}  {bold(path)}")
+        print()
+        print(_divider("Contents"))
+        print(f"  {'#':<5} {'Name':<42} {'Size':>8}  {'Date':<10}  {'Time':<5}  {'Perms'}")
+        print(f"  {dim('─' * 80)}")
+        for i, e in enumerate(entries, 1):
+            icon   = (blue("d") if e["is_dir"] else (cyan("l") if e["is_link"] else dim("f")))
+            name_s = (bold(blue(e["name"])) if e["is_dir"]
+                      else (cyan(e["name"]) if e["is_link"]
+                            else e["name"]))
+            link_s = f"  {dim('→')} {dim(e['link_target'])}" if e["link_target"] else ""
+            size_s = dim(e["size"]) if e["is_dir"] else e["size"]
+            print(f"  {dim(str(i)):<5} {icon} {name_s:<40}{link_s}  {size_s:>8}  {e['date']}  {e['time']}  {dim(e['perms'])}")
+        print()
+        print(_divider("Commands"))
+        print(f"  {cyan('<number>')}  enter dir / view file    "
+              f"  {cyan('..')}  up    "
+              f"  {cyan('~')}  home    "
+              f"  {cyan('cd <path>')}  jump")
+        print(f"  {cyan('pwd')}  print path    "
+              f"  {cyan('q')}  quit viewer")
+        print()
+
+    def _view_file(path, name):
+        ext = Path(name).suffix.lower()
+        size_out, _, _ = client.run_command(
+            f"stat -c%s {path!r} 2>/dev/null || wc -c < {path!r}", timeout=10
+        )
+        try:
+            byte_size = int(size_out.strip().split()[-1])
+        except (ValueError, IndexError):
+            byte_size = 0
+
+        print()
+        if ext not in _TEXT_EXTS and byte_size > 0:
+            print(f"  {yellow('Binary or unknown file type')}  ({byte_size:,} bytes)")
+            print(f"  {dim('Showing first 20 lines as text anyway (may be garbled).')}")
+        else:
+            print(f"  {dim('File:')}  {bold(name)}  {dim(f'({byte_size:,} bytes)')}")
+
+        print(_divider())
+        head_out, _, code = client.run_command(
+            f"head -n 60 {path!r} 2>&1", timeout=15
+        )
+        if code != 0 or not head_out.strip():
+            print(dim("  (empty or unreadable)"))
+        else:
+            for line in head_out.splitlines():
+                print(f"  {line}")
+        if byte_size > 4096:
+            line_count_out, _, _ = client.run_command(
+                f"wc -l < {path!r} 2>/dev/null", timeout=10
+            )
+            try:
+                total_lines = int(line_count_out.strip())
+                if total_lines > 60:
+                    print()
+                    print(dim(f"  … {total_lines - 60:,} more lines not shown …"))
+            except (ValueError, IndexError):
+                pass
+        print(_divider())
+        input(f"  {dim('Press Enter to return…')}")
+
+    while True:
+        entries, err = _ls(cwd)
+        if entries is None:
+            print(red(f"\n  {err}"))
+            cwd = client.remote_work_dir
+            input(f"  {dim('Press Enter to reset to home…')}")
+            continue
+
+        _print_listing(cwd, entries)
+        raw = input(f"  {cyan('›')} ").strip()
+
+        if not raw or raw.lower() == "q":
+            break
+
+        if raw == "..":
+            parent = str(Path(cwd).parent)
+            if parent != cwd:
+                cwd = parent
+            continue
+
+        if raw in ("~", "home"):
+            cwd = client.remote_work_dir
+            continue
+
+        if raw.lower() == "pwd":
+            print(f"\n  {bold(cwd)}")
+            input(f"  {dim('Press Enter…')}")
+            continue
+
+        if raw.lower().startswith("cd "):
+            target = raw[3:].strip()
+            if not target.startswith("/"):
+                target = f"{cwd}/{target}"
+            test_out, _, code = client.run_command(
+                f"test -d {target!r} && echo OK || echo NOTDIR", timeout=10
+            )
+            if "OK" in test_out:
+                cwd = target
+            else:
+                print(red(f"  Not a directory: {target}"))
+                input(f"  {dim('Press Enter…')}")
+            continue
+
+        if raw.isdigit():
+            idx = int(raw) - 1
+            if 0 <= idx < len(entries):
+                entry = entries[idx]
+                target = f"{cwd}/{entry['name']}"
+                if entry["is_dir"]:
+                    cwd = target
+                else:
+                    _view_file(target, entry["name"])
+            else:
+                print(red("  Number out of range."))
+                input(f"  {dim('Press Enter…')}")
+            continue
+
+        print(red(f"  Unknown command: {raw!r}"))
+        input(f"  {dim('Press Enter…')}")
+
+
 # ── Interactive menu ──────────────────────────────────────────────────────────
 
 MENU = [
     ("1",  "Workflow overview",                           "info"),
     (None, "Data prep",                                   "section"),
+    ("0",  "Query RepeatMasker  (download rmsk + count sequences)", "action"),
     ("2",  "te_prep.py       Download rmsk + sequences",  "action"),
     (None, "Core analysis  (direct remote execution)",    "section"),
     ("3",  "te_clustering.py k-mer · UMAP · HDBSCAN",    "action"),
@@ -536,12 +713,13 @@ MENU = [
     (None, "Batch / full pipeline  (scheduler)",          "section"),
     ("9",  "Configure + submit batch job  (bsub/sbatch)", "action"),
     ("16", "Submit motif+GO batch job  (from BED file)",  "action"),
-    ("10", "Run interactively on compute node",           "action"),
     ("11", "Check batch job status",                      "action"),
     ("12", "Watch batch job  (live tail)",                "action"),
     (None, "Results",                                     "section"),
     ("13", "Retrieve results to local machine",           "action"),
     ("14", "View local results summary",                  "action"),
+    (None, "Files",                                       "section"),
+    ("18", "Browse remote filesystem",                    "action"),
     (None, "Session",                                     "section"),
     ("17", "Test email  (set sender / receiver / password)","action"),
     ("15", "Disconnect and exit",                         "action"),
@@ -583,6 +761,10 @@ def interactive_menu(client):
             print(WORKFLOW)
             input(f"  {dim('Press Enter to return to menu…')}")
 
+        elif choice == '0':
+            _step_rmsk_query(client)
+            input(f"  {dim('Press Enter to return to menu…')}")
+
         elif choice == '2':  _step_prep(client)
         elif choice == '3':  _step_clustering(client)
         elif choice == '4':  _step_alignment(client)
@@ -598,9 +780,6 @@ def interactive_menu(client):
         elif choice == '16':
             client.submit_motif_batch_job()
             input(f"  {dim('Press Enter to return to menu…')}")
-
-        elif choice == '10':
-            client.run_interactive_job()
 
         elif choice == '11':
             client.check_job_status()
@@ -624,6 +803,9 @@ def interactive_menu(client):
             out_dir = _ask("Local results directory", "./results")
             display_results(Path(out_dir))
             input(f"  {dim('Press Enter to return to menu…')}")
+
+        elif choice == '18':
+            _file_viewer(client)
 
         elif choice == '17':
             client.test_email_interactive()
@@ -1868,12 +2050,78 @@ def _startup_mode_prompt():
     return "exit"
 
 
+def _step_rmsk_query(client):
+    """Download RepeatMasker table for a build and count sequences matching a family."""
+    print()
+    print(_divider("RepeatMasker Query  ·  download rmsk + count sequences"))
+    family   = (client.params.get("FAMILY_NAME", "") or "") if hasattr(client, "params") else ""
+    assembly = (client.params.get("ASSEMBLY", "hg38") or "hg38") if hasattr(client, "params") else "hg38"
+
+    family = _ask("TE family repName (e.g. HERVK, THE1D-int, L1HS)", family)
+    if not family:
+        print(red("  Family name is required."))
+        return
+
+    _, assembly = _ask_species_assembly(default_assembly=assembly)
+    rmsk_dir  = f"{client.remote_work_dir}/te_rmsk"
+    rmsk_file = f"{rmsk_dir}/rmsk_{assembly}.txt.gz"
+
+    if not _sync_remote_files(client, ["te_prep.py"]):
+        return
+
+    # Download rmsk only if not already cached on the cluster
+    check_out, _, _ = client.run_command(
+        f"test -f {rmsk_file} && echo EXISTS || echo MISSING", timeout=15
+    )
+    if "EXISTS" not in check_out:
+        _log(f"rmsk_{assembly}.txt.gz not found — downloading from UCSC…")
+        dl_cmd = (
+            f"mkdir -p {rmsk_dir} && "
+            f"python {client.remote_work_dir}/te_prep.py "
+            f"--download {assembly} --rmsk-dir {rmsk_dir}"
+        )
+        if not _remote_run(client, f"Download rmsk ({assembly})", dl_cmd, timeout=900):
+            return
+    else:
+        _log(f"rmsk_{assembly}.txt.gz already present — skipping download")
+
+    # Count rows where repName (column 11 in awk) matches the family exactly
+    _log(f"Counting sequences for repName='{family}' in {assembly}…")
+    count_out, _, _ = client.run_command(
+        f"zcat {rmsk_file} | awk -F'\\t' '$11==\"{family}\"' | wc -l",
+        timeout=120,
+    )
+    count_str = count_out.strip().split()[-1] if count_out.strip() else "?"
+    try:
+        count = int(count_str)
+        count_line = green(f"   Sequences matching:  {count:,}")
+    except ValueError:
+        count = None
+        count_line = yellow(f"   Could not parse count: {count_str!r}")
+
+    print()
+    print(_box([
+        bold("RepeatMasker Query Result"),
+        f"   Family:    {bold(family)}",
+        f"   Assembly:  {bold(assembly)}",
+        f"   rmsk file: {dim(rmsk_file)}",
+        count_line,
+    ]))
+    print()
+
+    # Persist into client params so an immediately following batch job inherits them
+    if hasattr(client, "params"):
+        client.params["FAMILY_NAME"] = family
+        client.params["ASSEMBLY"]    = assembly
+        _log("Saved family + assembly to session parameters.")
+
+
 def _post_connect_launch_action(client):
     """Prompt for the first action after connecting to HPC."""
     sched = (client.scheduler or "?").upper()
     print(_box([
         bold("HPC Run Mode"),
-        f"1  Configure + run interactively  {dim(f'({sched}, live output)')}",
+        f"1  Query RepeatMasker  {dim('(download rmsk + count sequences)')}",
         f"2  Configure + submit batch job   {dim(f'({sched}, background)')}",
         "3  Open full HPC menu",
         "4  Download results",
@@ -1886,9 +2134,8 @@ def _post_connect_launch_action(client):
         if choice in ("", "3", "m", "menu"):
             return True
 
-        if choice in ("1", "i", "interactive"):
-            if client.set_parameter_interactive():
-                client.run_interactive_job()
+        if choice in ("1", "r", "rmsk", "query"):
+            _step_rmsk_query(client)
             input(f"  {dim('Press Enter to open the full HPC menu…')}")
             return True
 
@@ -1899,7 +2146,6 @@ def _post_connect_launch_action(client):
             return True
 
         if choice in ("4", "dl", "download"):
-            # Show cached remote dir and let user override
             cached_remote = client._state.get("last_remote_dir", "").strip()
             if cached_remote:
                 remote_prompt = f"  Remote path [{cached_remote}]: "

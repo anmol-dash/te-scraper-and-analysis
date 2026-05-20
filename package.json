@@ -1,0 +1,16 @@
+{
+  "name": "utility-result",
+  "private": true,
+  "packageManager": "pnpm@9.15.4",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "frontend:test": "pnpm --dir frontend test",
+    "frontend:lint": "pnpm --dir frontend lint",
+    "e2e:smoke": "pnpm --dir e2e smoke"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

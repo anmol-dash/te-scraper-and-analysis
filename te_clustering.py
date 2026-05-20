@@ -58,7 +58,8 @@ def _pbar(cur, tot, prefix="Progress", length=40):
 def clustering_analysis(df, kmer=6, min_cluster_size=None, out_dir=None,
                         family_name="FAMILY", debug=False,
                         pca_dims=50, n_epochs=200, random_state=42,
-                        compute_tsne=True):
+                        compute_tsne=True, n_neighbors=30, min_dist=0.0,
+                        min_samples=7):
     """Run k-mer + SVD + UMAP/PCA/tSNE + HDBSCAN clustering on df['Seq'].
 
     Args:
@@ -134,14 +135,14 @@ def clustering_analysis(df, kmer=6, min_cluster_size=None, out_dir=None,
         pca_emb = np.column_stack([pca_emb, np.zeros(n, dtype=np.float32)])
 
     # ── Step 3: UMAP on SVD output ─────────────────────────────────────────
-    nn = max(2, min(15, n - 1))   # 5–15 is faster and sufficient
-    _pp(f"  Step 3/5: UMAP (n_neighbors={nn}, n_epochs={n_epochs}, n_jobs=-1)…")
+    nn = max(2, min(n_neighbors, n - 1))
+    _pp(f"  Step 3/5: UMAP (n_neighbors={nn}, min_dist={min_dist}, n_epochs={n_epochs}, n_jobs=-1)…")
     try:
         # Note: umap-learn overrides n_jobs=1 when random_state is set.
         # Pass random_state=None for true multi-core UMAP (non-reproducible).
         umap_model = _umap.UMAP(
             n_neighbors=nn,
-            min_dist=0.1,
+            min_dist=min_dist,
             n_components=2,
             metric="euclidean",
             n_epochs=n_epochs,
@@ -198,8 +199,7 @@ def clustering_analysis(df, kmer=6, min_cluster_size=None, out_dir=None,
 
     # ── Step 5: HDBSCAN on UMAP 2-D ───────────────────────────────────────
     mcs = min_cluster_size if min_cluster_size else max(5, n // 7)
-    # min_samples: lower = fewer points required to form a cluster core
-    min_s = max(1, mcs // 3)
+    min_s = min_samples
     _pp(f"  Step 5/5: HDBSCAN (min_cluster_size={mcs}, min_samples={min_s})…")
 
     def _cluster(emb, name):
@@ -282,7 +282,11 @@ def _save_clustering_viz(df, pca_emb, pca_lbl, umap_emb, umap_lbl,
                     row = df.iloc[i]
                     coord = (f"{row.get('chr','?')}:"
                              f"{row.get('start','?')}-{row.get('stop','?')}")
-                    htexts.append(f"<b>Row {i}</b><br>{coord}<br>Cluster: {lbl}")
+                    strand = row.get('strand', '?')
+                    htexts.append(
+                        f"<b>Row {i}</b><br>{coord}<br>"
+                        f"Strand: {strand}<br>Cluster: {lbl}"
+                    )
                 f.add_trace(
                     go.Scatter(
                         x=emb[:, 0], y=emb[:, 1], mode="markers",
@@ -298,23 +302,23 @@ def _save_clustering_viz(df, pca_emb, pca_lbl, umap_emb, umap_lbl,
             _add(emb=tsne_emb, col=3, labels=tsne_lbl)
             return f
 
-        fig = _build_fig(marker_size=5)
-        fig.update_layout(
-            width=1500, height=450, showlegend=False,
+        _layout = dict(
+            autosize=True, height=500, showlegend=False,
             title=f"{family_name} Clustering (k={kmer})",
         )
+        fig = _build_fig(marker_size=5)
+        fig.update_layout(**_layout)
         out_path = out_dir / "clustering_visualization.html"
-        fig.write_html(out_path)
+        fig.write_html(out_path, full_html=True, include_plotlyjs=True)
         _pp(f"    Clustering visualisation → {out_path}")
 
         if expr_vals is not None:
             fig_expr = _build_fig(marker_size=expr_vals.tolist())
             fig_expr.update_layout(
-                width=1500, height=450, showlegend=False,
-                title=f"{family_name} Clustering — dot size = expression (k={kmer})",
+                **{**_layout, "title": f"{family_name} Clustering — dot size = expression (k={kmer})"}
             )
             expr_path = out_dir / "clustering_visualization_expr.html"
-            fig_expr.write_html(expr_path)
+            fig_expr.write_html(expr_path, full_html=True, include_plotlyjs=True)
             _pp(f"    Expression-sized visualisation → {expr_path}")
 
     except Exception as e:
@@ -341,7 +345,10 @@ def _parse_args():
                    help="SVD components fed into UMAP / t-SNE (default 50)")
     p.add_argument("--n-epochs", type=int, default=200,
                    help="UMAP optimisation epochs (default 200)")
-    p.add_argument("--min-cluster-size", type=int, default=None)
+    p.add_argument("--min-cluster-size", type=int, default=120)
+    p.add_argument("--n-neighbors",    type=int,   default=30,  help="UMAP n_neighbors (default 30)")
+    p.add_argument("--min-dist",       type=float, default=0.0, help="UMAP min_dist (default 0.0)")
+    p.add_argument("--min-samples",    type=int,   default=7,   help="HDBSCAN min_samples (default 7)")
     p.add_argument("--out-dir",  default=".", help="Directory for visualisation files")
     p.add_argument("--family",   default="FAMILY", help="Family name for plot titles")
     p.add_argument("--random-state", type=int, default=42,
@@ -371,6 +378,9 @@ if __name__ == "__main__":
         n_epochs=args.n_epochs,
         random_state=rs,
         compute_tsne=not args.skip_tsne,
+        n_neighbors=args.n_neighbors,
+        min_dist=args.min_dist,
+        min_samples=args.min_samples,
     )
     out_path = args.output or args.input
     df_out.to_csv(out_path, index=False)

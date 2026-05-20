@@ -107,6 +107,14 @@ def parse_args(argv=None):
                    help="UMAP optimisation epochs for clustering (default: 200)")
     p.add_argument("--random-state", type=int, default=42,
                    help="Clustering random seed; pass 0 to enable multicore UMAP")
+    p.add_argument("--n-neighbors",    type=int,   default=30,
+                   help="UMAP n_neighbors (default: 30)")
+    p.add_argument("--min-dist",       type=float, default=0.0,
+                   help="UMAP min_dist (default: 0.0)")
+    p.add_argument("--min-cluster-size", type=int, default=None,
+                   help="HDBSCAN min_cluster_size (default: N//5, min 5)")
+    p.add_argument("--min-samples",    type=int,   default=7,
+                   help="HDBSCAN min_samples (default: 7)")
     p.add_argument("--skip-tsne", action="store_true",
                    help="Skip t-SNE during clustering for faster UMAP/PCA pipeline runs")
     p.add_argument("--primer-kmer",  type=int, default=18, help="Primer k-mer size")
@@ -570,6 +578,30 @@ def _attach_expression_assembly(df_te, expression_path, buffer_bp=50):
         progress_print(f"  Expression assembly supplied sequences for {df_te['Seq'].notna().sum():,} TE loci")
 
     return df_te.drop(columns=["_te_row_id"], errors="ignore")
+
+
+def _ucsc_api_url(chrom, start, stop, assembly):
+    """Return the UCSC getData/sequence API URL for a single locus."""
+    return (
+        f"https://api.genome.ucsc.edu/getData/sequence?"
+        f"genome={assembly};chrom={chrom};start={int(start)};end={int(stop)}"
+    )
+
+
+def _add_ucsc_urls(df, assembly, fetched_from_ucsc=True):
+    """Add a ucsc_url column to df in-place.
+
+    When fetched_from_ucsc is True the column holds the exact API endpoint used
+    to retrieve each sequence.  When False (local genome extraction) the column
+    is left empty to avoid implying the URL was actually called.
+    """
+    if fetched_from_ucsc:
+        df["ucsc_url"] = [
+            _ucsc_api_url(row["chr"], row["start"], row["stop"], assembly)
+            for _, row in df.iterrows()
+        ]
+    else:
+        df["ucsc_url"] = ""
 
 
 def _fetch_sequences_parallel(df, assembly="hg38", n_workers=10):
@@ -2035,6 +2067,7 @@ def run_pipeline(args):
                 df_family["Seq"] = seqlist
                 if failed:
                     progress_print(f"  {len(failed)} sequences failed extraction")
+                _add_ucsc_urls(df_family, assembly, fetched_from_ucsc=False)
             else:
                 # Parallel UCSC API fetch — ~10x faster than sequential
                 assembly = getattr(args, "assembly", "hg38") or "hg38"
@@ -2046,6 +2079,7 @@ def run_pipeline(args):
                     n_workers=n_workers,
                 )
                 df_family["Seq"] = seqlist
+                _add_ucsc_urls(df_family, assembly, fetched_from_ucsc=True)
 
         _seq_ok = df_family["Seq"].notna().sum() if "Seq" in df_family.columns else 0
         _diag(f"  Sequences filled: {_seq_ok}/{len(df_family)}")
@@ -2080,24 +2114,28 @@ def run_pipeline(args):
     _diag("STAGE 5: Clustering")
     print("\n=== CLUSTERING ===")
 
-    # Interactive min_cluster_size prompt
+    # min_cluster_size: use explicit arg if provided, else prompt interactively
     _n_seqs = len(df_family)
     _mcs_default = max(5, _n_seqs // 5)
-    print(f"  [Min cluster size]  (N = {_n_seqs} sequences)")
-    print(f"  Enter an integer, or an expression using N (e.g. N/3, N/10).")
-    _mcs_raw = _safe_input(f"  min_cluster_size  [N/5 = {_mcs_default}]: ", default="").strip()
-    _min_cluster_size = _mcs_default
-    if _mcs_raw:
-        try:
-            _mcs_val = int(eval(_mcs_raw.upper().replace("N", str(_n_seqs)), {"__builtins__": {}}))
-            if _mcs_val < 2:
-                raise ValueError("must be >= 2")
-            _min_cluster_size = _mcs_val
-            print(f"  ✓  min_cluster_size: {_min_cluster_size}")
-        except Exception as _e:
-            print(f"  ⚠  '{_mcs_raw}' invalid ({_e})  — using default {_min_cluster_size}")
+    if args.min_cluster_size is not None:
+        _min_cluster_size = max(2, args.min_cluster_size)
+        print(f"  → min_cluster_size: {_min_cluster_size} (from --min-cluster-size)")
     else:
-        print(f"  → min_cluster_size: {_min_cluster_size}")
+        print(f"  [Min cluster size]  (N = {_n_seqs} sequences)")
+        print(f"  Enter an integer, or an expression using N (e.g. N/3, N/10).")
+        _mcs_raw = _safe_input(f"  min_cluster_size  [N/5 = {_mcs_default}]: ", default="").strip()
+        _min_cluster_size = _mcs_default
+        if _mcs_raw:
+            try:
+                _mcs_val = int(eval(_mcs_raw.upper().replace("N", str(_n_seqs)), {"__builtins__": {}}))
+                if _mcs_val < 2:
+                    raise ValueError("must be >= 2")
+                _min_cluster_size = _mcs_val
+                print(f"  ✓  min_cluster_size: {_min_cluster_size}")
+            except Exception as _e:
+                print(f"  ⚠  '{_mcs_raw}' invalid ({_e})  — using default {_min_cluster_size}")
+        else:
+            print(f"  → min_cluster_size: {_min_cluster_size}")
     print()
 
     _diag(f"  min_cluster_size={_min_cluster_size}  n_seqs={len(df_family)}  min_sequences={args.min_sequences}")
@@ -2129,6 +2167,9 @@ def run_pipeline(args):
                 n_epochs=args.n_epochs,
                 random_state=rs,
                 compute_tsne=not args.skip_tsne,
+                n_neighbors=args.n_neighbors,
+                min_dist=args.min_dist,
+                min_samples=args.min_samples,
             )
             _diag(f"  clustering_analysis returned — Cluster col present: {'Cluster' in df_family.columns}")
 
