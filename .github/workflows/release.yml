@@ -9,9 +9,6 @@ on:
 permissions:
   contents: write
 
-env:
-  PNPM_VERSION: 9
-
 jobs:
   preflight:
     runs-on: ubuntu-latest
@@ -72,8 +69,6 @@ jobs:
           powershell -ExecutionPolicy Bypass -File scripts/build-python.ps1
 
       - uses: pnpm/action-setup@v4
-        with:
-          version: ${{ env.PNPM_VERSION }}
 
       - uses: actions/setup-node@v4
         with:
