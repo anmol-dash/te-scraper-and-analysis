@@ -106,6 +106,14 @@ export type SetupEvent = {
   message?: string;
 };
 
+export type UpdateEvent = {
+  phase: "checking" | "downloading" | "done" | "up_to_date" | "skipped" | "offline" | "log";
+  message?: string;
+  sha?: string;
+  updated?: string[];
+  failed?: string[];
+};
+
 export async function appRelaunchInvoke(): Promise<void> {
   return invoke("app_relaunch");
 }
@@ -215,6 +223,17 @@ export function onProgress(cb: (e: ProgressEvent) => void): UnlistenFn {
   const disposedRef = { current: false };
   const unsubs: UnlistenFn[] = [];
   chainListen<ProgressEvent>("python://progress", cb, disposedRef, unsubs);
+  return () => {
+    disposedRef.current = true;
+    unsubs.forEach((u) => u());
+    unsubs.length = 0;
+  };
+}
+
+export function onUpdate(cb: (e: UpdateEvent) => void): UnlistenFn {
+  const disposedRef = { current: false };
+  const unsubs: UnlistenFn[] = [];
+  chainListen<UpdateEvent>("python://update", cb, disposedRef, unsubs);
   return () => {
     disposedRef.current = true;
     unsubs.forEach((u) => u());

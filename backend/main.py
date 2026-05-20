@@ -12,10 +12,13 @@ import json
 import logging
 import queue
 import shutil
+import socket
 import subprocess
 import sys
 import threading
 import traceback
+import urllib.error
+import urllib.request
 import uuid
 from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -44,10 +47,27 @@ if sys.platform == "win32":
 else:
     _GAMECA_DIR = Path.home() / ".gameca"
 
-_VENV_PATH = _GAMECA_DIR / "venv"
+_VENV_PATH         = _GAMECA_DIR / "venv"
+_SCRIPTS_DIR       = _GAMECA_DIR / "scripts"
 _SETUP_DONE_SENTINEL = _GAMECA_DIR / ".setup_done"
-_setup_lock = threading.Lock()
+_LAST_COMMIT_FILE  = _GAMECA_DIR / "last_commit"
+_CONFIG_FILE       = _GAMECA_DIR / "config.json"
+_setup_lock   = threading.Lock()
 _setup_running = False
+
+# ── Script override: downloaded updates shadow bundled scripts ─────────────────
+# Must happen before any pipeline imports so lazy imports in cli.py pick them up.
+if _SCRIPTS_DIR.exists() and str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+# Scripts downloaded on update (mirrors pyinstaller.spec _pipeline_datas).
+_UPDATABLE_SCRIPTS = [
+    "query.py", "hpc_client.py", "ui.py",
+    "te_prep.py", "te_genome.py", "te_clustering.py",
+    "te_primers.py", "te_alignment.py", "te_motif.py",
+    "te_go.py", "te_expression.py", "te_enrichment.py",
+    "requirements.txt",
+]
 
 
 def _find_requirements() -> Path | None:
@@ -198,6 +218,166 @@ def _run_setup_background() -> None:
     finally:
         with _setup_lock:
             _setup_running = False
+
+# ── Auto-update from GitHub ────────────────────────────────────────────────────
+
+def _update_log(msg: str) -> None:
+    _emit({"type": "update", "phase": "log", "message": msg})
+
+
+def _read_update_config() -> tuple[str, str] | None:
+    """Return (repo, branch) or None if not configured."""
+    env_repo = os.environ.get("GAMECA_UPDATE_REPO", "").strip()
+    if env_repo:
+        return env_repo, os.environ.get("GAMECA_UPDATE_BRANCH", "main").strip()
+
+    if _CONFIG_FILE.exists():
+        try:
+            cfg = json.loads(_CONFIG_FILE.read_text())
+            repo = cfg.get("update_repo", "").strip()
+            if repo:
+                return repo, cfg.get("update_branch", "main").strip()
+        except Exception:
+            pass
+
+    # Create a template config on first run so the user knows what to fill in.
+    if not _CONFIG_FILE.exists():
+        _GAMECA_DIR.mkdir(parents=True, exist_ok=True)
+        _CONFIG_FILE.write_text(json.dumps({
+            "update_repo": "",
+            "update_branch": "main",
+            "_note": "Set update_repo to 'owner/repo-name' to enable auto-updates from GitHub."
+        }, indent=2))
+
+    return None
+
+
+def _has_internet(timeout: float = 3.0) -> bool:
+    try:
+        socket.setdefaulttimeout(timeout)
+        socket.getaddrinfo("api.github.com", 443)
+        return True
+    except Exception:
+        return False
+
+
+def _run_update_check() -> None:
+    """Check GitHub for new commits and download changed scripts if found."""
+    config = _read_update_config()
+    if config is None:
+        return  # not configured — skip silently
+
+    repo, branch = config
+
+    if not _has_internet():
+        _emit({"type": "update", "phase": "offline",
+               "message": "Offline — update check skipped."})
+        return
+
+    _emit({"type": "update", "phase": "checking",
+           "message": f"Checking {repo} for updates…"})
+
+    # Fetch latest commit SHA (1 API call, no auth, 60 req/hr limit).
+    try:
+        url = (f"https://api.github.com/repos/{repo}/commits/{branch}"
+               f"?per_page=1")
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "GAMECA-updater/1.0",
+                     "Accept": "application/vnd.github.v3+json"},
+        )
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            data = json.loads(resp.read())
+        latest_sha: str = data["sha"]
+        short_sha = latest_sha[:7]
+    except Exception as exc:
+        _update_log(f"GitHub API error: {exc}")
+        _emit({"type": "update", "phase": "skipped",
+               "message": "Could not reach GitHub — skipping."})
+        return
+
+    stored_sha = (_LAST_COMMIT_FILE.read_text().strip()
+                  if _LAST_COMMIT_FILE.exists() else "")
+
+    if latest_sha == stored_sha:
+        _emit({"type": "update", "phase": "up_to_date",
+               "message": f"Up to date ({short_sha})."})
+        return
+
+    _emit({"type": "update", "phase": "downloading",
+           "message": f"New commit {short_sha} — downloading changes…"})
+    _SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    updated: list[str] = []
+    failed:  list[str] = []
+
+    for script in _UPDATABLE_SCRIPTS:
+        raw_url = (f"https://raw.githubusercontent.com"
+                   f"/{repo}/{latest_sha}/{script}")
+        try:
+            req = urllib.request.Request(
+                raw_url, headers={"User-Agent": "GAMECA-updater/1.0"}
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                content: bytes = resp.read()
+            dest = _SCRIPTS_DIR / script
+            if not dest.exists() or dest.read_bytes() != content:
+                dest.write_bytes(content)
+                updated.append(script)
+                _update_log(f"Updated: {script}")
+            else:
+                _update_log(f"Unchanged: {script}")
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                _update_log(f"Not in repo (skipped): {script}")
+            else:
+                failed.append(script)
+                _update_log(f"HTTP {exc.code} for {script}")
+        except Exception as exc:
+            failed.append(script)
+            _update_log(f"Failed {script}: {exc}")
+
+    # Re-run pip install if requirements changed.
+    if "requirements.txt" in updated and _is_setup_done():
+        _update_log("requirements.txt changed — installing new dependencies…")
+        pip = str(
+            _VENV_PATH / ("Scripts" if sys.platform == "win32" else "bin") / "pip"
+        )
+        proc = subprocess.Popen(
+            [pip, "install", "--no-cache-dir", "-r",
+             str(_SCRIPTS_DIR / "requirements.txt")],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1,
+        )
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.rstrip()
+            if line:
+                _update_log(line)
+        proc.wait()
+
+    # Ensure new scripts shadow bundled ones immediately (for this session).
+    scripts_str = str(_SCRIPTS_DIR)
+    if scripts_str not in sys.path:
+        sys.path.insert(0, scripts_str)
+
+    _LAST_COMMIT_FILE.write_text(latest_sha)
+
+    if updated:
+        _emit({"type": "update", "phase": "done",
+               "message": f"Updated {len(updated)} file(s) to {short_sha}.",
+               "sha": short_sha, "updated": updated,
+               "failed": failed})
+    else:
+        _emit({"type": "update", "phase": "up_to_date",
+               "message": f"All files current at {short_sha}."})
+
+
+def _startup_sequence() -> None:
+    """Run setup then update check sequentially in a background thread."""
+    _run_setup_background()
+    _run_update_check()
+
 
 # Hard cap for a single NDJSON line read from stdin (bytes, including newline).
 MAX_LINE_BYTES = 256 * 1024
@@ -486,10 +666,9 @@ def _stdin_reader(q: queue.Queue[dict[str, Any]]) -> None:
 
 
 def ipc_main() -> int:
-    # Kick off venv setup immediately in the background so the first-launch
-    # progress stream starts as soon as the sidecar is alive.
+    # Run setup then update check in one background thread.
     threading.Thread(
-        target=_run_setup_background, daemon=True, name="venv-setup"
+        target=_startup_sequence, daemon=True, name="gameca-startup"
     ).start()
 
     state = _IPCState()
@@ -567,8 +746,8 @@ def ipc_main() -> int:
                                "payload": {"ok": True, "done": True}})
                     else:
                         threading.Thread(
-                            target=_run_setup_background,
-                            daemon=True, name="venv-setup-retry",
+                            target=_startup_sequence,
+                            daemon=True, name="gameca-startup-retry",
                         ).start()
                         _emit({"type": "result", "id": req_id,
                                "payload": {"ok": True, "done": False}})

@@ -475,6 +475,10 @@ fn dispatch_json_line(v: Value, pending: &DashMap<Uuid, oneshot::Sender<Response
                 let _ = app.emit("python://setup", &v);
                 return;
             }
+            "update" => {
+                let _ = app.emit("python://update", &v);
+                return;
+            }
             _ => {}
         }
     }

@@ -7,7 +7,7 @@ import LogStream from "@/components/LogStream";
 import SetupScreen from "@/components/SetupScreen";
 import StatusBar from "@/components/StatusBar";
 import ToastStack from "@/components/ToastStack";
-import { onLog, onProgress, onSetup, pySetup } from "@/lib/ipc";
+import { onLog, onProgress, onSetup, onUpdate, pySetup } from "@/lib/ipc";
 import type { LogLevel } from "@/lib/logLevel";
 import { useAppStore } from "@/store/appStore";
 
@@ -22,6 +22,7 @@ export default function App() {
   const fileViewerOpen = useAppStore((s) => s.fileViewerOpen);
   const setupPhase     = useAppStore((s) => s.setupPhase);
   const setSetupEvent  = useAppStore((s) => s.setSetupEvent);
+  const pushToast      = useAppStore((s) => s.pushToast);
 
   useEffect(() => {
     const pushLog     = useAppStore.getState().pushLog;
@@ -44,6 +45,12 @@ export default function App() {
       setSetupEvent(e.phase, e.fraction ?? 0, e.message ?? "");
     });
 
+    const unsubUpdate = onUpdate((e) => {
+      if (e.phase === "done" && e.updated && e.updated.length > 0) {
+        pushToast(`Updated to ${e.sha ?? "latest"} (${e.updated.length} file${e.updated.length === 1 ? "" : "s"})`);
+      }
+    });
+
     // Explicitly ask the sidecar for setup status now that we're subscribed.
     // This eliminates the race where the sidecar emitted "done" before
     // the listener was registered (e.g. on repeat launches).
@@ -62,8 +69,9 @@ export default function App() {
       unsubLog();
       unsubProgress();
       unsubSetup();
+      unsubUpdate();
     };
-  }, [setSetupEvent]);
+  }, [setSetupEvent, pushToast]);
 
   // Show the setup overlay until the venv is confirmed ready.
   if (setupPhase !== "done") {
