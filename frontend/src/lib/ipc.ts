@@ -19,6 +19,15 @@ export type ProgressEvent = {
 
 export type RunFinishedEvent = { id: string; code: number };
 
+export type CrashEvent = {
+  fatal?: boolean;
+  reason?: string;
+  detail?: string;
+  retry?: number;
+  phase?: string;
+  had_valid_stdout?: boolean;
+};
+
 export async function pyRun(argv: string[]): Promise<RunResult> {
   const raw = await invoke<{ id: string; result?: unknown }>("py_run", {
     argv,
@@ -95,6 +104,15 @@ export async function appExit(): Promise<void> {
   return invoke("app_exit");
 }
 
+export async function appReportFatal(args: {
+  source: string;
+  reason: string;
+  detail: string;
+}): Promise<{ ok: boolean; url?: string | null }> {
+  const raw = await invoke<{ ok?: boolean; url?: string | null }>("app_report_fatal", args);
+  return { ok: Boolean(raw?.ok), url: raw?.url ?? null };
+}
+
 export async function pySetup(): Promise<{ ok: boolean; done: boolean }> {
   const raw = await invoke<{ ok?: boolean; done?: boolean }>("py_setup");
   return { ok: Boolean(raw?.ok), done: Boolean(raw?.done) };
@@ -107,11 +125,17 @@ export type SetupEvent = {
 };
 
 export type UpdateEvent = {
-  phase: "checking" | "downloading" | "done" | "up_to_date" | "skipped" | "offline" | "log";
+  phase: "checking" | "downloading" | "done" | "up_to_date" | "skipped" | "offline" | "log" | "release_available";
   message?: string;
   sha?: string;
   updated?: string[];
   failed?: string[];
+  // release_available fields
+  version?: string;
+  current_version?: string;
+  download_url?: string;
+  asset_name?: string;
+  size_bytes?: number;
 };
 
 export async function appRelaunchInvoke(): Promise<void> {
@@ -245,6 +269,17 @@ export function onSetup(cb: (e: SetupEvent) => void): UnlistenFn {
   const disposedRef = { current: false };
   const unsubs: UnlistenFn[] = [];
   chainListen<SetupEvent>("python://setup", cb, disposedRef, unsubs);
+  return () => {
+    disposedRef.current = true;
+    unsubs.forEach((u) => u());
+    unsubs.length = 0;
+  };
+}
+
+export function onCrash(cb: (e: CrashEvent) => void): UnlistenFn {
+  const disposedRef = { current: false };
+  const unsubs: UnlistenFn[] = [];
+  chainListen<CrashEvent>("python://crashed", cb, disposedRef, unsubs);
   return () => {
     disposedRef.current = true;
     unsubs.forEach((u) => u());

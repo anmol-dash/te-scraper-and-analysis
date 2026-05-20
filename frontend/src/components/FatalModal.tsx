@@ -1,13 +1,36 @@
-import { appExit, appRelaunchInvoke } from "@/lib/ipc";
+import { useState } from "react";
+
+import { appExit, appRelaunchInvoke, appReportFatal } from "@/lib/ipc";
 import { useAppStore } from "@/store/appStore";
 
 export default function FatalModal() {
   const fatalMessage = useAppStore((s) => s.fatalMessage);
   const setFatalMessage = useAppStore((s) => s.setFatalMessage);
+  const [reporting, setReporting] = useState(false);
 
   if (!fatalMessage) {
     return null;
   }
+
+  const reportThen = async (action: "quit" | "restart") => {
+    setReporting(true);
+    try {
+      await appReportFatal({
+        source: "fatal modal shutdown",
+        reason: fatalMessage.split("\n")[0] || "Application error",
+        detail: fatalMessage,
+      });
+    } catch {
+      // Shutdown should not be blocked by unavailable reporting credentials/network.
+    } finally {
+      if (action === "quit") {
+        void appExit();
+      } else {
+        setFatalMessage(null);
+        void appRelaunchInvoke();
+      }
+    }
+  };
 
   return (
     <div
@@ -28,19 +51,18 @@ export default function FatalModal() {
           <button
             type="button"
             className="rounded-md border border-[var(--app-border)] px-3 py-2 text-sm font-medium transition hover:bg-[var(--app-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--app-panel)]"
-            onClick={() => void appExit()}
+            disabled={reporting}
+            onClick={() => void reportThen("quit")}
           >
             Quit
           </button>
           <button
             type="button"
             className="rounded-md bg-[var(--app-accent)] px-3 py-2 text-sm font-semibold text-white transition hover:opacity-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--app-panel)]"
-            onClick={() => {
-              setFatalMessage(null);
-              void appRelaunchInvoke();
-            }}
+            disabled={reporting}
+            onClick={() => void reportThen("restart")}
           >
-            Restart
+            {reporting ? "Reporting..." : "Restart"}
           </button>
         </div>
       </div>

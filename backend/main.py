@@ -225,31 +225,26 @@ def _update_log(msg: str) -> None:
     _emit({"type": "update", "phase": "log", "message": msg})
 
 
-def _read_update_config() -> tuple[str, str] | None:
-    """Return (repo, branch) or None if not configured."""
+_DEFAULT_REPO   = "anmol-dash/te-scraper-and-analysis"
+_DEFAULT_BRANCH = "main"
+
+
+def _read_update_config() -> tuple[str, str]:
+    """Return (repo, branch) — always returns something (defaults to the real repo)."""
     env_repo = os.environ.get("GAMECA_UPDATE_REPO", "").strip()
     if env_repo:
-        return env_repo, os.environ.get("GAMECA_UPDATE_BRANCH", "main").strip()
+        return env_repo, os.environ.get("GAMECA_UPDATE_BRANCH", _DEFAULT_BRANCH).strip()
 
     if _CONFIG_FILE.exists():
         try:
             cfg = json.loads(_CONFIG_FILE.read_text())
             repo = cfg.get("update_repo", "").strip()
             if repo:
-                return repo, cfg.get("update_branch", "main").strip()
+                return repo, cfg.get("update_branch", _DEFAULT_BRANCH).strip()
         except Exception:
             pass
 
-    # Create a template config on first run so the user knows what to fill in.
-    if not _CONFIG_FILE.exists():
-        _GAMECA_DIR.mkdir(parents=True, exist_ok=True)
-        _CONFIG_FILE.write_text(json.dumps({
-            "update_repo": "",
-            "update_branch": "main",
-            "_note": "Set update_repo to 'owner/repo-name' to enable auto-updates from GitHub."
-        }, indent=2))
-
-    return None
+    return _DEFAULT_REPO, _DEFAULT_BRANCH
 
 
 def _has_internet(timeout: float = 3.0) -> bool:
@@ -263,11 +258,7 @@ def _has_internet(timeout: float = 3.0) -> bool:
 
 def _run_update_check() -> None:
     """Check GitHub for new commits and download changed scripts if found."""
-    config = _read_update_config()
-    if config is None:
-        return  # not configured — skip silently
-
-    repo, branch = config
+    repo, branch = _read_update_config()
 
     if not _has_internet():
         _emit({"type": "update", "phase": "offline",
@@ -373,10 +364,69 @@ def _run_update_check() -> None:
                "message": f"All files current at {short_sha}."})
 
 
+def _version_tuple(v: str) -> tuple[int, ...]:
+    try:
+        return tuple(int(x) for x in v.lstrip("v").split("."))
+    except Exception:
+        return (0,)
+
+
+def _check_release_update(repo: str) -> None:
+    """Check GitHub Releases for a newer app version and emit release_available if found."""
+    import platform as _platform
+
+    try:
+        url = f"https://api.github.com/repos/{repo}/releases/latest"
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "GAMECA-updater/1.0",
+                     "Accept": "application/vnd.github.v3+json"},
+        )
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            data = json.loads(resp.read())
+    except Exception as exc:
+        _update_log(f"Release check failed: {exc}")
+        return
+
+    latest_tag: str = data.get("tag_name", "").lstrip("v")
+    if not latest_tag:
+        return
+
+    if _version_tuple(latest_tag) <= _version_tuple(_TOOL_VERSION):
+        _update_log(f"App is up to date (release {latest_tag}).")
+        return
+
+    # Pick the right DMG asset for this machine.
+    machine = _platform.machine()
+    arch_hint = "aarch64" if machine in ("arm64", "aarch64") else "x86_64"
+    assets: list[dict] = data.get("assets", [])
+    dmg = next(
+        (a for a in assets if a["name"].endswith(".dmg") and arch_hint in a["name"]),
+        next((a for a in assets if a["name"].endswith(".dmg")), None),
+    )
+    if dmg is None:
+        _update_log(f"Release {latest_tag} has no DMG asset — cannot auto-download.")
+        return
+
+    _emit({
+        "type": "update",
+        "phase": "release_available",
+        "message": f"GAMECA {latest_tag} is available (you have {_TOOL_VERSION}).",
+        "version": latest_tag,
+        "current_version": _TOOL_VERSION,
+        "download_url": dmg["browser_download_url"],
+        "asset_name": dmg["name"],
+        "size_bytes": dmg.get("size", 0),
+    })
+
+
 def _startup_sequence() -> None:
-    """Run setup then update check sequentially in a background thread."""
+    """Run setup → script update → release check sequentially."""
     _run_setup_background()
     _run_update_check()
+    if _has_internet():
+        repo, _ = _read_update_config()
+        _check_release_update(repo)
 
 
 # Hard cap for a single NDJSON line read from stdin (bytes, including newline).

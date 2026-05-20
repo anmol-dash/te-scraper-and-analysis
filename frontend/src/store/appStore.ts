@@ -62,6 +62,10 @@ type AppStore = {
   mode: "local" | "hpc";
   setMode: (m: "local" | "hpc") => void;
 
+  releaseUpdate: { version: string; currentVersion: string; downloadUrl: string; assetName: string; sizeBytes: number } | null;
+  setReleaseUpdate: (u: AppStore["releaseUpdate"]) => void;
+  clearReleaseUpdate: () => void;
+
   setupPhase: SetupPhase | null;
   setupFraction: number;
   setupMessage: string;
@@ -155,6 +159,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   mode: "local",
   setMode: (m) => set({ mode: m }),
+
+  releaseUpdate: null,
+  setReleaseUpdate: (u) => set({ releaseUpdate: u }),
+  clearReleaseUpdate: () => set({ releaseUpdate: null }),
 
   setupPhase: null,
   setupFraction: 0,

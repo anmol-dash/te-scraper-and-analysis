@@ -10,6 +10,8 @@ use tauri_plugin_shell::ShellExt;
 use tokio::sync::{mpsc, oneshot, Mutex as TokioMutex};
 use uuid::Uuid;
 
+use crate::github_report::{spawn_fatal_report, FatalReport};
+
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(3600 * 8);
 const PING_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(3);
@@ -244,10 +246,16 @@ async fn supervisor_task(
             Ok(c) => c,
             Err(e) => {
                 eprintln!("[gameca] sidecar command build failed: {e}");
-                record_fatal(&fatal, &fatal_reason, format!("sidecar build: {e}"));
+                let detail = e.to_string();
+                record_fatal(&fatal, &fatal_reason, format!("sidecar build: {detail}"));
+                spawn_fatal_report(FatalReport {
+                    source: "sidecar supervisor".into(),
+                    reason: "sidecar build failed".into(),
+                    detail: detail.clone(),
+                });
                 let _ = app.emit(
                     "python://crashed",
-                    json!({ "fatal": true, "reason": "sidecar build failed", "detail": e.to_string() }),
+                    json!({ "fatal": true, "reason": "sidecar build failed", "detail": detail }),
                 );
                 return;
             }
@@ -258,10 +266,16 @@ async fn supervisor_task(
             Err(e) => {
                 eprintln!("[gameca] spawn failed: {e}");
                 if restarts >= MAX_RESTARTS {
-                    record_fatal(&fatal, &fatal_reason, format!("spawn failed: {e}"));
+                    let detail = e.to_string();
+                    record_fatal(&fatal, &fatal_reason, format!("spawn failed: {detail}"));
+                    spawn_fatal_report(FatalReport {
+                        source: "sidecar supervisor".into(),
+                        reason: "spawn failed after retries".into(),
+                        detail: detail.clone(),
+                    });
                     let _ = app.emit(
                         "python://crashed",
-                        json!({ "fatal": true, "reason": "spawn failed after retries", "detail": e.to_string() }),
+                        json!({ "fatal": true, "reason": "spawn failed after retries", "detail": detail }),
                     );
                     return;
                 }
@@ -336,6 +350,11 @@ async fn supervisor_task(
         if restarts > MAX_RESTARTS {
             let msg = format!("sidecar exited: {exit_detail}");
             record_fatal(&fatal, &fatal_reason, msg);
+            spawn_fatal_report(FatalReport {
+                source: "sidecar supervisor".into(),
+                reason: "max restarts exceeded".into(),
+                detail: exit_detail.clone(),
+            });
             let _ = app.emit(
                 "python://crashed",
                 json!({ "fatal": true, "reason": "max restarts exceeded", "detail": exit_detail }),

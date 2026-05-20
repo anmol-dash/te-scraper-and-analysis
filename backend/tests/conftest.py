@@ -44,6 +44,14 @@ class IpcBridge:
             time.sleep(0.01)
         raise TimeoutError("timed out waiting for an IPC response line")
 
+    def read_until(self, predicate, timeout: float = 5.0) -> dict:
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            msg = self.readline_obj(timeout=max(0.1, end - time.monotonic()))
+            if predicate(msg):
+                return msg
+        raise TimeoutError("timed out waiting for matching IPC response")
+
 
 @pytest.fixture
 def ipc_bridge() -> Iterator[IpcBridge]:

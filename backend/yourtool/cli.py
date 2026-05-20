@@ -98,6 +98,11 @@ def main(argv: Sequence[str] | None = None, cancel_event: Event | None = None) -
     p_hpc_dld.add_argument("--local-path", required=True)
     p_hpc_dld.set_defaults(handler=_cmd_hpc_download_dir)
 
+    p_dl_update = sub.add_parser("download-update", help="Download a GAMECA release DMG to ~/Downloads.")
+    p_dl_update.add_argument("--url", required=True, help="Direct download URL for the DMG.")
+    p_dl_update.add_argument("--filename", default="", help="Destination filename (inferred from URL if blank).")
+    p_dl_update.set_defaults(handler=_cmd_download_update)
+
     args = parser.parse_args(argv)
     handler = args.handler
     result = handler(args, cancel_event)
@@ -374,3 +379,47 @@ def _cmd_hpc_read_file(args: argparse.Namespace, _cancel_event: Event | None) ->
     except UnicodeDecodeError:
         import base64
         return {"ok": True, "type": "binary", "mime": mime, "data": base64.b64encode(data).decode(), "size": len(data)}
+
+
+def _cmd_download_update(args: argparse.Namespace, cancel_event: Event | None) -> dict[str, Any]:
+    """Download a release DMG to ~/Downloads with progress, then open it."""
+    import urllib.request
+    import urllib.error
+
+    url      = args.url
+    filename = args.filename.strip() or url.split("?")[0].split("/")[-1] or "GAMECA_update.dmg"
+    dest_dir = Path.home() / "Downloads"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / filename
+
+    print(f"Downloading {filename}…", flush=True)
+
+    total_bytes = 0
+    downloaded  = 0
+
+    def _reporthook(count: int, block: int, total: int) -> None:
+        nonlocal downloaded, total_bytes
+        total_bytes = total
+        downloaded  = min(total, count * block)
+        if total > 0:
+            pct   = int(downloaded * 100 / total)
+            mb_d  = downloaded / 1_048_576
+            mb_t  = total      / 1_048_576
+            print(f"  {mb_d:.0f} / {mb_t:.0f} MB ({pct}%)", flush=True)
+        if cancel_event and cancel_event.is_set():
+            raise InterruptedError("cancelled")
+
+    try:
+        urllib.request.urlretrieve(url, str(dest), _reporthook)
+    except InterruptedError:
+        return {"ok": False, "error": "download cancelled", "exit_code": 130}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "exit_code": 1}
+
+    print(f"Saved to {dest}", flush=True)
+
+    # Open the DMG so Finder mounts it and shows the drag-to-Applications window.
+    import subprocess
+    subprocess.Popen(["open", str(dest)])
+
+    return {"ok": True, "path": str(dest), "filename": filename}

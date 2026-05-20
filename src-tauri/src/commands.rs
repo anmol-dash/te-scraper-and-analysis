@@ -3,6 +3,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tauri::{AppHandle, State};
 
+use crate::github_report::{submit_fatal_report, FatalReport};
 use crate::python_bridge::{BridgeError, PythonBridge};
 
 fn map_err(e: BridgeError) -> String {
@@ -57,4 +58,20 @@ pub fn app_exit(app: AppHandle) {
 #[tauri::command]
 pub fn app_relaunch(app: AppHandle) {
     app.restart();
+}
+
+#[tauri::command]
+pub async fn app_report_fatal(
+    source: String,
+    reason: String,
+    detail: String,
+) -> Result<Value, String> {
+    let url = submit_fatal_report(FatalReport {
+        source,
+        reason,
+        detail,
+    })
+    .await?;
+
+    Ok(json!({ "ok": true, "url": url }))
 }

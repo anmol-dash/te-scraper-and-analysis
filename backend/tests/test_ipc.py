@@ -97,7 +97,7 @@ def test_malformed_json_emits_invalid_json_error(ipc_bridge) -> None:
     assert ipc_bridge.proc.stdin
     ipc_bridge.proc.stdin.write("not-json{\n")
     ipc_bridge.proc.stdin.flush()
-    msg = ipc_bridge.readline_obj()
+    msg = ipc_bridge.read_until(lambda m: m.get("type") == "error")
     assert msg["type"] == "error"
     assert msg["payload"]["code"] == "INVALID_JSON"
 
@@ -109,19 +109,19 @@ def test_oversized_line_emits_line_too_large(ipc_bridge) -> None:
     assert ipc_bridge.proc.stdin
     ipc_bridge.proc.stdin.write(payload + "\n")
     ipc_bridge.proc.stdin.flush()
-    msg = ipc_bridge.readline_obj()
+    msg = ipc_bridge.read_until(lambda m: m.get("type") == "error")
     assert msg["type"] == "error"
     assert msg["payload"]["code"] == "LINE_TOO_LARGE"
 
 
 def test_ping_after_malformed_still_works(ipc_bridge) -> None:
     ipc_bridge.send({"id": "p0", "command": "ping", "args": {}})
-    assert ipc_bridge.readline_obj()["payload"]["ok"] is True
+    assert ipc_bridge.read_until(lambda m: m.get("id") == "p0")["payload"]["ok"] is True
     ipc_bridge.proc.stdin.write("{not json\n")
     ipc_bridge.proc.stdin.flush()
-    assert ipc_bridge.readline_obj()["type"] == "error"
+    assert ipc_bridge.read_until(lambda m: m.get("type") == "error")["type"] == "error"
     ipc_bridge.send({"id": "p1", "command": "ping", "args": {}})
-    last = ipc_bridge.readline_obj()
+    last = ipc_bridge.read_until(lambda m: m.get("id") == "p1")
     assert last["id"] == "p1"
     assert last["payload"]["ok"] is True
 

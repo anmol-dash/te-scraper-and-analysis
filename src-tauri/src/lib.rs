@@ -1,4 +1,5 @@
 mod commands;
+mod github_report;
 mod python_bridge;
 
 use tauri::{Manager, RunEvent};
@@ -27,6 +28,7 @@ pub fn run() {
             commands::py_setup,
             commands::app_exit,
             commands::app_relaunch,
+            commands::app_report_fatal,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
