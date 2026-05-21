@@ -29,6 +29,7 @@ HPC submission (Slurm):
 import argparse
 import gzip
 import os
+import re
 import sys
 import time
 import warnings
@@ -40,6 +41,8 @@ warnings.filterwarnings("ignore")
 
 import numpy as np
 import pandas as pd
+# requests, threading, and ThreadPoolExecutor are imported lazily inside
+# fetch_sequences_ucsc() so the HPC can run te_prep.py without them.
 
 # Optional pysam for fast indexed FASTA access
 try:
@@ -74,6 +77,15 @@ RMSK_URLS = {
     "mm39": "https://hgdownload.soe.ucsc.edu/goldenPath/mm39/database/rmsk.txt.gz",
 }
 
+# Dfam REST API base — per-family annotations, no bulk file download needed
+DFAM_API_BASE = "https://www.dfam.org/api"
+
+# Assembly ID mapping for the Dfam API
+DFAM_ASSEMBLY_IDS = {
+    "hg38": "hg38", "hg19": "hg19",
+    "mm10": "mm10", "mm39": "mm39",
+}
+
 # rmsk.txt.gz column indices (tab-separated, no header)
 COL_CHROM = 5; COL_START = 6; COL_END = 7; COL_STRAND = 9
 COL_REPNAME = 10; COL_REPCLASS = 11; COL_REPFAM = 12
@@ -102,8 +114,13 @@ Examples:
     )
     p.add_argument("family", nargs="?", default=None,
                    help="TE repName (e.g. AluSz, B2_Mm2, L1HS)")
-    p.add_argument("build",  nargs="?", default="hg38",
+    p.add_argument("build",  nargs="?", default=None,
                    help="Genome build: hg38, hg19, mm10, mm39 (default: hg38)")
+    # Named-flag aliases so the GUI can pass --family / --build explicitly
+    p.add_argument("--family", dest="family_flag", default=None,
+                   help="TE repName (named-flag form; overrides positional)")
+    p.add_argument("--build",  dest="build_flag",  default=None,
+                   help="Genome build (named-flag form; overrides positional)")
     p.add_argument("--download",  metavar="BUILD",
                    help="Download rmsk.txt.gz for BUILD (run on login node with internet)")
     p.add_argument("--base-dir",  default=_DEFAULT_BASE,
@@ -120,6 +137,14 @@ Examples:
                    help="Search for repNames containing this substring")
     p.add_argument("--no-filter-chroms", action="store_true",
                    help="Include non-standard chromosomes (default: standard only)")
+    p.add_argument("--count-only", action="store_true",
+                   help="Print locus count for the family and exit (no sequence extraction)")
+    p.add_argument("--source", choices=["rmsk", "dfam"], default="rmsk",
+                   help="Annotation source: rmsk (UCSC RepeatMasker) or dfam (Dfam nrph hits) [default: rmsk]")
+    p.add_argument("--dfam-url", default=None,
+                   help="Override Dfam download URL for this build")
+    p.add_argument("--fetch-workers", type=int, default=10,
+                   help="Parallel UCSC fetch workers when no genome FASTA is available (default: 10)")
     return p.parse_args()
 
 
@@ -225,6 +250,22 @@ def parse_rmsk_family(rmsk_path, family, std_chroms=None):
     return hits
 
 
+def count_family_rmsk(rmsk_path, family, std_chroms=None):
+    """Stream rmsk.txt.gz and return the hit count without building a list."""
+    count = 0
+    with gzip.open(rmsk_path, "rt") as f:
+        for line in f:
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) < 13:
+                continue
+            if fields[COL_REPNAME] != family:
+                continue
+            if std_chroms and fields[COL_CHROM] not in std_chroms:
+                continue
+            count += 1
+    return count
+
+
 def list_families(rmsk_path, search=None):
     """Print top repNames and their counts."""
     counts = Counter()
@@ -249,6 +290,157 @@ def list_families(rmsk_path, search=None):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# DFAM
+# ═══════════════════════════════════════════════════════════════════════════
+
+## Dfam uses a REST API per family — no bulk file download needed.
+## API: GET /api/families/{accession}/assemblies/{assembly}/annotations?nrph=true
+## Returns a gzip-compressed TSV with columns:
+##   #sequence name | model accession | model name | bit score | e-value |
+##   hmm start | hmm end | hmm length | strand |
+##   alignment start | alignment end | envelope start | envelope end | sequence length
+
+# Dfam REST API column indices (0-based, fixed format)
+_DFAM_COL_CHROM  = 0   # #sequence name
+_DFAM_COL_FAMILY = 2   # model name
+_DFAM_COL_STRAND = 8   # strand
+_DFAM_COL_START  = 9   # alignment start
+_DFAM_COL_END    = 10  # alignment end
+
+
+def _dfam_lookup_accession(family_name):
+    """Return Dfam accession for a family name via the REST API."""
+    import urllib.request, urllib.parse, json as _json
+    url = (f"{DFAM_API_BASE}/families"
+           f"?name_prefix={urllib.parse.quote(family_name)}&limit=10")
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = _json.loads(resp.read())
+        for entry in data.get("results", []):
+            if entry.get("name") == family_name:
+                return entry["accession"]
+        # Fallback: return first result if exact match not found
+        results = data.get("results", [])
+        if results:
+            print(f"  WARNING: exact match for '{family_name}' not found; "
+                  f"using closest: {results[0]['name']} ({results[0]['accession']})", flush=True)
+            return results[0]["accession"]
+        return None
+    except Exception as e:
+        print(f"FATAL: Dfam API lookup failed for '{family_name}': {e}", flush=True)
+        sys.exit(1)
+
+
+def _dfam_fetch_raw(family_name, build):
+    """Fetch per-family Dfam annotations from the REST API.
+    Returns the raw gzip bytes (the API returns a gzip-compressed TSV).
+    """
+    import urllib.request, io as _io
+    accession = _dfam_lookup_accession(family_name)
+    if not accession:
+        print(f"FATAL: Family '{family_name}' not found in Dfam.", flush=True)
+        sys.exit(1)
+
+    assembly = DFAM_ASSEMBLY_IDS.get(build, build)
+    url = (f"{DFAM_API_BASE}/families/{accession}"
+           f"/assemblies/{assembly}/annotations?nrph=true")
+    print(f"  Dfam REST API: {url}", flush=True)
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            raw = resp.read()
+        return raw
+    except Exception as e:
+        print(f"FATAL: Dfam API fetch failed: {e}", flush=True)
+        sys.exit(1)
+
+
+def _dfam_open_raw(raw_bytes):
+    """Open raw gzip bytes from the Dfam API as a text stream."""
+    import io as _io
+    return gzip.open(_io.BytesIO(raw_bytes), "rt")
+
+
+def download_dfam(build, rmsk_dir, url_override=None):
+    """Cache per-family Dfam data is not applicable for bulk download.
+    This stub exists for CLI compatibility; actual data is fetched per-family via API.
+    """
+    print("  NOTE: Dfam uses a per-family REST API — no bulk file to pre-download.")
+    print("  Run  python te_prep.py <family> <build> --source dfam  to fetch and process.")
+
+
+def get_dfam_path(build, rmsk_dir):
+    """Stub for CLI compatibility — Dfam data is fetched live from the REST API."""
+    return None
+
+
+def parse_dfam_family(_, family, build="hg38", std_chroms=None):
+    """Fetch family hits from the Dfam REST API and return list of dicts."""
+    t0 = time.time()
+    print(f"  Fetching Dfam hits for '{family}' in {build} via REST API…", flush=True)
+    raw = _dfam_fetch_raw(family, build)
+    hits = []
+    n_lines = 0
+    with _dfam_open_raw(raw) as f:
+        for line in f:
+            if line.startswith("#"):
+                continue
+            n_lines += 1
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) <= _DFAM_COL_END:
+                continue
+            chrom = fields[_DFAM_COL_CHROM]
+            if std_chroms and chrom not in std_chroms:
+                continue
+            start = int(fields[_DFAM_COL_START])
+            end   = int(fields[_DFAM_COL_END])
+            # Dfam reports - strand with start > end; normalise
+            if start > end:
+                start, end = end, start
+            hits.append({
+                "Chromosome": chrom,
+                "Start":      start,
+                "Stop":       end,
+                "strand":     fields[_DFAM_COL_STRAND],
+                "repName":    fields[_DFAM_COL_FAMILY],
+                "repClass":   "",
+                "repFamily":  "",
+                "swScore":    0,
+                "milliDiv":   0,
+            })
+            if len(hits) % 10_000 == 0:
+                print(f"    {len(hits):,} hits so far...", flush=True)
+    print(f"  {n_lines:,} data lines → {len(hits):,} hits [{time.time()-t0:.1f}s]")
+    return hits
+
+
+def count_family_dfam(_, family, build="hg38", std_chroms=None):
+    """Count Dfam hits for *family* via the REST API."""
+    t0 = time.time()
+    print(f"  Fetching Dfam hits for '{family}' in {build} via REST API…", flush=True)
+    raw = _dfam_fetch_raw(family, build)
+    count = 0
+    with _dfam_open_raw(raw) as f:
+        for line in f:
+            if line.startswith("#"):
+                continue
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) <= _DFAM_COL_CHROM:
+                continue
+            if std_chroms and fields[_DFAM_COL_CHROM] not in std_chroms:
+                continue
+            count += 1
+    return count
+
+
+def list_families_dfam(_, search=None):
+    """Dfam family search is not supported via the bulk-file path; use the API directly."""
+    print("  Dfam family listing requires the REST API — use --search with --source rmsk,")
+    print("  or visit https://www.dfam.org to browse families.")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # SEQUENCE EXTRACTION
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -269,11 +461,75 @@ def _row_strand(row):
         text = str(row.get(col)).strip()
         if not text:
             continue
-        import re
         m = re.search(r"(?:^|[|:,\s])([+-])$", text)
         if m:
             return m.group(1)
     return "+"
+
+
+def _orient_sequence(seq, row):
+    seq = str(seq).upper()
+    return _revcomp(seq) if _row_strand(row) == "-" else seq
+
+
+def _ucsc_api_url(chrom, start, stop, assembly):
+    return (
+        f"https://api.genome.ucsc.edu/getData/sequence?"
+        f"genome={assembly};chrom={chrom};start={int(start)};end={int(stop)}"
+    )
+
+
+def fetch_sequences_ucsc(df, assembly="hg38", n_workers=10):
+    """Fetch sequences from UCSC API in parallel. Returns (seqs, urls) lists."""
+    import threading
+    import requests
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    n = len(df)
+    seqs = [None] * n
+    urls = [""] * n
+    failed = []
+    sem = threading.Semaphore(n_workers)
+
+    def _fetch_one(i):
+        row   = df.iloc[i]
+        chrom = str(row.get("chr", row.get("Chromosome", "")))
+        start = int(row.get("start", row.get("Start", 0)))
+        stop  = int(row.get("stop",  row.get("Stop",  0)))
+        url   = _ucsc_api_url(chrom, start, stop, assembly)
+        for attempt in range(3):
+            try:
+                with sem:
+                    r = requests.get(url, timeout=30)
+                    r.raise_for_status()
+                    res = r.json()
+                    if "error" in res:
+                        raise ValueError(res["error"])
+                    return i, _orient_sequence(res["dna"], row), url
+            except Exception:
+                if attempt == 2:
+                    return i, None, url
+                time.sleep(0.5 * (attempt + 1))
+        return i, None, url
+
+    print(f"  Fetching {n:,} sequences from UCSC ({n_workers} workers, assembly={assembly})...")
+    done = 0
+    with ThreadPoolExecutor(max_workers=n_workers) as exe:
+        futures = {exe.submit(_fetch_one, i): i for i in range(n)}
+        for fut in as_completed(futures):
+            i, seq, url = fut.result()
+            urls[i] = url
+            if seq is None:
+                failed.append(i)
+                seqs[i] = "N" * 100
+            else:
+                seqs[i] = seq
+            done += 1
+            if done % max(1, n // 20) == 0 or done == n:
+                print(f"    {done:,}/{n:,}", flush=True)
+
+    if failed:
+        print(f"  WARNING: {len(failed)} sequences failed to fetch (filled with Ns)")
+    return seqs, urls
 
 
 def extract_sequences_pysam(genome_fa, df):
@@ -360,71 +616,120 @@ def extract_sequences(genome_fa, df):
 def main():
     args = parse_args()
 
+    # Named flags (--family / --build) override positional args when provided.
+    if args.family_flag:
+        args.family = args.family_flag
+    if args.build_flag:
+        args.build = args.build_flag
+    if not args.build:
+        args.build = "hg38"
+
     # ── Download mode ───────────────────────────────────────────────────────
     if args.download:
-        download_rmsk(args.download, args.rmsk_dir)
+        if args.source == "dfam":
+            download_dfam(args.download, args.rmsk_dir, url_override=args.dfam_url)
+        else:
+            download_rmsk(args.download, args.rmsk_dir)
         return
 
     # ── List / search mode ──────────────────────────────────────────────────
     if args.list_families or args.search:
-        build = args.build or "hg38"
-        rmsk_path = get_rmsk_path(build, args.rmsk_dir)
-        list_families(rmsk_path, search=args.search)
+        build = args.build
+        if args.source == "dfam":
+            list_families_dfam(None, search=args.search)
+        else:
+            rmsk_path = get_rmsk_path(build, args.rmsk_dir)
+            list_families(rmsk_path, search=args.search)
         return
 
     # ── Normal mode ─────────────────────────────────────────────────────────
     if not args.family:
         print("Usage: python te_prep.py <family> <build> [options]")
         print("       python te_prep.py --download hg38")
+        print("       python te_prep.py --download hg38 --source dfam")
         print("       python te_prep.py --list-families --build hg38")
         sys.exit(1)
 
     family = args.family
     build  = args.build
+    source = args.source
 
-    # Resolve genome FASTA
+    std_chroms = None
+    if not args.no_filter_chroms:
+        std_chroms = STD_CHROMS_HUMAN if build.startswith("hg") else STD_CHROMS_MOUSE
+
+    # ── Count-only mode ─────────────────────────────────────────────────────
+    if args.count_only:
+        print(
+            f"[COUNT-ONLY] family={family}  build={build}  source={source}"
+            f"  rmsk_dir={args.rmsk_dir}  chroms={'std' if std_chroms else 'all'}",
+            flush=True,
+        )
+        if source == "dfam":
+            t0 = time.time()
+            count = count_family_dfam(None, family, build=build, std_chroms=std_chroms)
+        else:
+            rmsk_candidate = Path(args.rmsk_dir) / f"rmsk_{build}.txt.gz"
+            if not rmsk_candidate.exists():
+                print(f"  rmsk_{build}.txt.gz not found — downloading to {args.rmsk_dir} (~150 MB, one-time)…", flush=True)
+                download_rmsk(build, args.rmsk_dir)
+            rmsk_path = get_rmsk_path(build, args.rmsk_dir)
+            t0 = time.time()
+            count = count_family_rmsk(rmsk_path, family, std_chroms)
+        print(f"Locus count for '{family}' ({build}, {source}): {count:,}  [{time.time()-t0:.1f}s]")
+        return
+
+    # Resolve genome FASTA — optional; UCSC API is the fallback
     genome_fa = (args.genome_fa
                  or GENOME_FA.get(build, "")
                  or os.environ.get(f"TE_{build.upper()}_FA", ""))
+    use_ucsc = False
+    if genome_fa and not os.path.exists(genome_fa):
+        print(f"WARNING: Genome FASTA not found at {genome_fa} — falling back to UCSC API")
+        genome_fa = ""
     if not genome_fa:
-        print(f"FATAL: Genome FASTA not specified for {build}.")
-        print(f"  Use --genome-fa /path/to/{build}.fa")
-        print(f"  Or set environment variable TE_{build.upper()}_FA=/path/to/{build}.fa")
-        sys.exit(1)
-    if not os.path.exists(genome_fa):
-        print(f"FATAL: Genome FASTA not found: {genome_fa}")
-        sys.exit(1)
+        print(f"  No local genome FASTA — sequences will be fetched from UCSC API (assembly={build})")
+        use_ucsc = True
 
-    BASE_DIR = Path(args.base_dir) / f"{family}_analysis_results"
+    # Absolute output path: if --base-dir starts with "/" use it directly as
+    # BASE_DIR; otherwise treat it as a parent and append the family subdir.
+    _base = Path(args.base_dir)
+    BASE_DIR = _base if _base.is_absolute() else _base / f"{family}_analysis_results"
     BASE_DIR.mkdir(parents=True, exist_ok=True)
     CLUSTERED_PATH = BASE_DIR / "clustered_data.csv"
+
+    # Annotation path (only for rmsk; dfam uses REST API)
+    ann_path = None if source == "dfam" else get_rmsk_path(build, args.rmsk_dir)
 
     print("=" * 60)
     print("TE Family Data Prep")
     print(f"  Family:    {family}")
     print(f"  Build:     {build}")
-    print(f"  Genome FA: {genome_fa}")
-    print(f"  Output:    {BASE_DIR}")
+    print(f"  Source:    {source}")
+    print(f"  Input:     {Path(ann_path).resolve() if ann_path else 'Dfam REST API'}")
+    print(f"  Genome FA: {genome_fa or '(none — UCSC API fallback)'}")
+    print(f"  Output:    {BASE_DIR.resolve()}")
     print(f"  Date:      {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
 
-    rmsk_path = get_rmsk_path(build, args.rmsk_dir)
+    # ── Step 1: Parse annotation source for coordinates ─────────────────────
+    src_label = "RepeatMasker" if source == "rmsk" else "Dfam"
+    print(f"\n{'='*60}\nSTEP 1: Fetch {src_label} coordinates\n{'='*60}")
 
-    # ── Step 1: Parse rmsk ─────────────────────────────────────────────────
-    print(f"\n{'='*60}\nSTEP 1: Parse RepeatMasker table\n{'='*60}")
-    std_chroms = None
-    if not args.no_filter_chroms:
-        std_chroms = STD_CHROMS_HUMAN if build.startswith("hg") else STD_CHROMS_MOUSE
-
-    hits = parse_rmsk_family(rmsk_path, family, std_chroms)
+    if source == "dfam":
+        hits = parse_dfam_family(None, family, build=build, std_chroms=std_chroms)
+    else:
+        hits = parse_rmsk_family(ann_path, family, std_chroms)
 
     if not hits:
-        print(f"\nFATAL: No loci for repName='{family}' in {build}.")
-        print(f"repName is case-sensitive. To search:  python te_prep.py --search {family.lower()} --build {build}")
+        src_hint = "dfam" if source == "dfam" else "rmsk"
+        print(f"\nFATAL: No loci for family='{family}' in {build} ({source}).")
+        print(f"Name is case-sensitive. To search:  python te_prep.py --search {family.lower()} --build {build} --source {src_hint}")
         sys.exit(1)
 
     df = pd.DataFrame(hits).sort_values(["Chromosome", "Start"]).reset_index(drop=True)
     print(f"  {len(df):,} loci across {df['Chromosome'].nunique()} chromosomes")
+    print(f"  Coordinates source: {src_label}")
 
     if args.max_loci and len(df) > args.max_loci:
         print(f"  Capping to {args.max_loci} (--max-loci)")
@@ -440,7 +745,6 @@ def main():
         df["swScore"].astype(str) + "|" +
         df["strand"]
     )
-    # Alias so query.py recognizes it
     df["TE_name"] = df["TE_ID"]
     df["chr"]   = df["Chromosome"]
     df["start"] = df["Start"]
@@ -448,9 +752,18 @@ def main():
     print(f"  Example ID: {df['TE_ID'].iloc[0]}")
 
     # ── Step 3: Sequences ──────────────────────────────────────────────────
-    print(f"\n{'='*60}\nSTEP 3: Extract sequences\n{'='*60}")
-    seqs = extract_sequences(genome_fa, df)
-    df["Seq"] = seqs
+    if use_ucsc:
+        print(f"\n{'='*60}\nSTEP 3: Fetch sequences from UCSC API\n{'='*60}")
+        print(f"  Coordinates sourced from {src_label}; sequences fetched from UCSC (genome={build})")
+        seqs, ucsc_urls = fetch_sequences_ucsc(df, assembly=build, n_workers=args.fetch_workers)
+        df["Seq"] = seqs
+        df["ucsc_url"] = ucsc_urls
+    else:
+        print(f"\n{'='*60}\nSTEP 3: Extract sequences from local FASTA\n{'='*60}")
+        seqs = extract_sequences(genome_fa, df)
+        df["Seq"] = seqs
+        df["ucsc_url"] = ""
+
     before = len(df)
     df = df[df["Seq"].str.len() > 0].reset_index(drop=True)
     if len(df) < before:
@@ -472,7 +785,7 @@ def main():
     keep = [c for c in ["Chromosome", "Start", "Stop", "chr", "start", "stop",
                          "Seq", "TE_ID", "TE_name", "strand",
                          "repName", "repClass", "repFamily",
-                         "swScore", "milliDiv", "Length", "GC_Content"]
+                         "swScore", "milliDiv", "Length", "GC_Content", "ucsc_url"]
              if c in df.columns]
     df[keep].to_csv(CLUSTERED_PATH, index=False)
     print(f"  Saved: {CLUSTERED_PATH}")

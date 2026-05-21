@@ -241,7 +241,37 @@ def clustering_analysis(df, kmer=6, min_cluster_size=None, out_dir=None,
         df[coord_cols].to_csv(coords_path, index=False)
         _pp(f"    Coordinates → {coords_path}")
 
+        _write_cluster_summary(df, Path(out_dir))
+
     return df, umap_labels
+
+
+def _write_cluster_summary(df, out_dir: Path) -> None:
+    """Write cluster_summary.csv with per-cluster size and strand breakdown."""
+    import pandas as _pd
+
+    strand_col = next((c for c in ("strand", "Strand") if c in df.columns), None)
+    rows = []
+    for cluster_id in sorted(df["Cluster"].unique()):
+        sub = df[df["Cluster"] == cluster_id]
+        n = len(sub)
+        if strand_col is not None:
+            n_plus  = int((sub[strand_col].astype(str).str.strip() == "+").sum())
+            n_minus = int((sub[strand_col].astype(str).str.strip() == "-").sum())
+        else:
+            n_plus = n_minus = 0
+        rows.append({
+            "cluster":   cluster_id,
+            "n_total":   n,
+            "n_plus":    n_plus,
+            "n_minus":   n_minus,
+            "pct_plus":  round(100.0 * n_plus  / n, 2) if n else 0.0,
+            "pct_minus": round(100.0 * n_minus / n, 2) if n else 0.0,
+        })
+
+    summary_path = out_dir / "cluster_summary.csv"
+    _pd.DataFrame(rows).to_csv(summary_path, index=False)
+    _pp(f"    Cluster summary → {summary_path}")
 
 
 def _save_clustering_viz(df, pca_emb, pca_lbl, umap_emb, umap_lbl,

@@ -137,7 +137,7 @@ function LocalPanel() {
 // ── HPC panel ────────────────────────────────────────────────────────────────
 
 type StepId =
-  | "rmsk-query" | "prep" | "clustering" | "alignment"
+  | "rmsk-query" | "dfam-count" | "prep" | "clustering" | "alignment"
   | "motif" | "go" | "expression" | "enrichment"
   | "batch" | "job-status" | "job-watch" | "retrieve";
 
@@ -151,8 +151,9 @@ const STEP_GROUPS: { group: string; steps: StepDef[] }[] = [
   {
     group: "Data prep",
     steps: [
-      { id: "rmsk-query", label: "RMSK locus count", files: ["te_prep.py"] },
-      { id: "prep",       label: "Download + extract sequences", files: ["te_prep.py"] },
+      { id: "rmsk-query",  label: "RMSK locus count",           files: ["te_prep.py"] },
+      { id: "dfam-count",  label: "Dfam locus count",           files: ["te_prep.py"] },
+      { id: "prep",        label: "Download + extract sequences", files: ["te_prep.py"] },
     ],
   },
   {
@@ -203,9 +204,11 @@ function buildCommand(step: StepId, f: FieldState, hpcHome: string, scheduler: s
   const isLsf = scheduler.toUpperCase() === "LSF";
   switch (step) {
     case "rmsk-query":
-      return `${cd} python te_prep.py --build ${f.assembly} --family ${f.family || "FAMILY"} --count-only`;
+      return `${cd} python te_prep.py --build ${f.assembly} --family ${f.family || "FAMILY"} --count-only --source rmsk --rmsk-dir ${hpcHome}/rmsk`;
+    case "dfam-count":
+      return `${cd} python te_prep.py --build ${f.assembly} --family ${f.family || "FAMILY"} --count-only --source dfam --rmsk-dir ${hpcHome}/rmsk`;
     case "prep": {
-      let cmd = `${cd} python te_prep.py --build ${f.assembly} --family ${f.family || "FAMILY"}`;
+      let cmd = `${cd} python te_prep.py --build ${f.assembly} --family ${f.family || "FAMILY"} --source ${f.annotSource}`;
       if (f.genome.trim()) cmd += ` --genome-fa ${f.genome.trim()}`;
       cmd += ` --base-dir ${resolvePath(f.outDir, "te_data")}`;
       return cmd;
@@ -348,6 +351,8 @@ interface FieldState {
   minClusterSize: string;
   minSamples: string;
   pThreshold: string;
+  // Annotation source
+  annotSource: "rmsk" | "dfam";
   // Job management
   jobId: string;
   localDir: string;
@@ -367,6 +372,7 @@ const defaultFields: FieldState = {
   primerTimeout: "120", fetchWorkers: "10", pcaDims: "40", nEpochs: "120",
   randomState: "0", nNeighbors: "30", minDist: "0.0", minClusterSize: "", minSamples: "7",
   pThreshold: "0.05",
+  annotSource: "rmsk",
   jobId: "", localDir: "./hpc_results", remoteDir: "",
 };
 
@@ -380,6 +386,7 @@ function HpcPanel() {
   const [step, setStep] = useState<StepId>("rmsk-query");
   const [fields, setFields] = useState<FieldState>(defaultFields);
   const [remoteCmd, setRemoteCmd] = useState("");
+  const [countResult, setCountResult] = useState<{ family: string; build: string; source: string; count: string } | null>(null);
 
   const hpcConnected = useAppStore((s) => s.hpcConnected);
   const hpcHost = useAppStore((s) => s.hpcHost);
@@ -406,6 +413,7 @@ function HpcPanel() {
   useEffect(() => {
     const auto = buildCommand(step, fields, hpcHome || "~", hpcScheduler);
     setRemoteCmd(auto);
+    setCountResult(null);
   }, [step, fields, hpcHome, hpcScheduler]);
 
   // Keep jobId field in sync with last submitted job
@@ -469,7 +477,18 @@ function HpcPanel() {
       if (stepDef && stepDef.files.length > 0) {
         await pyRun(["hpc-upload", ...stepDef.files]);
       }
-      await pyRun(["hpc-run", "--cmd", remoteCmd.trim(), "--timeout", "3600"]);
+      const isCountStep = step === "rmsk-query" || step === "dfam-count";
+      if (isCountStep) {
+        const raw = await pyRunFull(["hpc-run", "--cmd", remoteCmd.trim(), "--timeout", "3600"]);
+        const stdout: string = (raw.result as Record<string, string> | undefined)?.stdout ?? "";
+        // "Locus count for 'FAMILY' (BUILD, SOURCE): N,NNN  [Xs]"
+        const m = stdout.match(/Locus count for '([^']+)' \(([^,]+), ([^)]+)\):\s*([\d,]+)/);
+        if (m) {
+          setCountResult({ family: m[1], build: m[2], source: m[3], count: m[4] });
+        }
+      } else {
+        await pyRun(["hpc-run", "--cmd", remoteCmd.trim(), "--timeout", "3600"]);
+      }
       finishRun("done");
     } catch (e) {
       pushToast(e instanceof Error ? e.message : String(e));
@@ -514,6 +533,7 @@ function HpcPanel() {
       skip_primers: fields.skipPrimers ? 1 : 0,
       skip_go: fields.skipGo ? 1 : 0,
       skip_tsne: fields.skipTsne ? 1 : 0,
+      annot_source: fields.annotSource,
     };
     try {
       beginRun(globalThis.crypto.randomUUID());
@@ -642,7 +662,7 @@ function HpcPanel() {
         {/* ── Step-specific fields ── */}
 
         {/* Shared: family */}
-        {(["rmsk-query","prep","clustering","alignment","expression","enrichment","batch"] as StepId[]).includes(step) && (
+        {(["rmsk-query","dfam-count","prep","clustering","alignment","expression","enrichment","batch"] as StepId[]).includes(step) && (
           <Field label="TE Family *" hint="e.g. HERVK, THE1D-int">
             <input className={input} value={fields.family}
               onChange={(e) => set("family", e.target.value)}
@@ -670,7 +690,7 @@ function HpcPanel() {
         )}
 
         {/* Shared: assembly */}
-        {(["rmsk-query","prep","clustering","alignment","motif","go","expression","enrichment","batch"] as StepId[]).includes(step) && (
+        {(["rmsk-query","dfam-count","prep","clustering","alignment","motif","go","expression","enrichment","batch"] as StepId[]).includes(step) && (
           <Field label="Assembly / build">
             <select className={input} value={fields.assembly}
               onChange={(e) => set("assembly", e.target.value)}
@@ -679,6 +699,18 @@ function HpcPanel() {
               <option value="hg19">hg19 (human)</option>
               <option value="mm10">mm10 (mouse)</option>
               <option value="mm39">mm39 (mouse)</option>
+            </select>
+          </Field>
+        )}
+
+        {/* Annotation source — prep and full-pipeline batch */}
+        {(["prep","batch"] as StepId[]).includes(step) && (
+          <Field label="Annotation source" hint="RMSK = UCSC RepeatMasker; Dfam = Dfam nrph hits">
+            <select className={input} value={fields.annotSource}
+              onChange={(e) => set("annotSource", e.target.value as "rmsk" | "dfam")}
+              disabled={busy}>
+              <option value="rmsk">RMSK (UCSC RepeatMasker)</option>
+              <option value="dfam">Dfam (nrph hits)</option>
             </select>
           </Field>
         )}
@@ -1054,6 +1086,19 @@ function HpcPanel() {
           </Field>
         )}
       </div>
+
+      {/* Count result box */}
+      {countResult && (["rmsk-query","dfam-count"] as StepId[]).includes(step) && (
+        <div className="mx-3 mb-2 rounded-md border border-[var(--app-accent)]/40 bg-[var(--app-accent)]/5 p-3 text-xs space-y-1">
+          <p className="font-semibold text-[var(--app-text)]">
+            {countResult.source === "dfam" ? "Dfam" : "RepeatMasker"} Query Result
+          </p>
+          <p className="text-[var(--app-muted)]">Family: <span className="text-[var(--app-text)] font-medium">{countResult.family}</span></p>
+          <p className="text-[var(--app-muted)]">Assembly: <span className="text-[var(--app-text)] font-medium">{countResult.build}</span></p>
+          <p className="text-[var(--app-muted)]">Source: <span className="text-[var(--app-text)] font-medium">{countResult.source}</span></p>
+          <p className="text-base font-bold text-[var(--app-accent)]">{countResult.count} loci</p>
+        </div>
+      )}
 
       {/* Action buttons */}
       <div className="border-t border-[var(--app-border)] p-3 space-y-2">

@@ -422,6 +422,13 @@ def _check_release_update(repo: str) -> None:
 
 def _startup_sequence() -> None:
     """Run setup → script update → release check sequentially."""
+    from yourtool.cli import _REPO_ROOT
+    _setup_log(
+        f"[SIDECAR] v{_TOOL_VERSION}"
+        f"  frozen={getattr(sys, 'frozen', False)}"
+        f"  REPO_ROOT={_REPO_ROOT}"
+        f"  scripts_dir={_GAMECA_DIR / 'scripts'}"
+    )
     _run_setup_background()
     _run_update_check()
     if _has_internet():

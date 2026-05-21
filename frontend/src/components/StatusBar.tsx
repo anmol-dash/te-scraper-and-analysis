@@ -69,14 +69,21 @@ export default function StatusBar() {
 
   return (
     <header className="flex shrink-0 items-center gap-4 border-b border-[var(--app-border)] bg-[var(--app-panel)] px-4 py-2">
-      <pre className="shrink-0 font-mono text-[4.5px] leading-[1.15] text-[var(--app-accent)] select-none">{
+      <div className="flex shrink-0 flex-col items-start">
+        <pre className="font-mono text-[4.5px] leading-[1.15] text-[var(--app-accent)] select-none">{
 `  ██████╗  █████╗ ███╗   ███╗███████╗ ██████╗  █████╗
  ██╔════╝ ██╔══██╗████╗ ████║██╔════╝██╔════╝ ██╔══██╗
  ██║  ███╗███████║██╔████╔██║█████╗  ██║      ███████║
  ██║   ██║██╔══██║██║╚██╔╝██║██╔══╝  ██║      ██╔══██║
  ╚██████╔╝██║  ██║██║ ╚═╝ ██║███████╗╚██████╗ ██║  ██║
   ╚═════╝ ╚═╝  ╚═╝╚═╝     ╚═╝╚══════╝ ╚═════╝ ╚═╝  ╚═╝`
-      }</pre>
+        }</pre>
+        {version ? (
+          <span className="pl-px font-mono text-[8px] tracking-widest text-[var(--app-muted)] select-none">
+            v{version}
+          </span>
+        ) : null}
+      </div>
       <div className="flex items-center gap-2 text-sm">
         <span
           className="inline-flex h-2.5 w-2.5 rounded-full"
@@ -100,9 +107,6 @@ export default function StatusBar() {
         >
           {pingOk === null ? "ping:pending" : pingOk ? "ping:ok" : "ping:fail"}
         </span>
-        {version ? (
-          <span className="text-xs text-[var(--app-muted)]">v{version}</span>
-        ) : null}
       </div>
 
       <div className="text-sm font-medium">{runLabel}</div>

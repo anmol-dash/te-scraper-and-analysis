@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { getVersion } from "@tauri-apps/api/app";
 import { appExit, pySetup } from "@/lib/ipc";
 import { useAppStore } from "@/store/appStore";
 
@@ -24,7 +25,12 @@ export default function SetupScreen() {
   const error    = useAppStore((s) => s.setupError);
   const logs     = useAppStore((s) => s.setupLogs);
 
+  const [appVersion, setAppVersion] = useState("");
   const [logsOpen, setLogsOpen] = useState(true);
+
+  useEffect(() => {
+    void getVersion().then(setAppVersion);
+  }, []);
   const logEndRef = useRef<HTMLDivElement>(null);
 
   // Instantly scroll to the latest log line whenever new lines arrive
@@ -48,9 +54,16 @@ export default function SetupScreen() {
   return (
     <div className="fixed inset-0 z-40 flex flex-col items-center justify-center gap-6 bg-[var(--app-bg)] px-6">
       {/* ASCII art */}
-      <pre className="select-none font-mono text-[5.5px] leading-[1.2] text-[var(--app-accent)]">
-        {ART}
-      </pre>
+      <div className="flex flex-col items-center gap-1">
+        <pre className="select-none font-mono text-[5.5px] leading-[1.2] text-[var(--app-accent)]">
+          {ART}
+        </pre>
+        {appVersion && (
+          <span className="font-mono text-[9px] tracking-widest text-[var(--app-muted)] select-none">
+            v{appVersion}
+          </span>
+        )}
+      </div>
 
       <div className="flex w-full max-w-lg flex-col gap-4">
         {/* Phase label + current message */}

@@ -1,41 +1,127 @@
 # GAMECA — Gene Alignment, Motif, Expression & Clustering Analysis
 
-GAMECA is a modular transposable-element analysis pipeline (prepare → cluster → align → motif → GO → expression) with optional **LSF** and **Slurm** HPC integration. This repository ships the Python tooling plus a **Tauri** desktop shell that embeds the workflow behind a native UI and talks to a bundled Python worker over newline-delimited JSON (NDJSON) IPC.
+GAMECA is a modular transposable-element (TE) analysis pipeline — prepare → cluster → align → motif → GO → expression — with integrated **LSF** and **Slurm** HPC support. This repository ships the Python tooling plus a **Tauri** desktop shell that wraps the workflow in a native UI and communicates with a bundled Python sidecar over newline-delimited JSON (NDJSON) IPC.
 
-![Screenshot placeholder — replace with app window showing pipeline or dashboard](./docs/assets/screenshot-placeholder.png)
+Current version: **v0.4.8**
 
 ## Download
 
-Installers and checksums are published on GitHub Releases:
+Installers are published on GitHub Releases:
 
-- **Latest releases:** https://github.com/anmol-dash/te-scraper-and-analysis/releases  
-- Pick the artifact for your OS/architecture from the release assets.
+- **Latest release:** https://github.com/anmol-dash/te-scraper-and-analysis/releases
+- Pick the `.dmg` (macOS) artifact matching your architecture (`aarch64` for Apple Silicon, `x86_64` for Intel).
 
-## Key features
+## Features
 
-- **DAG-friendly pipeline:** Steps read/write CSV checkpoints so stages can rerun independently or swap implementations.
-- **HPC-aware:** SSH client (`hpc_client.py`) auto-detects LSF vs Slurm for batch submission and monitoring.
-- **Interactive launcher & dashboards:** Terminal UI (`ui.py`) and optional local clustering/results dashboards.
-- **Desktop shell:** Tauri wraps the webview UI, spawns a Python sidecar/worker, and streams logs/progress/cancellation over IPC (see [Architecture](docs/ARCHITECTURE.md)).
-- **Built-in updater:** Release artifacts can be wired to Tauri’s updater (signatures + public key — see [Troubleshooting](docs/TROUBLESHOOTING.md)).
+| Feature | Details |
+|---------|---------|
+| **Full TE pipeline** | k-mer → SVD → UMAP/t-SNE → HDBSCAN clustering; MAFFT alignment; JASPAR + Fisher motif enrichment; GO annotation; expression boxplots |
+| **HPC integration** | SSH client auto-detects LSF vs Slurm; uploads scripts, submits batch jobs, streams live output, retrieves results |
+| **Annotation sources** | **RMSK** (UCSC RepeatMasker) and **Dfam** (REST API — no bulk download required) for TE locus coordinates |
+| **Local mode** | Runs entirely on your Mac; sequences fetched from UCSC API when no genome FASTA is available |
+| **Desktop shell** | Tauri + React frontend; Python sidecar streams logs/progress/cancellation over IPC |
+| **Auto-update** | On launch, scripts update silently from the latest commit; app update prompts when a new GitHub Release is published |
+| **File browser** | Remote filesystem browser with sort-by-name/date, CSV table viewer, inline Plotly HTML visualisation |
+
+## Quick start
+
+1. Download and install `GAMECA_<version>_aarch64.dmg` from Releases.
+2. Launch GAMECA — first launch installs Python dependencies automatically (~2–3 min).
+3. Connect to your HPC cluster (SSH credentials) or run locally with **Local Pipeline**.
+4. Choose a pipeline step from the sidebar and hit **Run on Cluster**.
+
+### Locus count (before running the full pipeline)
+
+Use **RMSK locus count** or **Dfam locus count** in the *Data prep* step group to verify your family name and get the number of loci before committing to a full job.
+
+- RMSK: downloads `rmsk_<assembly>.txt.gz` (~150 MB, cached) to the HPC work dir on first run.
+- Dfam: hits the Dfam REST API per-family — no bulk file needed, result in seconds.
+
+## Pipeline steps
+
+```
+Data prep
+  RMSK locus count      – verify family name + locus count (RepeatMasker)
+  Dfam locus count      – same via Dfam REST API
+  Download + extract    – download rmsk/Dfam coords, extract sequences (UCSC API fallback)
+
+Core analysis
+  Clustering            – k-mer · SVD · UMAP · HDBSCAN  → cluster_summary.csv
+  Alignment             – MAFFT · CIAlign · consensus
+
+Enrichment
+  Motif                 – JASPAR + Fisher + HOMER
+  GO annotation         – mygene.info
+  Expression            – boxplots per cluster
+  Full enrichment       – motif + GO + expression combined
+
+Full pipeline
+  Batch job             – bsub / sbatch with all steps
+
+Results
+  Retrieve              – rsync results to local machine
+  File browser          – remote filesystem with sort, CSV viewer, HTML plots
+```
+
+## Repository layout
+
+```
+backend/            Python IPC sidecar (PyInstaller → pytool binary)
+  main.py           NDJSON server: routes commands, streams logs, manages setup/updates
+  yourtool/cli.py   CLI handlers: hpc-connect, hpc-upload, hpc-run, hpc-batch-submit …
+frontend/           React + Tailwind UI (Tauri webview)
+src-tauri/          Rust shell
+hpc_client.py       SSH/bsub/sbatch client
+te_prep.py          TE coordinate fetching (RMSK + Dfam REST API) + sequence extraction
+te_clustering.py    k-mer → SVD → UMAP/t-SNE → HDBSCAN
+te_alignment.py     MAFFT + CIAlign consensus
+te_motif.py         JASPAR motif enrichment
+te_go.py            GO annotation
+te_expression.py    Expression analysis
+te_enrichment.py    Full enrichment orchestrator
+ui.py               Terminal UI (HPC menu, rmsk/Dfam query, batch submit)
+query.py            Main pipeline driver (~2400 lines)
+```
 
 ## System requirements
 
 | Role | Requirement |
 |------|-------------|
-| **Desktop app** | OS-supported WebView stack per Tauri (varies by platform); bundled runtime included in installers where applicable. |
-| **Python tooling** | **Python 3.11+** for scripts and IPC backend (`backend/`). |
-| **Bioinformatics deps** | MAFFT, bedtools, optional conda packages — see `requirements.txt` and pipeline docs in-repo. |
+| Desktop app | macOS 12+ (arm64 or x86_64) |
+| Python tooling | Python 3.11+ (auto-installed in venv on first launch) |
+| HPC cluster | LSF (`bsub`) or Slurm (`sbatch`); SSH access from your Mac |
+| Bioinformatics | MAFFT, bedtools on the cluster; see `requirements.txt` |
 
-Developer toolchain (building from source): **Node 20+**, **pnpm**, **Rust stable**, platform kits for Tauri (Linux webkit2gtk, macOS Xcode CLT, Windows VS Build Tools). See [CONTRIBUTING.md](CONTRIBUTING.md).
+## Building from source
+
+```bash
+# Prerequisites: Node 20+, pnpm, Rust stable, Xcode CLT (macOS)
+pnpm install
+
+# Build the Python sidecar first
+cd backend
+pip install pyinstaller
+pyinstaller pyinstaller.spec --noconfirm
+cp dist/pytool ../src-tauri/binaries/pytool-aarch64-apple-darwin
+cd ..
+
+# Build the Tauri app
+pnpm tauri build
+# → src-tauri/target/release/bundle/dmg/GAMECA_<version>_aarch64.dmg
+```
+
+> **Note:** Always rebuild PyInstaller before `pnpm tauri build` if you changed any Python file. The sidecar binary must be copied into `src-tauri/binaries/` manually.
+
+## Auto-update behaviour
+
+- **Scripts** (`te_prep.py`, `hpc_client.py`, `ui.py`, etc.): updated silently from the latest commit on `main` every time the app launches.
+- **App binary**: when a new GitHub Release is published with a version tag higher than the running version, users see an in-app prompt to download and install the new DMG.
 
 ## Documentation
 
 | Doc | Contents |
 |-----|----------|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Stack diagram, IPC contracts, sidecar lifecycle, event flow, state ownership |
-| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Sidecar, PyInstaller, updater, macOS gatekeeper, SmartScreen |
-| [docs/ADDING_A_COMMAND.md](docs/ADDING_A_COMMAND.md) | End-to-end recipe: Python CLI → Rust command → TS IPC → UI |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Local dev, tests, branches, commits, PR checklist |
-
-Pipeline-oriented usage (Docker, CLI examples, scripts overview) remains available throughout the Python modules and historical README sections may be consolidated here over time; start from `ui.py --help` and `requirements.txt` for command-line workflows.
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | IPC contracts, sidecar lifecycle, event flow |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Sidecar, PyInstaller, macOS gatekeeper |
+| [docs/ADDING_A_COMMAND.md](docs/ADDING_A_COMMAND.md) | End-to-end: Python CLI → IPC → UI |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Dev setup, tests, PR checklist |

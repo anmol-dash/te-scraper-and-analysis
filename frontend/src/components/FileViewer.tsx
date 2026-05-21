@@ -1,5 +1,5 @@
 import { save } from "@tauri-apps/plugin-dialog";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { hpcListDir, hpcReadFile, hpcDownloadFile, hpcDownloadDir, type RemoteEntry } from "@/lib/ipc";
 import { useAppStore } from "@/store/appStore";
 
@@ -66,6 +66,26 @@ function ContextMenu({
         Download{menu.entry.is_dir ? " as .tar.gz" : ""}
       </button>
     </div>
+  );
+}
+
+// ── HTML frame (blob URL so WKWebView renders Plotly correctly) ───────────────
+
+function HtmlFrame({ html, title }: { html: string; title: string }) {
+  const blobUrl = useMemo(() => {
+    const blob = new Blob([html], { type: "text/html" });
+    return URL.createObjectURL(blob);
+  }, [html]);
+
+  useEffect(() => () => URL.revokeObjectURL(blobUrl), [blobUrl]);
+
+  return (
+    <iframe
+      src={blobUrl}
+      className="w-full border-0"
+      style={{ height: "calc(100vh - 120px)", minHeight: "480px" }}
+      title={title}
+    />
   );
 }
 
@@ -167,15 +187,7 @@ function ContentView({
           </table>
         )}
 
-        {file.type === "html" && (
-          <iframe
-            srcDoc={file.text}
-            sandbox="allow-scripts allow-same-origin allow-forms"
-            className="w-full border-0"
-            style={{ height: "calc(100vh - 120px)", minHeight: "480px" }}
-            title={file.name}
-          />
-        )}
+        {file.type === "html" && <HtmlFrame html={file.text ?? ""} title={file.name} />}
 
         {file.type === "text" && (
           <pre className="whitespace-pre-wrap break-words p-3 font-mono text-xs leading-relaxed">
@@ -192,6 +204,21 @@ function ContentView({
 
 // ── directory listing ─────────────────────────────────────────────────────────
 
+type SortField = "name" | "date";
+type SortDir   = "asc" | "desc";
+
+function sortEntries(entries: RemoteEntry[], field: SortField, dir: SortDir): RemoteEntry[] {
+  const dirs  = entries.filter((e) => e.is_dir);
+  const files = entries.filter((e) => !e.is_dir);
+  const cmp = (a: RemoteEntry, b: RemoteEntry) => {
+    const v = field === "name"
+      ? a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
+      : a.mtime - b.mtime;
+    return dir === "asc" ? v : -v;
+  };
+  return [...dirs.sort(cmp), ...files.sort(cmp)];
+}
+
 function DirList({
   entries,
   loading,
@@ -207,32 +234,81 @@ function DirList({
   onOpenFile: (entry: RemoteEntry) => void;
   onContextMenu: (e: React.MouseEvent, entry: RemoteEntry) => void;
 }) {
+  const [sortField, setSortField] = useState<SortField>("name");
+  const [sortDir,   setSortDir]   = useState<SortDir>("asc");
+
+  const toggleSort = (field: SortField) => {
+    if (sortField === field) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortField(field);
+      setSortDir(field === "date" ? "desc" : "asc");
+    }
+  };
+
+  const sorted = sortEntries(entries, sortField, sortDir);
+  const arrow  = (field: SortField) =>
+    sortField === field ? (sortDir === "asc" ? " ↑" : " ↓") : "";
+
   if (loading) {
     return <div className="flex flex-1 items-center justify-center text-xs text-[var(--app-muted)]">Loading…</div>;
   }
   if (error) {
     return <div className="p-3 text-xs text-red-500">{error}</div>;
   }
-  if (entries.length === 0) {
-    return <div className="p-3 text-xs text-[var(--app-muted)]">Empty directory</div>;
-  }
+
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto">
-      {entries.map((e) => (
+    <div className="flex min-h-0 flex-1 flex-col">
+      {/* Sort controls */}
+      <div className="flex shrink-0 gap-1 border-b border-[var(--app-border)] px-3 py-1">
         <button
-          key={e.path}
           type="button"
-          className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-[var(--app-bg)] transition"
-          onClick={() => (e.is_dir ? onNavigate(e.path) : onOpenFile(e))}
-          onContextMenu={(ev) => onContextMenu(ev, e)}
+          onClick={() => toggleSort("name")}
+          className={`rounded px-2 py-0.5 text-[10px] font-medium transition ${
+            sortField === "name"
+              ? "bg-[var(--app-accent)] text-white"
+              : "text-[var(--app-muted)] hover:text-[var(--app-text)]"
+          }`}
         >
-          <span className="shrink-0">{fileIcon(e)}</span>
-          <span className="min-w-0 flex-1 truncate">{e.name}{e.is_dir ? "/" : ""}</span>
-          {!e.is_dir && (
-            <span className="shrink-0 text-[var(--app-muted)]">{fmtSize(e.size)}</span>
-          )}
+          Name{arrow("name")}
         </button>
-      ))}
+        <button
+          type="button"
+          onClick={() => toggleSort("date")}
+          className={`rounded px-2 py-0.5 text-[10px] font-medium transition ${
+            sortField === "date"
+              ? "bg-[var(--app-accent)] text-white"
+              : "text-[var(--app-muted)] hover:text-[var(--app-text)]"
+          }`}
+        >
+          Date{arrow("date")}
+        </button>
+        <span className="ml-auto text-[10px] text-[var(--app-muted)]">
+          {entries.length} item{entries.length !== 1 ? "s" : ""}
+        </span>
+      </div>
+
+      {entries.length === 0 ? (
+        <div className="p-3 text-xs text-[var(--app-muted)]">Empty directory</div>
+      ) : (
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          {sorted.map((e) => (
+            <button
+              key={e.path}
+              type="button"
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-[var(--app-bg)] transition"
+              onClick={() => (e.is_dir ? onNavigate(e.path) : onOpenFile(e))}
+              onContextMenu={(ev) => onContextMenu(ev, e)}
+            >
+              <span className="shrink-0">{fileIcon(e)}</span>
+              <span className="min-w-0 flex-1 truncate">{e.name}{e.is_dir ? "/" : ""}</span>
+              {!e.is_dir && (
+                <span className="shrink-0 text-[var(--app-muted)]">{fmtSize(e.size)}</span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -446,9 +522,7 @@ export default function FileViewer() {
 
       {/* Statusline */}
       <div className="shrink-0 border-t border-[var(--app-border)] px-3 py-1 text-xs text-[var(--app-muted)]">
-        {openFile
-          ? openFile.name
-          : `${entries.length} item${entries.length !== 1 ? "s" : ""}`}
+        {openFile ? openFile.name : path}
       </div>
 
       {/* Context menu */}

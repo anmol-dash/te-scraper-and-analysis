@@ -701,6 +701,7 @@ MENU = [
     ("1",  "Workflow overview",                           "info"),
     (None, "Data prep",                                   "section"),
     ("0",  "Query RepeatMasker  (download rmsk + count sequences)", "action"),
+    ("20", "Query Dfam  (download nrph hits + count sequences)",    "action"),
     ("2",  "te_prep.py       Download rmsk + sequences",  "action"),
     (None, "Core analysis  (direct remote execution)",    "section"),
     ("3",  "te_clustering.py k-mer · UMAP · HDBSCAN",    "action"),
@@ -763,6 +764,10 @@ def interactive_menu(client):
 
         elif choice == '0':
             _step_rmsk_query(client)
+            input(f"  {dim('Press Enter to return to menu…')}")
+
+        elif choice == '20':
+            _step_dfam_query(client)
             input(f"  {dim('Press Enter to return to menu…')}")
 
         elif choice == '2':  _step_prep(client)
@@ -2116,22 +2121,84 @@ def _step_rmsk_query(client):
         _log("Saved family + assembly to session parameters.")
 
 
+def _step_dfam_query(client):
+    """Count Dfam sequences for a family via the REST API (no bulk download needed)."""
+    print()
+    print(_divider("Dfam Query  ·  Dfam REST API locus count"))
+    family   = (client.params.get("FAMILY_NAME", "") or "") if hasattr(client, "params") else ""
+    assembly = (client.params.get("ASSEMBLY", "hg38") or "hg38") if hasattr(client, "params") else "hg38"
+
+    family = _ask("TE family name (e.g. HERVK, THE1D-int, L1HS)", family)
+    if not family:
+        print(red("  Family name is required."))
+        return
+
+    _, assembly = _ask_species_assembly(default_assembly=assembly)
+
+    if not _sync_remote_files(client, ["te_prep.py"]):
+        return
+
+    # Dfam uses the REST API per-family — no bulk file download needed
+    _log(f"Counting sequences for family='{family}' in {assembly} via Dfam REST API…")
+    count_out, count_err, count_rc = client.run_command(
+        f"python {client.remote_work_dir}/te_prep.py "
+        f"--family {family} --build {assembly} --count-only --source dfam",
+        timeout=120,
+    )
+    if count_rc != 0:
+        print(red(f"\n  Dfam count failed (exit {count_rc})."))
+        # Skip the always-present conda noise; show the real error lines
+        all_text = (count_out + "\n" + count_err)
+        noise = {"conda-libmamba", "libicui18n", "conda entry point"}
+        relevant = [l for l in all_text.splitlines()
+                    if l.strip() and not any(n in l for n in noise)]
+        for ln in relevant[-8:]:
+            print(red(f"  {ln.strip()}"))
+        return
+    # Parse "Locus count for 'FAMILY' (BUILD, dfam): N,NNN  [Xs]"
+    import re as _re
+    m = _re.search(r"Locus count for '[^']+' \([^,]+, [^)]+\):\s*([\d,]+)", count_out)
+    count_str = m.group(1) if m else "?"
+    try:
+        count = int(count_str.replace(",", ""))
+        count_line = green(f"   Sequences matching:  {count:,}")
+    except ValueError:
+        count = None
+        count_line = yellow(f"   Could not parse count: {count_str!r}")
+
+    print()
+    print(_box([
+        bold("Dfam Query Result"),
+        f"   Family:    {bold(family)}",
+        f"   Assembly:  {bold(assembly)}",
+        f"   Source:    Dfam REST API (dfam.org)",
+        count_line,
+    ]))
+    print()
+
+    if hasattr(client, "params"):
+        client.params["FAMILY_NAME"] = family
+        client.params["ASSEMBLY"]    = assembly
+        _log("Saved family + assembly to session parameters.")
+
+
 def _post_connect_launch_action(client):
     """Prompt for the first action after connecting to HPC."""
     sched = (client.scheduler or "?").upper()
     print(_box([
         bold("HPC Run Mode"),
         f"1  Query RepeatMasker  {dim('(download rmsk + count sequences)')}",
-        f"2  Configure + submit batch job   {dim(f'({sched}, background)')}",
-        "3  Open full HPC menu",
-        "4  Download results",
-        "5  Disconnect",
+        f"2  Query Dfam  {dim('(download nrph hits + count sequences)')}",
+        f"3  Configure + submit batch job   {dim(f'({sched}, background)')}",
+        "4  Open full HPC menu",
+        "5  Download results",
+        "6  Disconnect",
     ]))
     print()
 
     while True:
-        choice = input(f"  {cyan('›')} {bold('Select run mode')} [3]: ").strip().lower()
-        if choice in ("", "3", "m", "menu"):
+        choice = input(f"  {cyan('›')} {bold('Select run mode')} [4]: ").strip().lower()
+        if choice in ("", "4", "m", "menu"):
             return True
 
         if choice in ("1", "r", "rmsk", "query"):
@@ -2139,13 +2206,18 @@ def _post_connect_launch_action(client):
             input(f"  {dim('Press Enter to open the full HPC menu…')}")
             return True
 
-        if choice in ("2", "b", "batch"):
+        if choice in ("2", "d", "dfam"):
+            _step_dfam_query(client)
+            input(f"  {dim('Press Enter to open the full HPC menu…')}")
+            return True
+
+        if choice in ("3", "b", "batch"):
             if client.set_parameter_interactive():
                 client.submit_batch_job()
             input(f"  {dim('Press Enter to open the full HPC menu…')}")
             return True
 
-        if choice in ("4", "dl", "download"):
+        if choice in ("5", "dl", "download"):
             cached_remote = client._state.get("last_remote_dir", "").strip()
             if cached_remote:
                 remote_prompt = f"  Remote path [{cached_remote}]: "
@@ -2159,7 +2231,7 @@ def _post_connect_launch_action(client):
             input(f"  {dim('Press Enter to open the full HPC menu…')}")
             return True
 
-        if choice in ("5", "d", "disconnect", "q", "quit", "exit"):
+        if choice in ("6", "d", "disconnect", "q", "quit", "exit"):
             return False
 
         print(red("  Invalid selection."))

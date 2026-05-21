@@ -55,6 +55,12 @@ def _log(message: str):
     print(f"[{ts}] {message}", flush=True)
 
 
+def _remote_path(work_dir: str, sub: str) -> str:
+    """Join work_dir with sub, but treat sub as absolute if it starts with '/'."""
+    sub = sub.strip()
+    return sub if sub.startswith("/") else f"{work_dir}/{sub}"
+
+
 class HPCClient:
     """Interactive client for running TE analysis on HPC cluster via batch jobs."""
 
@@ -772,9 +778,9 @@ fi
                     family = str(self.params.get("FAMILY_NAME", "") or "").strip()
                     base   = str(self.params.get("BASE_OUT_DIR", "") or "").strip()
                     if base and family:
-                        full = f"{self.remote_work_dir}/{base}/{family.lower()}"
+                        full = _remote_path(self.remote_work_dir, base) + f"/{family.lower()}"
                     elif base:
-                        full = f"{self.remote_work_dir}/{base}/<family>"
+                        full = _remote_path(self.remote_work_dir, base) + "/<family>"
                     else:
                         full = f"{self.remote_work_dir}/<base_out_dir>/<family>"
                     print(f"       {'':35}  → {full}")
@@ -1108,7 +1114,7 @@ echo "  Input data: OK ({quoted})"'''
 
         # Set up output directory on HPC
         family = self.params["FAMILY_NAME"].lower()
-        self.remote_output_dir = f"{self.remote_work_dir}/{self.params['BASE_OUT_DIR']}/{family}"
+        self.remote_output_dir = _remote_path(self.remote_work_dir, self.params['BASE_OUT_DIR']) + f"/{family}"
 
         # Create bsub job script
         import datetime as _dt
@@ -1368,7 +1374,7 @@ exit $EXIT_CODE
 
         # Set up output directory
         family = self.params["FAMILY_NAME"].lower()
-        self.remote_output_dir = f"{self.remote_work_dir}/{self.params['BASE_OUT_DIR']}/{family}"
+        self.remote_output_dir = _remote_path(self.remote_work_dir, self.params['BASE_OUT_DIR']) + f"/{family}"
 
         # Build runner script with comprehensive logging
         runner_script = f"{self.remote_work_dir}/te_analysis_runner.sh"

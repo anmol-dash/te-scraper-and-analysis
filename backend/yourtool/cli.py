@@ -16,7 +16,13 @@ from pathlib import Path
 from threading import Event
 from typing import Any, Sequence
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+# In the PyInstaller --onefile frozen bundle, __file__ is inside sys._MEIPASS/yourtool/,
+# so parents[2] lands in the OS temp dir rather than the bundle root. All pipeline
+# scripts (te_prep.py etc.) are bundled at sys._MEIPASS root (spec uses dest=".").
+if getattr(sys, "frozen", False):
+    _REPO_ROOT = Path(sys._MEIPASS)  # type: ignore[attr-defined]
+else:
+    _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
@@ -167,16 +173,42 @@ def _cmd_hpc_disconnect(_args: argparse.Namespace, _cancel_event: Event | None) 
 
 
 def _cmd_hpc_upload(args: argparse.Namespace, _cancel_event: Event | None) -> dict[str, Any]:
+    # Derive scripts dir the same way main.py does (avoids circular import).
+    if sys.platform == "win32":
+        _gameca_dir = Path(os.environ.get("APPDATA", Path.home())) / "GAMECA"
+    else:
+        _gameca_dir = Path.home() / ".gameca"
+    _scripts_dir = _gameca_dir / "scripts"
     client = _client_required()
+    frozen = getattr(sys, "frozen", False)
+    print(
+        f"[UPLOAD] frozen={frozen}  REPO_ROOT={_REPO_ROOT}"
+        f"  SCRIPTS_DIR={_scripts_dir} (exists={_scripts_dir.exists()})",
+        flush=True,
+    )
     uploaded: list[str] = []
     for name in args.files:
-        local_path = (_REPO_ROOT / name).resolve()
-        try:
-            local_path.relative_to(_REPO_ROOT)
-        except ValueError as exc:
-            raise ValueError(f"file is outside repository: {name}") from exc
-        if not local_path.exists() or not local_path.is_file():
-            raise FileNotFoundError(str(local_path))
+        # Bundled scripts (sys._MEIPASS) are always the authoritative version
+        # for this release. Downloaded OTA scripts in _scripts_dir only serve
+        # as a fallback when a file isn't present in the bundle at all.
+        candidates: list[Path] = []
+        candidates.append(_REPO_ROOT / name)
+        if _scripts_dir.exists():
+            candidates.append(_scripts_dir / name)
+
+        local_path: Path | None = None
+        for c in candidates:
+            if c.exists() and c.is_file():
+                local_path = c
+                break
+
+        print(f"[UPLOAD] {name}: searched {[str(c) for c in candidates]} → {local_path}", flush=True)
+
+        if local_path is None:
+            searched = ", ".join(str(c) for c in candidates)
+            raise FileNotFoundError(
+                f"Script '{name}' not found in bundle or scripts dir.\nSearched: {searched}"
+            )
         remote_path = f"{client.remote_work_dir}/{local_path.name}"
         if not client._upload_text_file(local_path, remote_path, local_path.name):
             return {"ok": False, "error": f"failed to upload {name}", "exit_code": 1}
@@ -186,6 +218,7 @@ def _cmd_hpc_upload(args: argparse.Namespace, _cancel_event: Event | None) -> di
 
 def _cmd_hpc_run(args: argparse.Namespace, _cancel_event: Event | None) -> dict[str, Any]:
     client = _client_required()
+    print(f"[HPC-RUN] user={client._username}  cmd={args.cmd[:300]}", flush=True)
     out, err, code = client.run_command(args.cmd, timeout=args.timeout, stream_output="summary")
     if code != 0:
         print(f"[HPC DIAG] hpc-run command failed: {args.cmd}", flush=True)
@@ -235,6 +268,7 @@ def _apply_hpc_params(client: Any, params: dict[str, Any]) -> None:
         "skip_primers": "SKIP_PRIMERS",
         "skip_go": "SKIP_GO",
         "skip_tsne": "SKIP_TSNE",
+        "annot_source": "ANNOTATION_SOURCE",
     }
     for source, dest in mapping.items():
         if source in params and params[source] not in (None, ""):
