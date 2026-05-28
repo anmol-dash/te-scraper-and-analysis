@@ -68,7 +68,10 @@ class HPCClient:
         self.ssh = None
         self.sftp = None
         self.connected = False
-        self.scheduler = None  # 'lsf' or 'slurm', auto-detected on connect
+        self.scheduler = None       # 'lsf' or 'slurm', auto-detected on connect
+        self._scheduler_live = False  # True only if the daemon responds
+        self._python = "python3"    # remote python binary, detected on connect
+        self._current_job_info_path = None  # info file for the most recently submitted job
 
         # Default parameters
         self.params = {
@@ -129,7 +132,8 @@ class HPCClient:
             else None
         )
 
-    def connect(self, hostname: str, username: str, password: str, port: int = 22, work_dir: str = ""):
+    def connect(self, hostname: str, username: str, password: str = "", port: int = 22,
+                work_dir: str = "", key_path: str = ""):
         """Connect to the HPC cluster via SSH."""
         print(f"\nConnecting to {hostname}...")
 
@@ -168,12 +172,35 @@ class HPCClient:
 
             # Try keyboard-interactive auth first (most common for university HPCs)
             print("Authenticating...")
-            try:
-                self._transport.auth_interactive(username, keyboard_interactive_handler)
-            except paramiko.ssh_exception.AuthenticationException:
-                # Fall back to password auth
-                print("Trying password authentication...")
-                self._transport.auth_password(username, password)
+
+            # Key-file auth (highest priority when a key is supplied)
+            if key_path:
+                _key = None
+                _key_path_expanded = os.path.expanduser(key_path)
+                for _KeyClass in (
+                    paramiko.Ed25519Key,
+                    paramiko.RSAKey,
+                    paramiko.ECDSAKey,
+                ):
+                    try:
+                        _key = _KeyClass.from_private_key_file(_key_path_expanded)
+                        break
+                    except (paramiko.ssh_exception.SSHException, ValueError):
+                        continue
+                if _key is None:
+                    print(f"  Warning: could not load key {key_path!r} — trying password auth")
+                else:
+                    self._transport.auth_publickey(username, _key)
+                    if self._transport.is_authenticated():
+                        print(f"  Key authentication OK ({type(_key).__name__})")
+
+            if not self._transport.is_authenticated():
+                try:
+                    self._transport.auth_interactive(username, keyboard_interactive_handler)
+                except paramiko.ssh_exception.AuthenticationException:
+                    # Fall back to password auth
+                    print("Trying password authentication...")
+                    self._transport.auth_password(username, password)
 
             if not self._transport.is_authenticated():
                 print("Authentication failed")
@@ -205,6 +232,14 @@ class HPCClient:
                 print(f"Scheduler detected: {self.scheduler.upper()}")
             else:
                 print("Scheduler detected: NONE (bsub/sbatch not visible in login shell)")
+
+            # Check whether the scheduler daemon is actually reachable
+            self._scheduler_live = self._check_scheduler_live()
+            if self.scheduler and not self._scheduler_live:
+                print(f"  Warning: {self.scheduler.upper()} binaries found but daemon is DOWN — will use nohup fallback")
+
+            # Auto-detect python binary
+            self._python = self._detect_python()
 
             return True
 
@@ -325,13 +360,135 @@ exit 1
         return False
 
     def disconnect(self):
-        """Close SSH connection."""
-        if self.sftp:
-            self.sftp.close()
-        if self._transport:
-            self._transport.close()
-        self.connected = False
-        print("Disconnected from HPC.")
+        """Close SSH connection, force-killing the socket if it hangs (e.g. WiFi dropped)."""
+        self.connected = False  # block new commands immediately
+
+        sftp      = self.sftp
+        transport = self._transport
+        self.sftp        = None
+        self._transport  = None
+
+        def _close():
+            for obj in (sftp, transport):
+                try:
+                    if obj:
+                        obj.close()
+                except Exception:
+                    pass
+
+        t = threading.Thread(target=_close, daemon=True)
+        t.start()
+        t.join(timeout=3)
+        if t.is_alive():
+            # Graceful close is hung — nuke the underlying TCP socket directly
+            try:
+                transport.sock.close()
+            except Exception:
+                pass
+        print("Disconnected from HPC.", flush=True)
+
+    def _scp_get(self, remote_path: str, local_path: str, timeout: int = 60) -> bool:
+        """Download a remote file as fast as possible.
+
+        Tier 1 — local scp subprocess with SSH_ASKPASS (OpenSSH, no sshpass needed).
+        Tier 2 — SCP protocol over the existing paramiko channel (no re-auth).
+        Falls back to False so the caller can try SFTP / base64 as a last resort.
+        """
+        if self._scp_get_local(remote_path, local_path, timeout):
+            return True
+        return self._scp_get_paramiko(remote_path, local_path, timeout)
+
+    def _scp_get_local(self, remote_path: str, local_path: str, timeout: int) -> bool:
+        """Run the local scp binary, injecting password via SSH_ASKPASS."""
+        import os as _os, stat as _stat, subprocess as _subprocess, tempfile as _tempfile
+
+        port = getattr(self, "_port", 22) or 22
+        fd, askpass = _tempfile.mkstemp(suffix=".sh")
+        try:
+            with _os.fdopen(fd, "w") as f:
+                f.write(f"#!/bin/sh\necho {shlex.quote(self._password or '')}\n")
+            _os.chmod(askpass, _stat.S_IRWXU)
+
+            env = _os.environ.copy()
+            env["SSH_ASKPASS"]         = askpass
+            env["SSH_ASKPASS_REQUIRE"] = "force"   # OpenSSH ≥ 8.4
+            env["DISPLAY"]             = ":0"      # older OpenSSH fallback
+
+            cmd = [
+                "scp", "-O",
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "BatchMode=no",
+                "-P", str(port),
+                f"{self._username}@{self._hostname}:{remote_path}",
+                str(local_path),
+            ]
+            result = _subprocess.run(
+                cmd, env=env, capture_output=True,
+                timeout=timeout, stdin=_subprocess.DEVNULL,
+            )
+            if result.returncode == 0:
+                return True
+            _log(f"local scp rc={result.returncode}: {result.stderr.decode(errors='replace')[:200]}")
+            return False
+        except Exception as exc:
+            _log(f"local scp error: {exc}")
+            return False
+        finally:
+            try:
+                _os.unlink(askpass)
+            except Exception:
+                pass
+
+    def _scp_get_paramiko(self, remote_path: str, local_path: str, timeout: int) -> bool:
+        """SCP receive protocol over the existing authenticated paramiko transport.
+
+        Runs 'scp -f <path>' on the server via exec_command — no password needed
+        because it reuses the already-established SSH session.
+        """
+        try:
+            channel = self._transport.open_session()
+            channel.settimeout(timeout)
+            channel.exec_command(f"scp -f {shlex.quote(remote_path)}")
+
+            channel.sendall(b"\x00")  # signal: ready
+
+            # Read file header: "C<mode> <size> <name>\n"
+            header = bytearray()
+            while True:
+                b = channel.recv(1)
+                if not b or b == b"\n":
+                    break
+                header.extend(b)
+
+            if not header or header[0:1] != b"C":
+                channel.close()
+                return False
+
+            _, size_str, _ = header.decode().split(" ", 2)
+            file_size = int(size_str)
+
+            channel.sendall(b"\x00")  # ready to receive data
+
+            received = 0
+            with open(local_path, "wb") as fh:
+                while received < file_size:
+                    chunk = channel.recv(min(65536, file_size - received))
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    received += len(chunk)
+
+            channel.recv(1)           # trailing null from server
+            channel.sendall(b"\x00")  # ack
+            channel.close()
+
+            ok = received == file_size
+            if not ok:
+                _log(f"paramiko scp incomplete: got {received}/{file_size}")
+            return ok
+        except Exception as exc:
+            _log(f"paramiko scp error: {exc}")
+            return False
 
     def _detect_scheduler(self):
         """Auto-detect LSF (bsub) or Slurm (sbatch) on the remote host."""
@@ -340,6 +497,52 @@ exit 1
             if code == 0 and out.strip():
                 return sched
         return None
+
+    def _detect_python(self):
+        """Return the name of the available python binary on the remote host."""
+        for binary in ("python3", "python"):
+            out, _, code = self.run_command(f"command -v {binary}", timeout=10)
+            if code == 0 and out.strip():
+                return binary
+        return "python3"  # best guess if neither found
+
+    def ensure_venv_cmd(self) -> str:
+        """Return a shell block that creates/activates the venv and installs deps.
+
+        Venv lives in remote_work_dir (not $HOME) to avoid the HOME=/tmp override
+        set by _remote_exec_command. Hash-gated so pip only runs when
+        requirements.txt changes.
+        """
+        venv_dir = f"{self.remote_work_dir}/venv"
+        req_file = f"{self.remote_work_dir}/requirements.txt"
+        return f"""
+GAMECA_VENV="{venv_dir}"
+GAMECA_PY="{self._python}"
+GAMECA_REQ="{req_file}"
+mkdir -p "$(dirname "$GAMECA_VENV")"
+if [ ! -x "$GAMECA_VENV/bin/python" ]; then
+    echo "[GAMECA] Creating virtualenv at $GAMECA_VENV ..."
+    "$GAMECA_PY" -m venv "$GAMECA_VENV" || {{
+        echo "[GAMECA] venv creation failed — trying to install python3-venv ..."
+        apt-get install -y python3-venv python3-pip >/dev/null 2>&1 || true
+        "$GAMECA_PY" -m venv "$GAMECA_VENV" || {{ echo "[GAMECA] ERROR: cannot create venv"; exit 1; }}
+    }}
+fi
+source "$GAMECA_VENV/bin/activate" || {{ echo "[GAMECA] ERROR: cannot activate venv at $GAMECA_VENV"; exit 1; }}
+if [ -f "$GAMECA_REQ" ]; then
+    _req_hash=$(md5sum "$GAMECA_REQ" 2>/dev/null | cut -d' ' -f1 || sha1sum "$GAMECA_REQ" 2>/dev/null | cut -d' ' -f1 || echo none)
+    _last_hash=$(cat "$GAMECA_VENV/.req_hash" 2>/dev/null || echo "")
+    if [ "$_req_hash" != "$_last_hash" ]; then
+        echo "[GAMECA] Installing dependencies (requirements changed) ..."
+        python -m pip install --quiet --upgrade pip setuptools wheel
+        python -m pip install --quiet --prefer-binary -r "$GAMECA_REQ" || {{ echo "[GAMECA] ERROR: pip install failed"; exit 1; }}
+        echo "$_req_hash" > "$GAMECA_VENV/.req_hash"
+        echo "[GAMECA] Dependencies installed."
+    fi
+else
+    echo "[GAMECA] Warning: $GAMECA_REQ not found — skipping pip install"
+fi
+""".strip()
 
     def _remote_exec_command(self, command: str) -> str:
         """Run commands through a login shell so scheduler PATH/modules match ui.py sessions.
@@ -387,80 +590,79 @@ exit 1
         return lines
 
     def _venv_setup_block(self):
-        """Return robust virtualenv setup for login/compute node differences."""
-        return f'''# --- Virtual environment setup ---
-echo "[GAMECA] hpc_client build={_SCRIPT_BUILD}"
-echo "[$(date +%H:%M:%S)] Host diagnostics before venv:"
-echo "  hostname=$(hostname)"
-echo "  pwd=$(pwd)"
-echo "  user=$(whoami)"
-echo "  shell=$SHELL"
-echo "  scheduler={self.scheduler or 'unknown'}"
-echo "  SLURM_JOB_ID=${{SLURM_JOB_ID:-}} LSB_JOBID=${{LSB_JOBID:-}}"
-echo "  SLURM_CPUS_PER_TASK=${{SLURM_CPUS_PER_TASK:-}} LSB_DJOB_NUMPROC=${{LSB_DJOB_NUMPROC:-}}"
-echo "  nproc=$(nproc 2>/dev/null || echo N/A)"
-echo "  TMPDIR=${{TMPDIR:-/tmp}}"
-echo "  PATH=$PATH"
-VENV_DIR="$HOME/te_analysis_venv"
-PYTHON_BIN="${{TE_PYTHON:-python3}}"
-if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
-    PYTHON_BIN=python
-fi
+        """Return robust virtualenv setup. Never exits — logs errors and continues."""
+        return f'''# ── Host diagnostics ────────────────────────────────────────────────────────
+echo "[GAMECA] build={_SCRIPT_BUILD}  host=$(hostname)  user=$(whoami)"
+echo "[GAMECA] SLURM_JOB_ID=${{SLURM_JOB_ID:-<unset>}}  LSB_JOBID=${{LSB_JOBID:-<unset>}}"
+echo "[GAMECA] PATH=$PATH"
 
+# ── Virtual environment ──────────────────────────────────────────────────────
+VENV_DIR="${{GAMECA_VENV:-$HOME/gameca_venv}}"
+PYTHON_BIN="python3"
+command -v python3 >/dev/null 2>&1 || PYTHON_BIN=python
+
+# Validate existing venv
 if [ -x "$VENV_DIR/bin/python" ]; then
-    "$VENV_DIR/bin/python" -c "import sys; print(sys.version)" >/dev/null 2>&1 || {{
-        echo "[$(date +%H:%M:%S)] Existing venv is not usable on this node; recreating $VENV_DIR ..."
+    "$VENV_DIR/bin/python" -c "import sys" >/dev/null 2>&1 || {{
+        echo "[GAMECA] Existing venv broken — removing $VENV_DIR"
         rm -rf "$VENV_DIR"
     }}
 fi
 
+# Create venv if needed
+USING_VENV=false
 if [ ! -d "$VENV_DIR" ]; then
-    echo "[$(date +%H:%M:%S)] Creating virtual environment at $VENV_DIR with $PYTHON_BIN ..."
-    "$PYTHON_BIN" -m venv "$VENV_DIR"
+    echo "[GAMECA] Creating venv at $VENV_DIR ..."
+    if "$PYTHON_BIN" -m venv "$VENV_DIR" 2>&1; then
+        echo "[GAMECA] venv created OK"
+        USING_VENV=true
+    else
+        echo "[GAMECA] WARNING: python3 -m venv failed — trying python3-venv install ..."
+        apt-get install -y python3-venv python3-pip 2>&1 || true
+        if "$PYTHON_BIN" -m venv "$VENV_DIR" 2>&1; then
+            echo "[GAMECA] venv created OK after apt-get"
+            USING_VENV=true
+        else
+            echo "[GAMECA] WARNING: venv unavailable — using system Python (packages may be missing)"
+        fi
+    fi
+else
+    USING_VENV=true
 fi
 
-source "$VENV_DIR/bin/activate"
-export NUMBA_CACHE_DIR="${{TMPDIR:-/tmp}}/gameca_numba_cache_$USER"
-mkdir -p "$NUMBA_CACHE_DIR"
+# Activate
+if $USING_VENV && [ -f "$VENV_DIR/bin/activate" ]; then
+    source "$VENV_DIR/bin/activate"
+    echo "[GAMECA] venv activated: $(python --version 2>&1)"
+else
+    echo "[GAMECA] Using system Python: $("$PYTHON_BIN" --version 2>&1)"
+fi
+
+# Thread counts
 THREADS="{self.params['CPUS']}"
-if [ -n "${{SLURM_CPUS_PER_TASK:-}}" ]; then
-    THREADS="$SLURM_CPUS_PER_TASK"
-elif [ -n "${{LSB_DJOB_NUMPROC:-}}" ]; then
-    THREADS="$LSB_DJOB_NUMPROC"
-fi
-export OMP_NUM_THREADS="$THREADS"
-export MKL_NUM_THREADS="$THREADS"
-export OPENBLAS_NUM_THREADS="$THREADS"
-export NUMEXPR_NUM_THREADS="$THREADS"
-export NUMBA_NUM_THREADS="$THREADS"
-export VECLIB_MAXIMUM_THREADS="$THREADS"
-echo "[$(date +%H:%M:%S)] NUMBA_CACHE_DIR: $NUMBA_CACHE_DIR"
-echo "[$(date +%H:%M:%S)] Thread env: OMP=$OMP_NUM_THREADS MKL=$MKL_NUM_THREADS OPENBLAS=$OPENBLAS_NUM_THREADS NUMBA=$NUMBA_NUM_THREADS"
-echo "[$(date +%H:%M:%S)] Python: $(python --version 2>&1)"
-echo "[$(date +%H:%M:%S)] Pip: $(python -m pip --version 2>&1)"
+[ -n "${{SLURM_CPUS_PER_TASK:-}}" ] && THREADS="$SLURM_CPUS_PER_TASK"
+[ -n "${{LSB_DJOB_NUMPROC:-}}"     ] && THREADS="$LSB_DJOB_NUMPROC"
+export OMP_NUM_THREADS="$THREADS" MKL_NUM_THREADS="$THREADS"
+export OPENBLAS_NUM_THREADS="$THREADS" NUMEXPR_NUM_THREADS="$THREADS"
+export NUMBA_NUM_THREADS="$THREADS" VECLIB_MAXIMUM_THREADS="$THREADS"
+export NUMBA_CACHE_DIR="${{TMPDIR:-/tmp}}/gameca_numba_$USER"
+mkdir -p "$NUMBA_CACHE_DIR"
+
+# Install requirements
 REQ_FILE="{self.remote_work_dir}/requirements.txt"
-if [ ! -f "$REQ_FILE" ]; then
-    echo "FATAL: Requirements file is missing: $REQ_FILE"
-    echo "       The remote work directory must be shared between the login node and batch compute nodes."
-    exit 1
+if [ -f "$REQ_FILE" ]; then
+    echo "[GAMECA] Installing requirements (this may take a few minutes on first run) ..."
+    PIP_START=$SECONDS
+    python -m pip install --upgrade pip setuptools wheel 2>&1 | tail -5 || true
+    python -m pip install --prefer-binary -r "$REQ_FILE" 2>&1 | tail -20 || {{
+        echo "[GAMECA] WARNING: pip install had errors — packages may be partially installed"
+    }}
+    echo "[GAMECA] pip done in $((SECONDS - PIP_START))s"
+else
+    echo "[GAMECA] WARNING: requirements.txt not found at $REQ_FILE"
 fi
-PIP_START=$SECONDS
-echo "[$(date +%H:%M:%S)] Installing dependencies ..."
-python -m pip install --quiet --upgrade pip setuptools wheel || exit 1
-python -m pip install --quiet --prefer-binary -r "$REQ_FILE" || exit 1
-echo "[$(date +%H:%M:%S)] Dependency install took $((SECONDS - PIP_START))s"
-python - <<'PYINFO'
-import importlib, os, sys
-print(f"[PYINFO] executable={{sys.executable}}")
-print(f"[PYINFO] version={{sys.version.split()[0]}}")
-print(f"[PYINFO] NUMBA_CACHE_DIR={{os.environ.get('NUMBA_CACHE_DIR')}}")
-for name in ["numpy", "pandas", "sklearn", "umap", "hdbscan", "numba"]:
-    try:
-        mod = importlib.import_module(name)
-        print(f"[PYINFO] {{name}}={{getattr(mod, '__version__', 'unknown')}}")
-    except Exception as exc:
-        print(f"[PYINFO] {{name}}=IMPORT_FAILED {{type(exc).__name__}}: {{exc}}")
-PYINFO
+
+echo "[GAMECA] Python: $(python --version 2>&1)  Pip: $(python -m pip --version 2>&1 | cut -d' ' -f1-2)"
 '''
 
     def _mafft_setup_block(self):
@@ -504,6 +706,24 @@ fi
         if self.scheduler == "slurm":
             return f"scancel {job_id}"
         return f"bkill {job_id}"
+
+    def _check_scheduler_live(self) -> bool:
+        """Return True only if the scheduler daemon is actually reachable."""
+        if self.scheduler == "slurm":
+            out, _, code = self.run_command("scontrol ping 2>&1", timeout=8)
+            return code == 0 and "UP" in out
+        if self.scheduler == "lsf":
+            _, _, code = self.run_command("bjobs -h 2>&1", timeout=8)
+            return code == 0
+        return False
+
+    def _detect_slurm_partition(self) -> str:
+        """Return the first available SLURM partition, falling back to 'normal'."""
+        out, _, code = self.run_command(
+            "sinfo --noheader -o '%P' 2>/dev/null | tr -d '*' | head -1", timeout=10
+        )
+        part = out.strip().splitlines()[0].strip() if code == 0 and out.strip() else ""
+        return part or "normal"
 
     def _interactive_alloc_cmd(self, runner_script, mem_mb, cpus, queue):
         """Return the command to allocate a node and run interactively."""
@@ -939,6 +1159,8 @@ fi
         p_thresh = self.params.get("P_THRESHOLD", 0.05)
         args += ["--p-threshold", str(p_thresh)]
 
+        args += ["--force"]  # always re-run cached stages in batch mode
+
         cli = " ".join(shlex.quote(str(arg)) for arg in args)
         _log(f"Pipeline CLI args: {cli}")
         return cli
@@ -1140,6 +1362,8 @@ echo "  Input data: OK ({quoted})"'''
 {sched_header}
 {module_block}
 
+JOB_START_TIME=$(date +%s)
+
 {venv_block}
 {mafft_block}
 
@@ -1211,12 +1435,14 @@ SECONDS=0
 python -u {self.remote_script_path} {pipeline_args} 2>&1 | tee -a $ERROR_LOG
 EXIT_CODE=${{PIPESTATUS[0]}}
 PIPELINE_SECONDS=$SECONDS
+WALL_SECONDS=$(( $(date +%s) - JOB_START_TIME ))
 
 echo ""
 echo "=========================================================="
 echo " Pipeline finished"
 echo " Exit code:   $EXIT_CODE"
-echo " Runtime:     $((PIPELINE_SECONDS / 60))m $((PIPELINE_SECONDS % 60))s"
+echo " Pipeline:    $((PIPELINE_SECONDS / 60))m $((PIPELINE_SECONDS % 60))s"
+echo " Wall time:   $((WALL_SECONDS / 60))m $((WALL_SECONDS % 60))s"
 echo " Date:        $(date)"
 
 if [ $EXIT_CODE -ne 0 ]; then
@@ -1308,6 +1534,7 @@ exit $EXIT_CODE
             f"SUBMITTED=$(date)"
         )
         self.run_command(f"echo '{job_info_content}' > {job_info}", timeout=10)
+        self._current_job_info_path = job_info
         self._diagnostic_command(
             "Submitted file inventory",
             f"ls -lh {shlex.quote(self.remote_work_dir)} | sed -n '1,120p'; "
@@ -1339,6 +1566,143 @@ exit $EXIT_CODE
         print("=" * 60)
 
         return True
+
+    def _submit_job_cmd_dep(self, job_script, dep_job_id=None):
+        """Return the scheduler command to submit a job, optionally after dep_job_id completes."""
+        if self.scheduler == "slurm":
+            dep = f" --dependency=afterok:{dep_job_id}" if dep_job_id else ""
+            return f"sbatch{dep} {job_script}"
+        if self.scheduler == "lsf":
+            dep = f" -w 'done({dep_job_id})'" if dep_job_id else ""
+            return f"bsub{dep} < {job_script}"
+        raise RuntimeError("Scheduler was not detected.")
+
+    def _submit_stage_job(self, stage_label, extra_pipeline_args, dep_job_id=None):
+        """Build and submit a single-stage pipeline job. Returns job_id or None."""
+        import datetime as _dt
+        _ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        family = self.params["FAMILY_NAME"].lower()
+        job_name   = f"te_{family}_{stage_label}"
+        job_script = f"{self.remote_work_dir}/{job_name}_{_ts}.sh"
+        job_out    = f"{self.remote_work_dir}/{job_name}_{_ts}.out"
+        job_err    = f"{self.remote_work_dir}/{job_name}_{_ts}.err"
+        job_done   = f"{self.remote_work_dir}/{job_name}_{_ts}.done"
+
+        sched_header   = self._job_script_header(job_name, job_out, job_err)
+        module_block   = self._module_load_block()
+        venv_block     = self._venv_setup_block()
+        mafft_block    = self._mafft_setup_block()
+        base_args      = self._pipeline_cli_args()
+        full_args      = base_args + " " + " ".join(shlex.quote(a) for a in extra_pipeline_args)
+
+        script = f"""#!/bin/bash
+{sched_header}
+{module_block}
+{venv_block}
+{mafft_block}
+
+echo "Stage: {stage_label}"
+echo "Date: $(date)"
+echo "Host: $(hostname)"
+
+{self._remote_exec_command(f'python -u {self.remote_script_path} {full_args}')}
+
+EXIT_CODE=$?
+echo $EXIT_CODE > {job_done}
+exit $EXIT_CODE
+"""
+        create_cmd = f"cat > {shlex.quote(job_script)} << 'STAGE_SCRIPT_EOF'\n{script}\nSTAGE_SCRIPT_EOF"
+        out, err, code = self.run_command(create_cmd, timeout=30)
+        if code != 0:
+            print(f"[Parallel] Error creating {stage_label} script: {err}")
+            return None
+        self.run_command(f"chmod +x {shlex.quote(job_script)}", timeout=10)
+
+        submit_cmd = self._submit_job_cmd_dep(job_script, dep_job_id)
+        print(f"[Parallel] Submitting {stage_label} job…", flush=True)
+        out, err, code = self.run_command(submit_cmd, timeout=30)
+        if code != 0:
+            print(f"[Parallel] Error submitting {stage_label}: {err}")
+            return None
+        job_id = self._parse_job_id(out)
+        if job_id:
+            dep_note = f" (after {dep_job_id})" if dep_job_id else ""
+            print(f"[Parallel]   → Job {job_id} [{stage_label}]{dep_note}", flush=True)
+        return job_id
+
+    def submit_parallel_pipeline(self, max_jobs=10):
+        """Submit the pipeline as parallel LSF/Slurm jobs.
+
+        Job 1:  sequences → clustering → dashboard  (--stop-after dashboard)
+        Jobs 2-4 run in parallel once Job 1 completes (LSF/Slurm dependency):
+          Job 2: alignment   (--resume-from alignment --stop-after alignment)
+          Job 3: motif + go  (--resume-from motif --stop-after go)
+          Job 4: primers     (--resume-from primers --stop-after primers)
+
+        Returns list of {stage, job_id} dicts.
+        """
+        if not self._ensure_batch_shared_work_dir():
+            print("[Parallel] Error: could not find a shared writable work directory.")
+            return []
+        if not self.upload_script():
+            return []
+
+        family = self.params["FAMILY_NAME"].lower()
+        import datetime as _dt
+        _ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.remote_output_dir = _remote_path(self.remote_work_dir, self.params["BASE_OUT_DIR"]) + f"/{family}"
+
+        job_infos = []
+        running = 0
+
+        # Job 1: seq → clustering → dashboard
+        jid1 = self._submit_stage_job("stage1_clustering", ["--stop-after", "dashboard"])
+        if not jid1:
+            return []
+        job_infos.append({"stage": "clustering", "job_id": jid1})
+        self.current_job_id = jid1
+        running += 1
+
+        skip_alignment = int(self.params.get("SKIP_ALIGNMENT", 0))
+        skip_motif     = int(self.params.get("SKIP_JASPAR", 0))
+        skip_primers   = int(self.params.get("SKIP_PRIMERS", 0))
+
+        # Jobs 2-4: all depend on Job 1
+        if not skip_alignment and running < max_jobs:
+            jid = self._submit_stage_job(
+                "stage2_alignment",
+                ["--resume-from", "alignment", "--stop-after", "alignment",
+                 "--skip-motif", "--skip-primers"],
+                dep_job_id=jid1,
+            )
+            if jid:
+                job_infos.append({"stage": "alignment", "job_id": jid})
+                running += 1
+
+        if not skip_motif and running < max_jobs:
+            jid = self._submit_stage_job(
+                "stage3_motif",
+                ["--resume-from", "motif", "--stop-after", "go",
+                 "--skip-alignment", "--skip-primers"],
+                dep_job_id=jid1,
+            )
+            if jid:
+                job_infos.append({"stage": "motif+go", "job_id": jid})
+                running += 1
+
+        if not skip_primers and running < max_jobs:
+            jid = self._submit_stage_job(
+                "stage4_primers",
+                ["--resume-from", "primers", "--stop-after", "primers",
+                 "--skip-alignment", "--skip-motif"],
+                dep_job_id=jid1,
+            )
+            if jid:
+                job_infos.append({"stage": "primers", "job_id": jid})
+                running += 1
+
+        print(f"\n[Parallel] {len(job_infos)} jobs submitted.", flush=True)
+        return job_infos
 
     def run_interactive_job(self):
         """Run analysis interactively on a compute node via bsub -Is.
@@ -1388,6 +1752,8 @@ exit $EXIT_CODE
 set -e
 
 {module_block}
+
+JOB_START_TIME=$(date +%s)
 
 {venv_block}
 {mafft_block}
@@ -1452,12 +1818,14 @@ SECONDS=0
 python -u {self.remote_script_path} {pipeline_args}
 EXIT_CODE=$?
 PIPELINE_SECONDS=$SECONDS
+WALL_SECONDS=$(( $(date +%s) - JOB_START_TIME ))
 
 echo ""
 echo "=========================================================="
 echo " Pipeline finished"
 echo " Exit code:   $EXIT_CODE"
-echo " Runtime:     $((PIPELINE_SECONDS / 60))m $((PIPELINE_SECONDS % 60))s"
+echo " Pipeline:    $((PIPELINE_SECONDS / 60))m $((PIPELINE_SECONDS % 60))s"
+echo " Wall time:   $((WALL_SECONDS / 60))m $((WALL_SECONDS % 60))s"
 echo " Date:        $(date)"
 if [ -d "{self.remote_output_dir}" ]; then
     RESULT_SIZE=$(du -sh "{self.remote_output_dir}" 2>/dev/null | cut -f1)
@@ -1522,24 +1890,73 @@ exit $EXIT_CODE
 
         return code == 0
 
-    def _find_latest_job_info(self):
-        """Return info for the most recently submitted job (pipeline or motif-only).
+    def _write_job_info(self, info_path: str, job_id: str, out: str, err: str,
+                        done: str, label: str = "", errlog: str = ""):
+        """Write a key=value .info file readable by _find_latest_job_info."""
+        import io as _io, datetime as _dt
+        content = (
+            f"JOB_ID={job_id}\n"
+            f"LABEL={label}\n"
+            f"LOG_OUT={out}\n"
+            f"LOG_ERR={err}\n"
+            f"LOG_DONE={done}\n"
+            f"LOG_ERRLOG={errlog or err}\n"
+            f"SUBMITTED={_dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        )
+        written = False
+        try:
+            if self.sftp:
+                self.sftp.putfo(_io.BytesIO(content.encode()), info_path)
+                written = True
+        except Exception:
+            pass
+        if not written:
+            import base64 as _b64
+            b64 = _b64.b64encode(content.encode()).decode()
+            _, _, code = self.run_command(
+                f"echo {shlex.quote(b64)} | base64 -d > {shlex.quote(info_path)}",
+                timeout=15,
+            )
+            written = (code == 0)
+        if written:
+            self._current_job_info_path = info_path
+        else:
+            _log(f"WARNING: failed to write job info file: {info_path}")
 
-        Globs for te_analysis_job_*.info and te_motif_job_*.info (timestamped),
-        picks the one with the newest mtime, and reads log paths from its content.
+    def _find_latest_job_info(self):
+        """Return info for the most recently submitted job.
+
+        Prefers the in-session job (self._current_job_info_path) so that
+        check_job_status always reflects the job you just submitted, not
+        whatever old .info file has the newest mtime on disk.
 
         Returns
         -------
         (info_dict, out_path, err_path, done_path, errlog_path)
         All paths are None when no info file is found.
         """
-        # Find the newest .info file across both job types
-        glob_cmd = (
-            f"ls -t {self.remote_work_dir}/te_analysis_job_*.info "
-            f"{self.remote_work_dir}/te_motif_job_*.info 2>/dev/null | head -1"
-        )
-        latest_path, _, _ = self.run_command(glob_cmd, timeout=10)
-        latest_path = latest_path.strip()
+        # Prefer the job submitted in this session
+        preferred = getattr(self, "_current_job_info_path", None)
+        if preferred:
+            chk, _, chk_code = self.run_command(
+                f"test -f {shlex.quote(preferred)} && echo ok", timeout=10)
+            if chk_code == 0 and chk.strip() == "ok":
+                latest_path = preferred
+            else:
+                _log(f"_current_job_info_path {preferred!r} not found on remote — falling back to glob")
+                latest_path = None
+        else:
+            latest_path = None
+
+        if not latest_path:
+            # Fall back: newest .info file across all job types
+            glob_cmd = (
+                f"ls -t {self.remote_work_dir}/te_analysis_job_*.info "
+                f"{self.remote_work_dir}/te_motif_job_*.info "
+                f"{self.remote_work_dir}/gameca_*.info 2>/dev/null | head -1"
+            )
+            out, _, _ = self.run_command(glob_cmd, timeout=10)
+            latest_path = out.strip()
         if not latest_path:
             return None, None, None, None, None
 
@@ -1621,27 +2038,40 @@ exit $EXIT_CODE
         """Check the status of the most recently submitted batch job."""
         import time as _time
         _status_t0 = _time.time()
+
+        is_session_job = bool(getattr(self, "_current_job_info_path", None))
         job_info, job_out, job_err, job_done, job_errlog = self._find_latest_job_info()
 
         if job_info is None:
-            print("\nNo job information found. Submit a batch job first.")
+            print()
+            print("=" * 60)
+            print("  No job information found.")
+            print("  Submit a batch job first (option 9 / 16).")
+            print("=" * 60)
             return None
 
-        job_id   = job_info.get("JOB_ID",   "unknown")
-        out_dir  = job_info.get("OUTPUT_DIR", "")
-        family   = job_info.get("FAMILY",    "")
-        job_type = job_info.get("TYPE",      "pipeline")
+        job_id    = job_info.get("JOB_ID",   "unknown")
+        out_dir   = job_info.get("OUTPUT_DIR", "")
+        family    = job_info.get("FAMILY",    "")
+        label     = job_info.get("LABEL",     "")
+        job_type  = job_info.get("TYPE",      "pipeline" if family else label or "unknown")
         submitted = job_info.get("SUBMITTED", "unknown")
 
         print()
         print("=" * 60)
-        print("  JOB STATUS")
-        print("=" * 60)
+        if not is_session_job:
+            print("  ⚠  HISTORICAL JOB  (no job submitted in this session)")
+            print("     Showing last job found on disk — this is NOT your current run.")
+            print("     Submit a new job, then check status again.")
+            print("=" * 60)
+        else:
+            print("  JOB STATUS")
+            print("=" * 60)
         print(f"  Job ID    : {job_id}")
         print(f"  Type      : {job_type}" + (f"  (family: {family})" if family else ""))
         print(f"  Submitted : {submitted}")
-        print(f"  Out dir   : {out_dir or '(unknown)'}")
-        print(f"  Job log   : {job_out}")
+        print(f"  Out dir   : {out_dir or '(not set — motif/command job)'}")
+        print(f"  Job log   : {job_out or '(unknown)'}")
 
         # ── 1. Ask scheduler first — never trust .done alone ─────────────────
         sched_state = self._get_scheduler_state(job_id)
@@ -1669,7 +2099,13 @@ exit $EXIT_CODE
             elif done_val:
                 print(f"  State     : FAILED  ✗  (exit code: {done_val}, scheduler silent)")
             else:
-                print("  State     : UNKNOWN  (scheduler silent, no done marker)")
+                # Could be a nohup background job — check by PID
+                ps_out, _, ps_code = self.run_command(
+                    f"ps -p {shlex.quote(str(job_id))} -o pid= 2>/dev/null", timeout=8)
+                if ps_code == 0 and ps_out.strip():
+                    print("  State     : RUNNING  ▶  (background process, not in scheduler queue)")
+                else:
+                    print("  State     : UNKNOWN  (scheduler silent, process not found, no done marker)")
 
         # ── 2. Stage progress from checkpoint files ───────────────────────────
         print()
@@ -1748,12 +2184,31 @@ exit $EXIT_CODE
             for line in (preamble or "(no output yet)").rstrip().splitlines():
                 print(f"  {line}")
 
-        # ── 4. Error details only when job actually failed ───────────────────
-        job_failed = done_val not in ("", "0")
+        # ── 4. Stderr / error details ────────────────────────────────────────
+        job_failed  = done_val not in ("", "0")
+        job_missing_done = done_val == ""   # script didn't finish / still running
+        show_err = job_failed or job_missing_done
+
+        if show_err:
+            # Always show stderr when the job didn't produce a clean .done marker
+            err_file = job_err or job_errlog
+            if err_file:
+                err_tail, _, err_read_code = self.run_command(
+                    f"wc -l < {err_file} 2>/dev/null; tail -40 {err_file} 2>/dev/null",
+                    timeout=15)
+                if err_tail.strip() and err_tail.strip() != "0":
+                    print()
+                    print("  --- Stderr / setup errors ---")
+                    lines = err_tail.strip().splitlines()
+                    # First line is wc -l output; rest is tail
+                    line_count = lines[0].strip() if lines else "?"
+                    for line in lines[1:]:
+                        print(f"  {line}")
+                    print(f"  ({line_count} total lines in stderr log)")
+
         if job_failed:
             print()
-            print("  --- Errors ---")
-            # Show last traceback block from the output log
+            print("  --- Fatal errors in stdout ---")
             tb_out, _, _ = self.run_command(
                 f"grep -n 'Traceback\\|FATAL\\|Error:\\|Exception:\\|ERROR in stage' "
                 f"{job_out} 2>/dev/null | tail -20",
@@ -1761,16 +2216,11 @@ exit $EXIT_CODE
             if tb_out.strip():
                 for line in tb_out.strip().splitlines():
                     print(f"  {line}")
-            # Show tail of the error log
-            err_tail, _, _ = self.run_command(
-                f"tail -30 {job_errlog} 2>/dev/null || echo '(empty)'", timeout=15)
-            for line in (err_tail or "(empty)").rstrip().splitlines():
-                print(f"  {line}")
 
         print()
         print(f"  Full log  : {job_out}")
-        if job_failed:
-            print(f"  Error log : {job_errlog}")
+        if job_err and job_err != job_out:
+            print(f"  Stderr    : {job_err}")
         elapsed = _time.time() - _status_t0
         print(f"  Checked in {elapsed:.1f}s")
         print("=" * 60)
@@ -1993,15 +2443,299 @@ exit $EXIT_CODE
         """Run the analysis - just calls submit_batch_job for backwards compatibility."""
         return self.submit_batch_job()
 
+    # ── Submission diagnostics ────────────────────────────────────────────────
+
+    def diagnose_job_submission(self):
+        """Run a trivial test job (echo) through the full submission pipeline.
+
+        Prints a step-by-step trace so the user can see exactly where things
+        break — SLURM not running, wrong partition, nohup not surviving, etc.
+        """
+        import datetime as _dt, io as _io, time as _time
+        print()
+        print("=" * 60)
+        print("  Job Submission Diagnostic")
+        print("=" * 60)
+
+        _ts  = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        scr  = f"{self.remote_work_dir}/diag_{_ts}.sh"
+        out  = f"{self.remote_work_dir}/diag_{_ts}.out"
+        err  = f"{self.remote_work_dir}/diag_{_ts}.err"
+        done = f"{self.remote_work_dir}/diag_{_ts}.done"
+
+        script = (
+            "#!/bin/bash\n"
+            f'echo "[diag] started at $(date)"\n'
+            f'echo "[diag] hostname=$(hostname)"\n'
+            f'echo "[diag] user=$(whoami)"\n'
+            f'sleep 5\n'
+            f'echo "[diag] finished"\n'
+            f'touch {done}\n'
+        )
+
+        # Step 1: write script
+        print("\n[1/5] Writing test script via SFTP ...")
+        try:
+            if self.sftp:
+                self.sftp.putfo(_io.BytesIO(script.encode()), scr)
+                self.run_command(f"chmod +x {scr}", timeout=10)
+                print(f"      OK  → {scr}")
+            else:
+                print("      SFTP not available")
+                return
+        except Exception as e:
+            print(f"      FAILED: {e}")
+            return
+
+        # Step 2: check SLURM
+        print("\n[2/5] Checking SLURM daemon (scontrol ping) ...")
+        ping_out, ping_err, ping_code = self.run_command("scontrol ping 2>&1", timeout=8)
+        slurm_up = ping_code == 0 and "UP" in ping_out
+        print(f"      exit={ping_code}  output={ping_out.strip()!r}")
+        print(f"      SLURM running: {'YES' if slurm_up else 'NO'}")
+
+        # Step 3: detect partition
+        print("\n[3/5] Detecting SLURM partition (sinfo) ...")
+        part_out, _, part_code = self.run_command(
+            "sinfo --noheader -o '%P %a %D' 2>&1", timeout=8)
+        print(f"      exit={part_code}  output={part_out.strip()!r}")
+        detected_part = self._detect_slurm_partition() if slurm_up else "(N/A)"
+        print(f"      Will use partition: {detected_part!r}")
+
+        # Step 4: try sbatch
+        submitted_job_id = None
+        if slurm_up:
+            queue = detected_part
+            mem_mb = self.params["MEM_MB"]
+            cpus   = self.params["CPUS"]
+            header = self._job_script_header("diag_test", out, err,
+                                             mem_mb=mem_mb, cpus=cpus,
+                                             walltime="00:05", queue=queue)
+            full_script = "#!/bin/bash\n" + header + "\n" + script
+            try:
+                self.sftp.putfo(_io.BytesIO(full_script.encode()), scr)
+            except Exception as e:
+                print(f"      Script overwrite failed: {e}")
+            print(f"\n[4/5] Submitting via sbatch ...")
+            sub_out, sub_err, sub_code = self.run_command(f"sbatch {scr}", timeout=20)
+            print(f"      exit={sub_code}")
+            print(f"      stdout={sub_out.strip()!r}")
+            print(f"      stderr={sub_err.strip()!r}")
+            if sub_code == 0:
+                submitted_job_id = self._parse_job_id(sub_out + sub_err)
+                print(f"      parsed job_id={submitted_job_id!r}")
+                if submitted_job_id:
+                    _time.sleep(2)
+                    q_out, q_err, q_code = self.run_command(
+                        f"squeue -j {submitted_job_id} 2>&1", timeout=8)
+                    print(f"      squeue output={q_out.strip()!r}")
+        else:
+            print("\n[4/5] Skipping sbatch (SLURM not running)")
+
+        # Step 5: nohup fallback
+        if not submitted_job_id:
+            print(f"\n[5/5] Trying nohup fallback ...")
+            # Rewrite script without scheduler headers
+            plain = "#!/bin/bash\n" + script
+            try:
+                self.sftp.putfo(_io.BytesIO(plain.encode()), scr)
+                self.run_command(f"chmod +x {scr}", timeout=5)
+            except Exception as e:
+                print(f"      Script write failed: {e}")
+                return
+            nohup_cmd = (
+                f"setsid nohup bash {scr} >{out} 2>{err} </dev/null & "
+                f"PID=$!; disown $PID 2>/dev/null || true; echo $PID"
+            )
+            pid_out, pid_err, pid_code = self.run_command(nohup_cmd, timeout=10)
+            pid = pid_out.strip().split()[-1] if pid_out.strip() else None
+            print(f"      exit={pid_code}  pid={pid!r}  err={pid_err.strip()!r}")
+            if pid:
+                print(f"      Waiting 8s then checking log ...")
+                _time.sleep(8)
+                log_out, _, _ = self.run_command(f"cat {out} 2>/dev/null", timeout=5)
+                print(f"      Log contents: {log_out.strip()!r}")
+                done_out, _, _ = self.run_command(f"ls {done} 2>/dev/null", timeout=5)
+                print(f"      Done marker:  {'FOUND' if done_out.strip() else 'MISSING'}")
+            else:
+                print("      nohup also failed — cannot run background jobs on this host")
+        else:
+            print("\n[5/5] sbatch succeeded — skipping nohup check")
+
+        print("\n" + "=" * 60)
+        print("  Diagnostic complete")
+        print("=" * 60)
+
+    # ── Generic batch submission ──────────────────────────────────────────────
+
+    def submit_command_as_batch_job(self, label: str, command: str,
+                                    mem_mb: int = None, cpus: int = None,
+                                    walltime: str = None, queue: str = None) -> str | None:
+        """Wrap any shell command in a scheduler job script and submit it.
+
+        Returns the job ID (scheduler) or PID (nohup fallback) string, or None
+        on total failure.  Every step prints a visible status line so failures
+        are never silent.
+        """
+        import datetime as _dt
+        import io as _io
+        import base64 as _b64
+
+        _ts      = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe     = re.sub(r"[^a-z0-9_]", "_", label.lower())[:20]
+        job_name   = f"gameca_{safe}"
+        job_script = f"{self.remote_work_dir}/{safe}_{_ts}.sh"
+        job_out    = f"{self.remote_work_dir}/{safe}_{_ts}.out"
+        job_err    = f"{self.remote_work_dir}/{safe}_{_ts}.err"
+        job_done   = f"{self.remote_work_dir}/{safe}_{_ts}.done"
+        job_info   = f"{self.remote_work_dir}/gameca_{safe}_{_ts}.info"
+
+        mem_mb   = mem_mb   or self.params["MEM_MB"]
+        cpus     = cpus     or self.params["CPUS"]
+        walltime = walltime or self.params["WALLTIME"]
+        queue    = queue    or self.params["QUEUE"]
+
+        print(f"\n[SUBMIT] ── Job submission: {label} ─────────────────────────")
+        print(f"[SUBMIT] Script : {job_script}")
+        print(f"[SUBMIT] Output : {job_out}")
+        print(f"[SUBMIT] Error  : {job_err}")
+        print(f"[SUBMIT] Sched  : {self.scheduler or 'none'}  live={getattr(self, '_scheduler_live', False)}")
+        print(f"[SUBMIT] Params : mem={mem_mb}MB  cpus={cpus}  walltime={walltime}  queue={queue}")
+
+        if self.scheduler == "slurm" and queue in ("normal", ""):
+            detected = self._detect_slurm_partition()
+            if detected and detected != queue:
+                print(f"[SUBMIT] Partition auto-detected: {detected!r} (was {queue!r})")
+                queue = detected
+
+        sched_header = self._job_script_header(
+            job_name, job_out, job_err,
+            mem_mb=mem_mb, cpus=cpus, walltime=walltime, queue=queue,
+        )
+        venv_block   = self._venv_setup_block()
+        module_block = self._module_load_block()
+
+        script = (
+            "#!/bin/bash\n"
+            f"{sched_header}\n"
+            "# setup phase — venv errors are logged but do not abort the job\n"
+            "set -uo pipefail\n"
+            f"{module_block}\n"
+            f"{venv_block}\n"
+            "# command phase — hard exit on any failure from here on\n"
+            "set -euo pipefail\n"
+            f'echo "[$(date +%H:%M:%S)] Starting {label} ..."\n'
+            f"cd {self.remote_work_dir}\n"
+            f"{command}\n"
+            f'echo "[$(date +%H:%M:%S)] {label} complete."\n'
+            f"touch {job_done}\n"
+        )
+        print(f"[SUBMIT] Script size: {len(script)} bytes")
+
+        # ── Step 1: Upload job script ─────────────────────────────────────────
+        script_written = False
+        if self.sftp:
+            print("[SUBMIT] Uploading script via SFTP...")
+            try:
+                self.sftp.putfo(_io.BytesIO(script.encode()), job_script)
+                print("[SUBMIT] SFTP upload OK")
+                script_written = True
+            except Exception as sftp_exc:
+                print(f"[SUBMIT] SFTP upload failed: {sftp_exc}")
+                print("[SUBMIT] Falling back to base64 shell write...")
+
+        if not script_written:
+            print("[SUBMIT] Writing script via base64 shell command...")
+            b64 = _b64.b64encode(script.encode()).decode()
+            wr_cmd = f"echo {shlex.quote(b64)} | base64 -d > {shlex.quote(job_script)}"
+            wr_out, wr_err, wr_code = self.run_command(wr_cmd, timeout=30)
+            if wr_code != 0:
+                print(f"[SUBMIT] FAILED to write script (exit={wr_code}): {wr_err.strip()!r}")
+                return None
+            print("[SUBMIT] Base64 write OK")
+            script_written = True
+
+        cx_out, cx_err, cx_code = self.run_command(f"chmod +x {shlex.quote(job_script)}", timeout=10)
+        if cx_code != 0:
+            print(f"[SUBMIT] chmod failed (exit={cx_code}): {cx_err.strip()!r}")
+        else:
+            print("[SUBMIT] chmod +x OK")
+
+        # Verify the script actually landed on disk
+        vf_out, _, vf_code = self.run_command(
+            f"wc -c < {shlex.quote(job_script)} 2>/dev/null", timeout=10)
+        print(f"[SUBMIT] Remote script size: {vf_out.strip() or '?'} bytes  (exit={vf_code})")
+
+        # ── Step 2: Submit via scheduler ──────────────────────────────────────
+        job_id   = None
+        combined = ""
+
+        if getattr(self, "_scheduler_live", False):
+            submit_cmd = self._submit_job_cmd(job_script)
+            print(f"[SUBMIT] Scheduler command: {submit_cmd}")
+            sub_out, sub_err, sub_code = self.run_command(submit_cmd, timeout=60)
+            combined = (sub_out + "\n" + sub_err).strip()
+            print(f"[SUBMIT] Scheduler exit={sub_code}")
+            if sub_out.strip():
+                print(f"[SUBMIT] Scheduler stdout: {sub_out.strip()!r}")
+            if sub_err.strip():
+                print(f"[SUBMIT] Scheduler stderr: {sub_err.strip()!r}")
+
+            if sub_code == 0:
+                job_id = self._parse_job_id(combined)
+                print(f"[SUBMIT] Parsed job ID: {job_id!r}")
+                if job_id:
+                    import time as _time
+                    _time.sleep(2)
+                    q_out, q_err, q_code = self.run_command(
+                        self._check_running_cmd(job_id), timeout=15)
+                    print(f"[SUBMIT] Queue check (exit={q_code}): {q_out.strip()!r}")
+                    # Only discard job_id if queue reports a definitive "not found"
+                    # (empty output means the scheduler accepted but hasn't registered yet
+                    # — keep the ID so the user can monitor it)
+            else:
+                print(f"[SUBMIT] Scheduler submission FAILED (exit={sub_code})")
+        else:
+            print("[SUBMIT] Scheduler daemon not live — skipping scheduler, using nohup")
+
+        # ── Step 3: nohup fallback ────────────────────────────────────────────
+        if not job_id:
+            if combined:
+                print(f"[SUBMIT] Scheduler gave no valid job ID — trying nohup fallback")
+            nohup_cmd = (
+                f"nohup bash {shlex.quote(job_script)} "
+                f">{shlex.quote(job_out)} 2>{shlex.quote(job_err)} </dev/null & "
+                f"echo $!"
+            )
+            print(f"[SUBMIT] nohup command: {nohup_cmd}")
+            pid_out, pid_err, pid_code = self.run_command(nohup_cmd, timeout=20)
+            pid = pid_out.strip().split()[-1] if pid_out.strip() else None
+            print(f"[SUBMIT] nohup exit={pid_code}  PID={pid!r}  stderr={pid_err.strip()!r}")
+            if pid_code != 0 or not pid or not pid.isdigit():
+                print(f"[SUBMIT] FAILED: nohup launch failed")
+                return None
+            self._write_job_info(job_info, pid, job_out, job_err, job_done, label)
+            print(f"\n  Job running in background  (PID {pid})")
+            print(f"  Output: tail -f {job_out}")
+            print(f"  Errors: tail -f {job_err}")
+            return pid
+
+        # ── Step 4: Write info file ───────────────────────────────────────────
+        print(f"[SUBMIT] Writing info file: {job_info}")
+        self._write_job_info(job_info, job_id, job_out, job_err, job_done, label)
+        print(f"\n  Job submitted  (ID {job_id})")
+        print(f"  Queue:  {queue}   CPUs: {cpus}   Mem: {mem_mb}MB")
+        print(f"  Output: {job_out}")
+        print(f"  Errors: {job_err}")
+        sched = self.scheduler or "lsf"
+        print(f"\n  Monitor:  {'squeue -j' if sched == 'slurm' else 'bjobs'} {job_id}")
+        print(f"  Live log: tail -f {job_out}")
+        return job_id
+
     # ── Motif-only batch job ──────────────────────────────────────────────────
 
     def submit_motif_batch_job(self):
-        """Submit a standalone motif+GO analysis batch job starting from a BED file.
-
-        Uploads te_motif.py + te_go.py, builds a comprehensive batch script
-        that runs bedtools intersect, Fisher enrichment, and GO annotation, then
-        submits it via the cluster scheduler (LSF bsub or Slurm sbatch).
-        """
+        """Submit a standalone motif+GO analysis batch job starting from a BED file."""
         print()
         print("=" * 60)
         print("  Submit Motif+GO Batch Job  (from TE loci BED)")
@@ -2009,28 +2743,21 @@ exit $EXIT_CODE
 
         # ── Collect parameters interactively ──────────────────────────────────
         default_bed = f"{self.remote_work_dir}/results/motif_analysis/te_loci.bed"
-        bed_path = input(f"\nRemote path to TE loci BED [{default_bed}]: ").strip()
-        if not bed_path:
-            bed_path = default_bed
+        bed_path = input(f"\nRemote path to TE loci BED [{default_bed}]: ").strip() or default_bed
 
-        # Prefer the tabix-indexed path; fall back to plain BED path.
         default_jaspar = (str(self.params.get("JASPAR_TABIX_PATH", "")).strip()
                           or str(self.params.get("JASPAR_BED_PATH", "")).strip())
-        jaspar_bed = input(f"Remote path to JASPAR BED / tabix .bed.gz [{default_jaspar or 'auto-resolve'}]: ").strip()
+        jaspar_bed = input(f"Remote path to JASPAR tabix .bed.gz [{default_jaspar or 'none — skip JASPAR'}]: ").strip()
         if not jaspar_bed:
-            jaspar_bed = default_jaspar
+            jaspar_bed = default_jaspar  # may still be "" if not configured
 
-        build_default = self.params.get("ASSEMBLY", "hg38")
-        build = input(f"Genome build [{build_default}]: ").strip() or build_default
+        build = input(f"Genome build [{self.params.get('ASSEMBLY', 'hg38')}]: ").strip() or self.params.get("ASSEMBLY", "hg38")
 
         default_out = f"{self.remote_work_dir}/results"
-        out_dir = input(f"Output directory on cluster [{default_out}]: ").strip()
-        if not out_dir:
-            out_dir = default_out
+        out_dir = input(f"Output directory on cluster [{default_out}]: ").strip() or default_out
 
         p_thresh = input("Fisher p-value threshold [0.05]: ").strip() or "0.05"
-        run_go   = input("Also run GO annotation after motif analysis? [y]: ").strip().lower()
-        run_go   = run_go not in ("n", "no", "0", "false")
+        run_go   = input("Also run GO annotation? [y]: ").strip().lower() not in ("n", "no", "0", "false")
 
         mem_mb   = int(input(f"Memory (MB) [{self.params['MEM_MB']}]: ").strip() or self.params["MEM_MB"])
         cpus     = int(input(f"CPUs [{self.params['CPUS']}]: ").strip() or self.params["CPUS"])
@@ -2040,7 +2767,7 @@ exit $EXIT_CODE
         confirm = input(
             f"\nSubmit motif batch job?\n"
             f"  BED:     {bed_path}\n"
-            f"  JASPAR:  {jaspar_bed or '(auto-resolve)'}\n"
+            f"  JASPAR:  {jaspar_bed or '(none — JASPAR skipped)'}\n"
             f"  build:   {build}   out: {out_dir}\n"
             f"  mem={mem_mb}MB  cpus={cpus}  walltime={walltime}  queue={queue}\n"
             f"  run-go:  {run_go}\n"
@@ -2062,330 +2789,73 @@ exit $EXIT_CODE
                 print(f"Error: failed to upload {name}")
                 return False
 
-        # ── Build job script paths ─────────────────────────────────────────────
-        import datetime as _dt
-        _ts        = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-        job_name   = "te_motif_go"
-        job_script = f"{self.remote_work_dir}/te_motif_job_{_ts}.sh"
-        job_out    = f"{self.remote_work_dir}/te_motif_job_{_ts}.out"
-        job_err    = f"{self.remote_work_dir}/te_motif_job_{_ts}.err"
-        job_done   = f"{self.remote_work_dir}/te_motif_job_{_ts}.done"
-        job_info   = f"{self.remote_work_dir}/te_motif_job_{_ts}.info"
-        job_errlog = f"{self.remote_work_dir}/te_motif_job_{_ts}.error.log"
-        scratch    = f"{self.remote_work_dir}/tmp_motif"
+        # ── Build command ──────────────────────────────────────────────────────
+        scratch = f"{self.remote_work_dir}/tmp_motif"
 
-        sched_header = self._job_script_header(
-            job_name, job_out, job_err,
-            mem_mb=mem_mb, cpus=cpus, walltime=walltime, queue=queue,
-        )
-        module_block = self._module_load_block()
-        venv_block   = self._venv_setup_block()
-
-        # Build te_motif.py CLI
         motif_cmd = (
-            f"python -u {self.remote_work_dir}/te_motif.py"
-            f" --bed-input {bed_path}"
-            f" --build {build}"
-            f" --out-dir {out_dir}"
+            f"{self._python} -u {self.remote_work_dir}/te_motif.py"
+            f" --bed-input {shlex.quote(bed_path)}"
+            f" --build {shlex.quote(build)}"
+            f" --out-dir {shlex.quote(out_dir)}"
             f" --p-threshold {p_thresh}"
         )
         if jaspar_bed:
-            motif_cmd += f" --jaspar-bed {jaspar_bed}"
+            motif_cmd += f" --jaspar-bed {shlex.quote(jaspar_bed)}"
         if run_go:
-            motif_cmd += f" --run-go"
+            motif_cmd += " --run-go"
 
-        # Build te_go.py CLI (explicit fallback if --run-go fails)
-        go_cmd = (
-            f"python -u {self.remote_work_dir}/te_go.py"
-            f" --enrichment-dir {out_dir}/enrichment_results"
-            f" --build {build}"
-            f" --out-dir {out_dir}"
-            f" --p-threshold {p_thresh}"
+        go_fallback = ""
+        if run_go:
+            go_cmd = (
+                f"{self._python} -u {self.remote_work_dir}/te_go.py"
+                f" --enrichment-dir {shlex.quote(out_dir)}/enrichment_results"
+                f" --build {shlex.quote(build)}"
+                f" --out-dir {shlex.quote(out_dir)}"
+                f" --p-threshold {p_thresh}"
+            )
+            go_fallback = (
+                f"\n# Run GO explicitly if te_motif didn't chain it\n"
+                f"if [ ! -f {shlex.quote(out_dir)}/go_annotations/gene_functions.csv ]; then\n"
+                f"  {go_cmd}\nfi"
+            )
+
+        preflight = (
+            f"[ -f {shlex.quote(bed_path)} ] || "
+            f"{{ echo 'FATAL: BED not found: {bed_path}'; exit 1; }}\n"
+        )
+        if jaspar_bed:
+            preflight += (
+                f"[ -f {shlex.quote(jaspar_bed)} ] || "
+                f"{{ echo 'FATAL: JASPAR BED not found: {jaspar_bed}'; exit 1; }}\n"
+                f"[ -f {shlex.quote(jaspar_bed)}.tbi ] || "
+                f"{{ echo 'FATAL: JASPAR .tbi not found — run: tabix -p bed {jaspar_bed}'; exit 1; }}\n"
+            )
+        preflight += (
+            f"command -v bedtools >/dev/null 2>&1 || "
+            f"{{ echo 'FATAL: bedtools not in PATH'; exit 1; }}\n"
+            f"mkdir -p {shlex.quote(scratch)} {shlex.quote(out_dir)}\n"
+            f"export TMPDIR={shlex.quote(scratch)}"
         )
 
-        batch_script = f'''#!/bin/bash
-{sched_header}
-{module_block}
+        cmd = f"{preflight}\n{motif_cmd}{go_fallback}"
 
-# ── Virtual environment + package setup ───────────────────────────────────────
-{venv_block}
-
-# ── Install bedtools via conda if missing ─────────────────────────────────────
-if ! command -v bedtools >/dev/null 2>&1; then
-    if command -v conda >/dev/null 2>&1; then
-        echo "[$(date +%H:%M:%S)] bedtools not found — installing via conda ..."
-        conda install -y -c bioconda bedtools 2>/dev/null \\
-            && echo "[$(date +%H:%M:%S)] bedtools installed" \\
-            || echo "[$(date +%H:%M:%S)] conda bedtools install failed; job will abort at intersect"
-    else
-        echo "[$(date +%H:%M:%S)] WARNING: bedtools not found and conda unavailable"
-    fi
-fi
-
-# ── Job banner ─────────────────────────────────────────────────────────────────
-echo "=========================================================="
-echo "  GAMECA — Motif+GO Batch Job"
-echo "=========================================================="
-echo "  Job script : {job_script}"
-echo "  Job ID     : ${{LSB_JOBID:-${{SLURM_JOB_ID:-unknown}}}}"
-echo "  Host       : $(hostname)"
-echo "  Date       : $(date)"
-echo "  CPUs alloc : $(nproc 2>/dev/null || echo N/A)"
-echo "  Mem req    : {mem_mb} MB"
-echo "  Python     : $(python --version 2>&1)"
-echo "  bedtools   : $(bedtools --version 2>/dev/null || echo 'not found')"
-echo "=========================================================="
-echo "  BED input  : {bed_path}"
-echo "  JASPAR BED : {jaspar_bed or '(auto-resolve)'}"
-echo "  Build      : {build}"
-echo "  Out dir    : {out_dir}"
-echo "  p-thresh   : {p_thresh}"
-echo "  Run GO     : {str(run_go).lower()}"
-echo "  Scratch    : {scratch}"
-echo "=========================================================="
-
-# ── Error log init ─────────────────────────────────────────────────────────────
-ERROR_LOG="{job_errlog}"
-echo "=== te_motif+GO Error Log ===" > "$ERROR_LOG"
-echo "Job ID   : ${{LSB_JOBID:-${{SLURM_JOB_ID:-unknown}}}}" >> "$ERROR_LOG"
-echo "Host     : $(hostname)" >> "$ERROR_LOG"
-echo "Started  : $(date)"     >> "$ERROR_LOG"
-echo "" >> "$ERROR_LOG"
-
-# ── Pre-flight checks ──────────────────────────────────────────────────────────
-echo ""
-echo "[$(date +%H:%M:%S)] === PRE-FLIGHT CHECKS ==="
-
-# 1. BED input
-if [ ! -f "{bed_path}" ]; then
-    echo "[$(date +%H:%M:%S)] FATAL: BED file not found: {bed_path}" | tee -a "$ERROR_LOG"
-    echo "1" > "{job_done}"; exit 1
-fi
-BED_LINES=$(wc -l < "{bed_path}" 2>/dev/null || echo "?")
-BED_SIZE=$(du -sh "{bed_path}" 2>/dev/null | cut -f1)
-echo "[$(date +%H:%M:%S)]   BED file  : OK  ($BED_LINES lines, $BED_SIZE)"
-echo "[$(date +%H:%M:%S)]   BED head  :"
-head -3 "{bed_path}" | sed 's/^/    /'
-
-# 2. JASPAR BED (if provided)
-JASPAR_ARG="{jaspar_bed}"
-if [ -n "$JASPAR_ARG" ]; then
-    if [ ! -f "$JASPAR_ARG" ]; then
-        echo "[$(date +%H:%M:%S)] FATAL: JASPAR BED not found: $JASPAR_ARG" | tee -a "$ERROR_LOG"
-        echo "1" > "{job_done}"; exit 1
-    fi
-    JASP_SIZE=$(du -sh "$JASPAR_ARG" 2>/dev/null | cut -f1)
-    JASP_SIZE="${{JASP_SIZE:-$(wc -c < "$JASPAR_ARG" 2>/dev/null | awk '{{print $1" B"}}')}}"
-    echo "[$(date +%H:%M:%S)]   JASPAR BED: OK ($JASP_SIZE)"
-    # Check for required .tbi index alongside the .bed.gz
-    JASPAR_TBI="${{JASPAR_ARG}}.tbi"
-    if [ ! -f "$JASPAR_TBI" ]; then
-        echo "[$(date +%H:%M:%S)] FATAL: .tbi index not found alongside JASPAR file: $JASPAR_TBI" | tee -a "$ERROR_LOG"
-        echo "  Expected: ${{JASPAR_ARG}}.tbi" | tee -a "$ERROR_LOG"
-        echo "  Run: tabix -p bed $JASPAR_ARG   to build the index" | tee -a "$ERROR_LOG"
-        echo "1" > "{job_done}"; exit 1
-    fi
-    TBI_SIZE=$(du -sh "$JASPAR_TBI" 2>/dev/null | cut -f1)
-    TBI_SIZE="${{TBI_SIZE:-$(wc -c < "$JASPAR_TBI" 2>/dev/null | awk '{{print $1" B"}}')}}"
-    echo "[$(date +%H:%M:%S)]   JASPAR .tbi: OK ($TBI_SIZE)"
-else
-    echo "[$(date +%H:%M:%S)]   JASPAR BED: will be auto-resolved by te_motif.py"
-fi
-
-# 3. bedtools
-if ! command -v bedtools >/dev/null 2>&1; then
-    echo "[$(date +%H:%M:%S)] FATAL: bedtools not found on PATH" | tee -a "$ERROR_LOG"
-    echo "  PATH=$PATH" >> "$ERROR_LOG"
-    echo "1" > "{job_done}"; exit 1
-fi
-echo "[$(date +%H:%M:%S)]   bedtools  : $(bedtools --version 2>&1 | head -1)"
-
-# 4. Python packages
-echo "[$(date +%H:%M:%S)]   Checking Python packages ..."
-python - <<'PKGCHECK'
-import sys
-missing = []
-for pkg in ["pandas", "numpy", "scipy", "matplotlib", "requests"]:
-    try:
-        __import__(pkg)
-    except ImportError:
-        missing.append(pkg)
-if missing:
-    print(f"  [WARN] Missing packages: {{missing}}")
-else:
-    print("  [OK] All required packages available")
-PKGCHECK
-
-# 5. Disk space
-mkdir -p "{scratch}"
-FREE_GB=$(python3 -c "import shutil; t,u,f=shutil.disk_usage('{scratch}'); print(f'{{f/1e9:.1f}}')" 2>/dev/null || echo "?")
-echo "[$(date +%H:%M:%S)]   Scratch   : {scratch} (free: ${{FREE_GB}} GB)"
-
-if python3 -c "import shutil,sys; t,u,f=shutil.disk_usage('{scratch}'); sys.exit(0 if f>2e9 else 1)" 2>/dev/null; then
-    echo "[$(date +%H:%M:%S)]   Disk      : OK"
-else
-    echo "[$(date +%H:%M:%S)] WARNING: Less than 2 GB free in scratch — bedtools may fail" | tee -a "$ERROR_LOG"
-fi
-
-# 6. Output directory
-mkdir -p "{out_dir}"
-echo "[$(date +%H:%M:%S)]   Out dir   : {out_dir} (created/exists)"
-
-echo "[$(date +%H:%M:%S)] === PRE-FLIGHT COMPLETE ==="
-echo ""
-
-cd {self.remote_work_dir}
-
-# ── Stage 1: te_motif.py ───────────────────────────────────────────────────────
-echo "[$(date +%H:%M:%S)] =============================="
-echo "[$(date +%H:%M:%S)] STAGE 1: te_motif.py"
-echo "[$(date +%H:%M:%S)]   Command: {motif_cmd}"
-echo "[$(date +%H:%M:%S)] =============================="
-SECONDS=0
-export TMPDIR="{scratch}"
-
-{motif_cmd} 2>&1 | tee -a "$ERROR_LOG"
-MOTIF_EXIT=${{PIPESTATUS[0]}}
-MOTIF_SECS=$SECONDS
-
-echo ""
-echo "[$(date +%H:%M:%S)] te_motif.py exit code: $MOTIF_EXIT  (runtime: ${{MOTIF_SECS}}s)"
-
-if [ $MOTIF_EXIT -ne 0 ]; then
-    echo "[$(date +%H:%M:%S)] FATAL: te_motif.py failed (exit=$MOTIF_EXIT)" | tee -a "$ERROR_LOG"
-    echo "1" > "{job_done}"; exit $MOTIF_EXIT
-fi
-
-# Log output file inventory after motif stage
-echo ""
-echo "[$(date +%H:%M:%S)] --- Motif stage output files ---"
-find "{out_dir}/motif_analysis" "{out_dir}/enrichment_results" \\
-     -type f \\( -name "*.csv" -o -name "*.tsv" -o -name "*.png" -o -name "*.log" \\) \\
-     -exec ls -lh {{}} \\; 2>/dev/null | awk '{{print "  "$0}}'
-echo ""
-
-''' + (f'''
-# ── Stage 2 (explicit): te_go.py ──────────────────────────────────────────────
-# Only runs if te_motif.py did NOT already chain GO internally
-GO_DONE_MARKER="{out_dir}/go_annotations/gene_functions.csv"
-if [ -f "$GO_DONE_MARKER" ]; then
-    echo "[$(date +%H:%M:%S)] GO annotation already completed (--run-go chained by te_motif)."
-else
-    echo "[$(date +%H:%M:%S)] =============================="
-    echo "[$(date +%H:%M:%S)] STAGE 2: te_go.py (standalone)"
-    echo "[$(date +%H:%M:%S)]   Command: {go_cmd}"
-    echo "[$(date +%H:%M:%S)] =============================="
-    SECONDS=0
-    {go_cmd} 2>&1 | tee -a "$ERROR_LOG"
-    GO_EXIT=${{PIPESTATUS[0]}}
-    GO_SECS=$SECONDS
-    echo "[$(date +%H:%M:%S)] te_go.py exit code: $GO_EXIT  (runtime: ${{GO_SECS}}s)"
-    if [ $GO_EXIT -ne 0 ]; then
-        echo "[$(date +%H:%M:%S)] WARNING: te_go.py failed (exit=$GO_EXIT) — continuing" | tee -a "$ERROR_LOG"
-    fi
-fi
-''' if run_go else '''
-# GO annotation not requested (run_go=false)
-echo "[$(date +%H:%M:%S)] GO annotation skipped (not requested)."
-''') + f'''
-
-# ── Final output inventory ─────────────────────────────────────────────────────
-echo ""
-echo "[$(date +%H:%M:%S)] === FINAL OUTPUT INVENTORY ==="
-find "{out_dir}" -maxdepth 4 \\
-     -type f \\( -name "*.csv" -o -name "*.tsv" -o -name "*.png" -o -name "*.log" -o -name "*.txt" \\) \\
-     -exec ls -lh {{}} \\; 2>/dev/null | sort | awk '{{print "  "$0}}'
-
-RESULT_SIZE=$(du -sh "{out_dir}" 2>/dev/null | cut -f1)
-echo ""
-echo "[$(date +%H:%M:%S)] Total output size: $RESULT_SIZE at {out_dir}"
-
-TOTAL_SECS=$SECONDS
-echo ""
-echo "=========================================================="
-echo "  Job complete"
-echo "  Total runtime : $((TOTAL_SECS / 60))m $((TOTAL_SECS % 60))s"
-echo "  Date          : $(date)"
-echo "=========================================================="
-
-echo "" >> "$ERROR_LOG"
-echo "=== JOB SUCCEEDED ===" >> "$ERROR_LOG"
-echo "Ended: $(date)" >> "$ERROR_LOG"
-
-echo "0" > "{job_done}"
-exit 0
-'''
-
-        # ── Write job script to cluster ────────────────────────────────────────
-        _log(f"Writing batch job script to {job_script}")
-        # Write via echo-to-file in chunks to avoid heredoc quoting issues
-        import base64 as _b64
-        encoded = _b64.b64encode(batch_script.encode()).decode()
-        chunk   = 60000
-        chunks  = [encoded[i:i+chunk] for i in range(0, len(encoded), chunk)]
-
-        cmd0 = f"echo '{chunks[0]}' | base64 -d > {job_script}"
-        out, err, code = self.run_command(cmd0, timeout=30)
-        if code != 0:
-            print(f"Error writing job script (chunk 1): {err}")
-            return False
-        for i, ch in enumerate(chunks[1:], 2):
-            cmd_i = f"echo '{ch}' | base64 -d >> {job_script}"
-            out, err, code = self.run_command(cmd_i, timeout=30)
-            if code != 0:
-                print(f"Error writing job script (chunk {i}/{len(chunks)}): {err}")
-                return False
-
-        self.run_command(f"chmod +x {job_script}", timeout=10)
-        self.run_command(f"rm -f {job_out} {job_err} {job_done} {job_info}", timeout=10)
-
-        # ── Submit ─────────────────────────────────────────────────────────────
-        sched_label = (self.scheduler or "lsf").upper()
-        print(f"\nSubmitting motif batch job via {sched_label}...")
-        _log(f"Submit command: {self._submit_job_cmd(job_script)}")
-        out, err, code = self.run_command(self._submit_job_cmd(job_script), timeout=30)
-
-        if code != 0:
-            print(f"Error submitting job: {err}")
-            return False
-
-        job_id = self._parse_job_id(out)
+        job_id = self.submit_command_as_batch_job(
+            "te_motif_go", cmd,
+            mem_mb=mem_mb, cpus=cpus, walltime=walltime, queue=queue,
+        )
         if job_id:
             self.current_job_id = job_id
-            print(f"\nJob submitted successfully!  Job ID: {job_id}")
+            print(f"\n  Motif job submitted (ID/PID: {job_id})")
+            print("  Use 'Check batch job status' (option 11) to monitor it.")
         else:
-            print(f"Job submitted (could not parse ID from: {out})")
-            job_id = "unknown"
-            self.current_job_id = None
-
-        info = (f"JOB_ID={job_id}\nTYPE=motif_go\n"
-                f"BED={bed_path}\nOUTPUT_DIR={out_dir}\n"
-                f"LOG_OUT={job_out}\nLOG_ERR={job_err}\n"
-                f"LOG_DONE={job_done}\nLOG_ERRLOG={job_errlog}\n"
-                f"SUBMITTED=$(date)")
-        self.run_command(f"echo '{info}' > {job_info}", timeout=10)
-
-        print()
-        print("=" * 60)
-        print("MOTIF+GO BATCH JOB SUBMITTED")
-        print("=" * 60)
-        print(f"  Job ID     : {job_id}")
-        print(f"  Job output : {job_out}")
-        print(f"  Job errors : {job_err}")
-        print(f"  Error log  : {job_errlog}")
-        print(f"  Results    : {out_dir}")
-        sched = self.scheduler or "lsf"
-        print()
-        if sched == "slurm":
-            print(f"  squeue -j {job_id}   # status")
-            print(f"  tail -f {job_out}     # live log")
-            print(f"  scancel {job_id}      # cancel")
-        else:
-            print(f"  bjobs {job_id}        # status")
-            print(f"  bpeek {job_id}        # live log")
-            print(f"  bkill {job_id}        # cancel")
-        print("=" * 60)
-        return True
+            print("\n" + "!" * 60)
+            print("  SUBMISSION FAILED — no job is running.")
+            print("  Check the output above for error details.")
+            print("  Common causes: script upload failed, scheduler down,")
+            print("  nohup launch failed (try logging in to the cluster")
+            print("  and running the command manually).")
+            print("!" * 60)
+        return bool(job_id)
 
     # ── te_prep / te_enrichment remote launchers ────────────────────────────
 
@@ -2406,7 +2876,7 @@ exit 0
         genome_arg = f"--genome-fa {genome}" if genome else ""
         cmd = (
             f"cd {self.remote_work_dir} && "
-            f"python te_prep.py --build {build} {fam_arg} {genome_arg} --out-dir {out_dir} {extra}"
+            f"{self._python} te_prep.py --build {build} {fam_arg} {genome_arg} --out-dir {out_dir} {extra}"
         )
         print(f"\nRunning: {cmd}\n")
         out, err, code = self.run_command(cmd, timeout=600)
@@ -2436,7 +2906,7 @@ exit 0
         jaspar_arg = f"--jaspar-bed {jaspar}" if jaspar else ""
         cmd = (
             f"cd {self.remote_work_dir} && "
-            f"python te_enrichment.py --input {clustered} --build {build} "
+            f"{self._python} te_enrichment.py --input {clustered} --build {build} "
             f"--family {family} --out-dir {out_dir} {jaspar_arg} "
             f"--p-threshold {p_thresh} {extra}"
         )
@@ -2572,7 +3042,7 @@ exit 0
         self.run_command(f"chmod +x {script_path}")
 
         print("Generating clustering plots and consensus sequences...")
-        out, err, code = self.run_command(f"python {script_path}", timeout=600)
+        out, err, code = self.run_command(f"{self._python} {script_path}", timeout=600)
 
         self.run_command(f"rm -f {script_path}")
 
@@ -3254,15 +3724,24 @@ Examples:
   python hpc_client.py
   python hpc_client.py --host cluster.university.edu --user myusername
   python hpc_client.py -H cluster.edu -u myuser -o ./results
+  python hpc_client.py --host 45.128.119.52 --user root --key ~/.ssh/id_ed25519
+  python hpc_client.py --host cluster.edu --scheduler slurm
+  python hpc_client.py --host cluster.edu --scheduler lsf
         """
     )
-    parser.add_argument("-H", "--host", help="HPC hostname")
+    parser.add_argument("-H", "--host", help="HPC hostname or IP")
     parser.add_argument("-p", "--port", type=int, default=22, help="SSH port (default: 22)")
     parser.add_argument("-u", "--user", help="Username")
+    parser.add_argument("-i", "--key", metavar="KEY_FILE",
+                        help="Path to SSH private key (default: auto-detect from ~/.ssh/)")
     parser.add_argument("-o", "--output", help="Local output directory for results")
     parser.add_argument(
         "--setup-email", action="store_true",
         help="Run one-time Gmail OAuth2 setup for email notifications, then exit",
+    )
+    parser.add_argument(
+        "--scheduler", choices=["lsf", "slurm"],
+        help="Force scheduler type (lsf or slurm). Auto-detected from PATH if omitted.",
     )
     args = parser.parse_args()
 
@@ -3311,12 +3790,31 @@ Examples:
         print("Username is required")
         sys.exit(1)
 
-    password = getpass.getpass("  Password: ")
+    key_path = args.key or ""
+    if key_path:
+        print(f"  Key file: {key_path}")
+        password = ""
+    else:
+        password = getpass.getpass("  Password (leave blank to use SSH key): ")
 
     # Connect
-    if not client.connect(hostname, username, password, port):
+    if not client.connect(hostname, username, password, port, key_path=key_path):
         print("Failed to connect. Exiting.")
         sys.exit(1)
+
+    # Apply --scheduler override, or prompt if auto-detection failed
+    if args.scheduler:
+        client.scheduler = args.scheduler
+        print(f"Scheduler override applied: {client.scheduler.upper()}")
+    elif not client.scheduler:
+        print("\nCould not auto-detect a scheduler (bsub/sbatch not found on PATH).")
+        while True:
+            choice = input("  Choose scheduler [lsf/slurm]: ").strip().lower()
+            if choice in ("lsf", "slurm"):
+                client.scheduler = choice
+                print(f"  Using: {choice.upper()}")
+                break
+            print("  Please enter 'lsf' or 'slurm'.")
 
     # Persist connection details for next session
     client._state["last_hostname"] = hostname

@@ -1,11 +1,11 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "GAMECA",
-  "version": "0.4.8",
+  "version": "0.4.20",
   "identifier": "com.gameca.gameca",
   "build": {
     "beforeDevCommand": "pnpm --dir frontend dev",
-    "beforeBuildCommand": "pnpm --dir frontend build",
+    "beforeBuildCommand": "bash scripts/build-sidecar.sh && pnpm --dir frontend build",
     "devUrl": "http://localhost:1420",
     "frontendDist": "../frontend/dist"
   },
@@ -21,7 +21,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data: asset: https://asset.localhost; font-src 'self'; connect-src 'self' ipc: tauri: http://ipc.localhost http://localhost:* ws://localhost:*; frame-src 'self' blob: data:;",
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data: asset: https://asset.localhost; font-src 'self'; connect-src 'self' ipc: tauri: http://ipc.localhost http://localhost:* ws://localhost:*; frame-src 'self' blob: data: asset: https://asset.localhost gamecapreview:;",
       "capabilities": ["default"]
     }
   },

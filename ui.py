@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+_UI_BUILD = "20260528-1"  # bump this when changing ui.py
 """
 ui.py — GAMECA terminal launcher.
 
@@ -15,6 +16,7 @@ Usage:
 
 import argparse
 import getpass
+import shlex
 import sys
 import os
 import re
@@ -270,7 +272,7 @@ def display_results(out_dir: Path):
 
 # ── HPC connection ────────────────────────────────────────────────────────────
 
-def _connect(hostname: str = None, username: str = None, port: int = 22):
+def _connect(hostname: str = None, username: str = None, port: int = 22, key_path: str = "", password: str = None):
     """Prompt for HPC credentials, connect, and return an HPCClient."""
     from hpc_client import HPCClient
 
@@ -305,11 +307,17 @@ def _connect(hostname: str = None, username: str = None, port: int = 22):
         print(red("  Username is required."))
         sys.exit(1)
 
-    password = getpass.getpass(f"  {cyan('›')} Password: ")
+    if password is not None:
+        print(f"  {cyan('›')} Password: {'*' * len(password)}")
+    elif key_path:
+        print(f"  {cyan('›')} Key file: {key_path}")
+        password = getpass.getpass(f"  {cyan('›')} Password (leave blank if key needs no passphrase): ")
+    else:
+        password = getpass.getpass(f"  {cyan('›')} Password: ")
 
     print()
     client = HPCClient()
-    if not client.connect(hostname, username, password, port):
+    if not client.connect(hostname, username, password, port, key_path=key_path):
         print(red("\n  Connection failed.  Check credentials and try again."))
         sys.exit(1)
 
@@ -328,13 +336,28 @@ def _connect(hostname: str = None, username: str = None, port: int = 22):
 
 # ── HPC-aware step helpers ────────────────────────────────────────────────────
 
-def _remote_run(client, label: str, cmd: str, timeout: int = 1800, stream: bool = True):
-    """Run a command on the cluster and print output."""
+def _remote_run(client, label: str, cmd: str, timeout: int = 1800, stream: bool = True,
+                force_direct: bool = False):
+    """Run a command on the cluster.
+
+    If the client has a scheduler detected and force_direct is False, submits as
+    a batch job (non-blocking, visible in squeue/bjobs). Otherwise runs directly
+    over SSH with streamed output.
+
+    Automatically prepends venv setup in both paths.
+    """
+    has_scheduler = bool(getattr(client, "scheduler", None))
+    if has_scheduler and not force_direct:
+        job_id = client.submit_command_as_batch_job(label, cmd)
+        return bool(job_id)
+
+    venv_prefix = client.ensure_venv_cmd() if hasattr(client, "ensure_venv_cmd") else ""
+    full_cmd = f"{venv_prefix}\n{cmd}" if venv_prefix else cmd
     print()
     _log(f"Starting remote step: {label} (timeout={timeout}s)")
     print(f"  {dim('$')} {dim(cmd)}")
     print(_divider())
-    out, err, code = client.run_command(cmd, timeout=timeout, stream_output=stream)
+    out, err, code = client.run_command(full_cmd, timeout=timeout, stream_output=stream)
     if not stream:
         if out:
             print(out)
@@ -354,8 +377,12 @@ def _remote_run(client, label: str, cmd: str, timeout: int = 1800, stream: bool 
 def _sync_remote_files(client, names):
     """Upload local pipeline files needed by a direct remote step."""
     base = Path(__file__).parent
-    _log(f"Syncing {len(names)} file(s) to {client.remote_work_dir}")
-    for name in names:
+    # Always include requirements.txt so the remote venv can install deps
+    all_names = list(names)
+    if "requirements.txt" not in all_names:
+        all_names.append("requirements.txt")
+    _log(f"Syncing {len(all_names)} file(s) to {client.remote_work_dir}")
+    for name in all_names:
         local_path = base / name
         if not local_path.exists():
             print(yellow(f"  Skipping missing local file: {name}"))
@@ -369,7 +396,59 @@ def _sync_remote_files(client, names):
     return True
 
 
+def _ensure_input_csv(client, prompt: str = "Input clustered CSV (remote path)") -> str:
+    """Ask whether the user already has an input CSV; if not, offer to run te_prep first.
+
+    Returns the remote path string, or "" if the user cancels.
+    """
+    print()
+    has_csv = _confirm("Do you already have an input CSV on the cluster?", default=True)
+    if has_csv:
+        path = _ask(prompt)
+        if not path.strip():
+            print(red("  No path entered — cancelling."))
+            return ""
+        return path.strip()
+
+    # Offer to run te_prep now
+    print()
+    print(f"  {yellow('›')} No input CSV — run te_prep.py first to download rmsk and extract sequences.")
+    run_prep = _confirm("Run te_prep now?", default=True)
+    if not run_prep:
+        print("  Skipping — re-run this step once you have a CSV.")
+        return ""
+
+    # Collect te_prep parameters
+    species, build = _ask_species_assembly()
+    family  = _ask("TE family name (e.g. HERVK, THE1D-int)")
+    genome  = _ask("Local assembly FASTA path on cluster (blank = none)", "")
+    out_dir = _ask("Output directory (remote)", client.remote_work_dir + "/te_data")
+
+    if not _sync_remote_files(client, ["te_prep.py"]):
+        return ""
+
+    cmd = (
+        f"cd {client.remote_work_dir} && "
+        f"{client._python} te_prep.py --build {shlex.quote(build)}"
+    )
+    if family:
+        cmd += f" --family {shlex.quote(family)}"
+    if genome:
+        cmd += f" --genome-fa {shlex.quote(genome)}"
+    cmd += f" --base-dir {shlex.quote(out_dir)}"
+    if not _remote_run(client, "te_prep", cmd, timeout=600, force_direct=True):
+        print(red("  te_prep failed — cannot continue."))
+        return ""
+
+    # te_prep writes <base-dir>/<family>/<family>_sequences.csv
+    guessed = f"{out_dir}/{family}/{family}_sequences.csv" if family else f"{out_dir}/sequences.csv"
+    print(f"\n  {dim('Expected output:')} {guessed}")
+    csv_path = _ask("Confirm input CSV path (edit if different)", guessed)
+    return csv_path.strip()
+
+
 def _step_prep(client):
+    import shlex as _sl
     print()
     print(_divider("te_prep.py  ·  Download rmsk + extract sequences"))
     species, build = _ask_species_assembly()
@@ -378,55 +457,87 @@ def _step_prep(client):
     out_dir = _ask("Remote output directory", client.remote_work_dir + "/te_data")
     if not _sync_remote_files(client, ["te_prep.py"]):
         return
-    fam_arg = f"--family {family}" if family else ""
-    genome_arg = f"--genome-fa {genome}" if genome else ""
     cmd = (
-        f"cd {client.remote_work_dir} && "
-        f"python te_prep.py --build {build} {fam_arg} {genome_arg} --out-dir {out_dir}"
+        f"cd {_sl.quote(client.remote_work_dir)} && "
+        f"{client._python} te_prep.py --build {_sl.quote(build)}"
     )
-    _remote_run(client, "te_prep", cmd, timeout=600)
+    if family:
+        cmd += f" --family {_sl.quote(family)}"
+    if genome:
+        cmd += f" --genome-fa {_sl.quote(genome)}"
+    cmd += f" --base-dir {_sl.quote(out_dir)}"
+    _remote_run(client, "te_prep", cmd, timeout=600, force_direct=True)
+
+
+def _batch_submit(client, label, cmd, scripts):
+    """Upload scripts and submit cmd as a batch job. Returns job_id or None."""
+    if not _sync_remote_files(client, scripts):
+        return None
+    job_id = client.submit_command_as_batch_job(label, cmd)
+    if job_id:
+        client.current_job_id = job_id
+        print(f"\n  {green('✓')} Job submitted  (ID/PID: {bold(str(job_id))})")
+        print(f"  Monitor with option {bold('11')}  (Check batch job status)")
+    else:
+        print(f"\n  {red('✗')} Submission failed — see [SUBMIT] log above.")
+    return job_id
 
 
 def _step_clustering(client):
+    import shlex as _sl
     print()
-    print(_divider("te_clustering.py  ·  k-mer + UMAP + HDBSCAN"))
-    inp     = _ask("Input sequences CSV (remote path)")
-    out     = _ask("Output CSV path (remote)", inp or "clustered.csv")
+    print(_divider("te_clustering.py  ·  k-mer + UMAP + HDBSCAN  [batch]"))
+    inp = _ensure_input_csv(client, "Input sequences CSV (remote path)")
+    if not inp:
+        return
+    out     = _ask("Output clustered CSV (remote)", inp.replace(".csv", "_clustered.csv") if inp.endswith(".csv") else inp + "_clustered.csv")
     out_dir = _ask("Visualization directory (remote)", client.remote_work_dir + "/results")
     kmer    = _ask("k-mer size", "6")
     family  = _ask("Family name", "FAMILY")
-    if not _sync_remote_files(client, ["te_clustering.py"]):
-        return
     cmd = (
-        f"cd {client.remote_work_dir} && "
-        f"python te_clustering.py --input {inp} --output {out} "
-        f"--kmer {kmer} --out-dir {out_dir} --family {family}"
+        f"cd {_sl.quote(client.remote_work_dir)} && "
+        f"{client._python} -u te_clustering.py "
+        f"--input {_sl.quote(inp)} --output {_sl.quote(out)} "
+        f"--kmer {_sl.quote(kmer)} --out-dir {_sl.quote(out_dir)} --family {_sl.quote(family)}"
     )
-    _remote_run(client, "te_clustering", cmd, timeout=1800)
+    _batch_submit(client, "te_clustering", cmd, ["te_clustering.py"])
 
 
 def _step_alignment(client):
+    import shlex as _sl
     print()
-    print(_divider("te_alignment.py  ·  MAFFT + CIAlign + consensus"))
-    inp     = _ask("Input clustered CSV (remote path)")
+    print(_divider("te_alignment.py  ·  MAFFT + CIAlign + consensus  [batch]"))
+    inp = _ensure_input_csv(client)
+    if not inp:
+        return
     out_dir = _ask("Output directory (remote)", client.remote_work_dir + "/results")
     family  = _ask("Family name", "FAMILY")
     skip_ci = _confirm("Skip CIAlign?", default=False)
-    if not _sync_remote_files(client, ["te_alignment.py"]):
-        return
     cmd = (
-        f"cd {client.remote_work_dir} && "
-        f"python te_alignment.py --input {inp} --out-dir {out_dir} --family {family}"
+        f"cd {_sl.quote(client.remote_work_dir)} && "
+        f"{client._python} -u te_alignment.py "
+        f"--input {_sl.quote(inp)} --out-dir {_sl.quote(out_dir)} --family {_sl.quote(family)}"
     )
     if skip_ci:
         cmd += " --no-cialign"
-    _remote_run(client, "te_alignment", cmd, timeout=3600)
+    _batch_submit(client, "te_alignment", cmd, ["te_alignment.py"])
 
 
 def _step_motif(client):
+    import shlex as _sl
     print()
-    print(_divider("te_motif.py  ·  JASPAR overlap + Fisher enrichment + HOMER"))
-    inp     = _ask("Input clustered CSV (remote path)")
+    print(_divider("te_clustering → te_motif.py  ·  Cluster then JASPAR + Fisher + HOMER  [batch]"))
+    inp = _ensure_input_csv(client)
+    if not inp:
+        return
+
+    # ── Clustering params (always run first) ──────────────────────────────────
+    default_clustered = inp.replace(".csv", "_clustered.csv") if inp.endswith(".csv") else inp + "_clustered.csv"
+    clustered_out = _ask("Clustered CSV output path (remote)", default_clustered)
+    family  = _ask("Family name (for clustering)", "FAMILY")
+    kmer    = _ask("k-mer size", "6")
+
+    # ── Motif params ─────────────────────────────────────────────────────────
     species, build = _ask_species_assembly()
     out_dir = _ask("Output directory (remote)", client.remote_work_dir + "/results")
 
@@ -434,7 +545,7 @@ def _step_motif(client):
     if _confirm("Provide a JASPAR BED file (remote path)?", default=False):
         jaspar = _ask("JASPAR BED path (remote)")
 
-    run_homer = _confirm("Also run HOMER known-motif enrichment per cluster?", default=False)
+    run_homer    = _confirm("Also run HOMER known-motif enrichment per cluster?", default=False)
     homer_genome = ""
     homer_size   = "200"
     homer_threads = "4"
@@ -443,61 +554,146 @@ def _step_motif(client):
         homer_size    = _ask("HOMER -size value", "200")
         homer_threads = _ask("HOMER threads per cluster", "4")
 
-    if not _sync_remote_files(client, ["te_motif.py"]):
-        return
-    cmd = (
-        f"cd {client.remote_work_dir} && "
-        f"python te_motif.py --input {inp} --build {build} --out-dir {out_dir}"
+    cluster_cmd = (
+        f"{client._python} -u te_clustering.py "
+        f"--input {_sl.quote(inp)} --output {_sl.quote(clustered_out)} "
+        f"--kmer {_sl.quote(kmer)} --out-dir {_sl.quote(out_dir)} --family {_sl.quote(family)}"
+    )
+    motif_cmd = (
+        f"{client._python} -u te_motif.py "
+        f"--input {_sl.quote(clustered_out)} --build {_sl.quote(build)} --out-dir {_sl.quote(out_dir)}"
     )
     if jaspar:
-        cmd += f" --jaspar-bed {jaspar}"
+        motif_cmd += f" --jaspar-bed {_sl.quote(jaspar)}"
     if run_homer:
-        cmd += " --homer"
+        motif_cmd += " --homer"
         if homer_genome.strip():
-            cmd += f" --homer-genome {homer_genome.strip()}"
-        cmd += f" --homer-size {homer_size} --homer-threads {homer_threads}"
-    _remote_run(client, "te_motif", cmd, timeout=3600)
+            motif_cmd += f" --homer-genome {_sl.quote(homer_genome.strip())}"
+        motif_cmd += f" --homer-size {_sl.quote(homer_size)} --homer-threads {_sl.quote(homer_threads)}"
+
+    cmd = (
+        f"cd {_sl.quote(client.remote_work_dir)} && "
+        f"echo '[GAMECA] Step 1/2: clustering ...' && "
+        f"{cluster_cmd} && "
+        f"echo '[GAMECA] Step 2/2: motif analysis ...' && "
+        f"{motif_cmd}"
+    )
+    _batch_submit(client, "te_clust_motif", cmd, ["te_clustering.py", "te_motif.py"])
 
 
 def _step_go(client):
+    import shlex as _sl
     print()
-    print(_divider("te_go.py  ·  GO annotation via mygene.info"))
-    enrich_dir = _ask("enrichment_results directory (remote path)")
-    clustered  = ""
-    if _confirm("Include clustered CSV for strand plots?", default=False):
-        clustered = _ask("Clustered CSV (remote path)")
+    print(_divider("te_go.py  ·  GO annotation via mygene.info  [batch]"))
+
+    family = _ask("TE family name (e.g. HERVK, THE1D-int)")
+    if not family:
+        print(red("  Family name is required."))
+        return
+
     species, build = _ask_species_assembly()
     out_dir = _ask("Output directory (remote)", client.remote_work_dir + "/results")
-    if not _sync_remote_files(client, ["te_go.py"]):
-        return
-    cmd = (
-        f"cd {client.remote_work_dir} && "
-        f"python te_go.py --enrichment-dir {enrich_dir} "
-        f"--build {build} --out-dir {out_dir}"
+    enrich_dir = f"{out_dir}/enrichment_results"
+
+    # Check if enrichment results already exist on the cluster
+    check_out, _, _ = client.run_command(
+        f"ls {_sl.quote(enrich_dir)}/cluster_*_enrichment.csv 2>/dev/null | wc -l",
+        timeout=15,
     )
-    if clustered:
-        cmd += f" --clustered-csv {clustered}"
-    _remote_run(client, "te_go", cmd, timeout=600)
+    enrich_exists = check_out.strip() not in ("", "0")
+
+    if not enrich_exists:
+        print(f"\n  {yellow('›')} No enrichment results found in {enrich_dir}")
+        print(f"  {yellow('›')} Will run: te_clustering → te_motif → te_go")
+
+        default_inp = f"{client.remote_work_dir}/te_data/{family}/{family}_sequences.csv"
+        inp = _ask("Input sequences CSV (remote path)", default_inp)
+        clustered_out = inp.replace(".csv", "_clustered.csv")
+
+        cluster_cmd = (
+            f"{client._python} -u te_clustering.py "
+            f"--input {_sl.quote(inp)} --output {_sl.quote(clustered_out)} "
+            f"--kmer 6 --out-dir {_sl.quote(out_dir)} --family {_sl.quote(family)}"
+        )
+        motif_cmd = (
+            f"{client._python} -u te_motif.py "
+            f"--input {_sl.quote(clustered_out)} --build {_sl.quote(build)} "
+            f"--out-dir {_sl.quote(out_dir)}"
+        )
+        go_cmd = (
+            f"{client._python} -u te_go.py "
+            f"--enrichment-dir {_sl.quote(enrich_dir)} "
+            f"--build {_sl.quote(build)} --out-dir {_sl.quote(out_dir)} "
+            f"--clustered-csv {_sl.quote(clustered_out)}"
+        )
+        cmd = (
+            f"cd {_sl.quote(client.remote_work_dir)} && "
+            f"echo '[GAMECA] Step 1/3: clustering ...' && {cluster_cmd} && "
+            f"echo '[GAMECA] Step 2/3: motif analysis ...' && {motif_cmd} && "
+            f"echo '[GAMECA] Step 3/3: GO annotation ...' && {go_cmd}"
+        )
+        _batch_submit(client, "te_clust_motif_go", cmd,
+                      ["te_clustering.py", "te_motif.py", "te_go.py"])
+    else:
+        print(f"\n  {green('✔')} Enrichment results found — running GO annotation only")
+
+        # Auto-detect clustered CSV for strand plots
+        default_clustered = (
+            f"{client.remote_work_dir}/te_data/{family}/{family}_sequences_clustered.csv"
+        )
+        exists_out, _, _ = client.run_command(
+            f"test -f {_sl.quote(default_clustered)} && echo EXISTS || echo MISSING",
+            timeout=10,
+        )
+        clustered = ""
+        if "EXISTS" in exists_out:
+            if _confirm(f"Include strand plots using detected clustered CSV?", default=True):
+                clustered = default_clustered
+        elif _confirm("Include clustered CSV for strand plots?", default=False):
+            clustered = _ask("Clustered CSV (remote path)")
+
+        cmd = (
+            f"cd {_sl.quote(client.remote_work_dir)} && "
+            f"{client._python} -u te_go.py "
+            f"--enrichment-dir {_sl.quote(enrich_dir)} "
+            f"--build {_sl.quote(build)} --out-dir {_sl.quote(out_dir)}"
+        )
+        if clustered:
+            cmd += f" --clustered-csv {_sl.quote(clustered)}"
+        _batch_submit(client, "te_go", cmd, ["te_go.py"])
 
 
 def _step_expression(client):
+    import shlex as _sl
     print()
-    print(_divider("te_expression.py  ·  Per-cluster expression boxplots"))
-    inp     = _ask("Input clustered CSV (remote path)")
-    out_dir = _ask("Output directory (remote)", client.remote_work_dir + "/results")
-    if not _sync_remote_files(client, ["te_expression.py"]):
+    print(_divider("te_expression.py  ·  Per-cluster expression boxplots  [batch]"))
+    inp = _ensure_input_csv(client)
+    if not inp:
         return
+    out_dir = _ask("Output directory (remote)", client.remote_work_dir + "/results")
     cmd = (
-        f"cd {client.remote_work_dir} && "
-        f"python te_expression.py --input {inp} --out-dir {out_dir}"
+        f"cd {_sl.quote(client.remote_work_dir)} && "
+        f"{client._python} -u te_expression.py "
+        f"--input {_sl.quote(inp)} --out-dir {_sl.quote(out_dir)}"
     )
-    _remote_run(client, "te_expression", cmd, timeout=600)
+    _batch_submit(client, "te_expression", cmd, ["te_expression.py"])
 
 
 def _step_enrichment(client):
+    import shlex as _sl
     print()
-    print(_divider("te_enrichment.py  ·  Motif + GO + Expression (M+G+E)"))
-    inp     = _ask("Input clustered CSV (remote path)")
+    print(_divider("te_clustering → te_enrichment.py  ·  Cluster then M+G+E  [batch]"))
+    inp = _ensure_input_csv(client)
+    if not inp:
+        return
+
+    # ── Clustering params ─────────────────────────────────────────────────────
+    default_clustered = inp.replace(".csv", "_clustered.csv") if inp.endswith(".csv") else inp + "_clustered.csv"
+    clustered_out = _ask("Clustered CSV output path (remote)", default_clustered)
+    family  = _ask("Family name (for clustering)", "FAMILY")
+    kmer    = _ask("k-mer size", "6")
+
+    # ── Enrichment params ─────────────────────────────────────────────────────
     species, build = _ask_species_assembly()
     out_dir = _ask("Output directory (remote)", client.remote_work_dir + "/results")
     jaspar  = ""
@@ -505,18 +701,30 @@ def _step_enrichment(client):
         jaspar = _ask("JASPAR BED path (remote)")
     skip_go   = _confirm("Skip GO annotation?",    default=False)
     skip_expr = _confirm("Skip expression plots?", default=False)
-    if not _sync_remote_files(client, [
-        "te_enrichment.py", "te_motif.py", "te_go.py", "te_expression.py"
-    ]):
-        return
-    cmd = (
-        f"cd {client.remote_work_dir} && "
-        f"python te_enrichment.py --input {inp} --build {build} --out-dir {out_dir}"
+
+    cluster_cmd = (
+        f"{client._python} -u te_clustering.py "
+        f"--input {_sl.quote(inp)} --output {_sl.quote(clustered_out)} "
+        f"--kmer {_sl.quote(kmer)} --out-dir {_sl.quote(out_dir)} --family {_sl.quote(family)}"
     )
-    if jaspar:     cmd += f" --jaspar-bed {jaspar}"
-    if skip_go:    cmd += " --skip-go"
-    if skip_expr:  cmd += " --skip-expression"
-    _remote_run(client, "te_enrichment", cmd, timeout=3600)
+    enrich_cmd = (
+        f"{client._python} -u te_enrichment.py "
+        f"--input {_sl.quote(clustered_out)} --build {_sl.quote(build)} --out-dir {_sl.quote(out_dir)}"
+    )
+    if jaspar:    enrich_cmd += f" --jaspar-bed {_sl.quote(jaspar)}"
+    if skip_go:   enrich_cmd += " --skip-go"
+    if skip_expr: enrich_cmd += " --skip-expression"
+
+    cmd = (
+        f"cd {_sl.quote(client.remote_work_dir)} && "
+        f"echo '[GAMECA] Step 1/2: clustering ...' && "
+        f"{cluster_cmd} && "
+        f"echo '[GAMECA] Step 2/2: enrichment analysis ...' && "
+        f"{enrich_cmd}"
+    )
+    _batch_submit(client, "te_clust_enrich", cmd, [
+        "te_clustering.py", "te_enrichment.py", "te_motif.py", "te_go.py", "te_expression.py"
+    ])
 
 
 # ── Remote file viewer ────────────────────────────────────────────────────────
@@ -722,13 +930,22 @@ MENU = [
     (None, "Files",                                       "section"),
     ("18", "Browse remote filesystem",                    "action"),
     (None, "Session",                                     "section"),
+    ("19", "Diagnose job submission  (test nohup + sbatch)","action"),
     ("17", "Test email  (set sender / receiver / password)","action"),
     ("15", "Disconnect and exit",                         "action"),
 ]
 
 
+_preserve_output = False  # set True to skip the next screen clear
+
+
 def _print_menu(client):
-    os.system("clear" if sys.stdout.isatty() else ":")
+    global _preserve_output
+    if _preserve_output:
+        _preserve_output = False
+        print("\n" + dim("─" * 66) + "\n")
+    else:
+        os.system("clear" if sys.stdout.isatty() else ":")
     print()
     print(cyan(GAMECA_ART.rstrip()))
     print(f"  {dim(TAGLINE)}")
@@ -751,80 +968,133 @@ def _print_menu(client):
     print()
 
 
+def _pause(keep_output: bool = False):
+    """Pause with 'Press Enter' and optionally suppress the next screen clear.
+    Never raises — safe to call from finally blocks."""
+    global _preserve_output
+    if keep_output:
+        _preserve_output = True
+    print()
+    try:
+        input(f"  {dim('── Press Enter to return to menu ──')}")
+    except (EOFError, OSError):
+        pass
+
+
+
+
 def interactive_menu(client):
+    import traceback as _tb
     while True:
         _print_menu(client)
         choice = input(f"  {cyan('›')} {bold('Select')}: ").strip()
 
-        if choice == '1':
+        try:
+            if choice == '1':
+                print()
+                print(_header("GAMECA Pipeline  ·  Workflow Overview"))
+                print(WORKFLOW)
+                _pause()
+
+            elif choice == '0':
+                _step_rmsk_query(client)
+                _pause()
+
+            elif choice == '20':
+                _step_dfam_query(client)
+                _pause()
+
+            elif choice == '2':
+                _step_prep(client)
+                _pause(keep_output=True)
+            elif choice == '3':
+                _step_clustering(client)
+                _pause(keep_output=True)
+            elif choice == '4':
+                _step_alignment(client)
+                _pause(keep_output=True)
+            elif choice == '5':
+                _step_motif(client)
+                _pause(keep_output=True)
+            elif choice == '6':
+                _step_go(client)
+                _pause(keep_output=True)
+            elif choice == '7':
+                _step_expression(client)
+                _pause(keep_output=True)
+            elif choice == '8':
+                _step_enrichment(client)
+                _pause(keep_output=True)
+
+            elif choice == '9':
+                if client.set_parameter_interactive():
+                    client.submit_batch_job()
+                _pause(keep_output=True)
+
+            elif choice == '16':
+                try:
+                    client.submit_motif_batch_job()
+                except Exception:
+                    print()
+                    print(red("  ── Motif submission error ───────────────────────────"))
+                    _tb.print_exc()
+                    print(red("  ────────────────────────────────────────────────────"))
+                finally:
+                    _pause(keep_output=True)
+
+            elif choice == '11':
+                client.check_job_status()
+                _pause(keep_output=True)
+
+            elif choice == '12':
+                client.watch_job()
+                _pause()
+
+            elif choice == '13':
+                cached_remote = client._state.get("last_remote_dir", "").strip()
+                remote_override = _ask("Remote path (leave blank to auto-detect)", cached_remote) or cached_remote or None
+
+                default_local = str(client.local_output_dir) if client.local_output_dir else "./hpc_results"
+                local_dir = _ask("Local output directory", default_local)
+                if local_dir:
+                    client.retrieve_results(local_dir, remote_out_override=remote_override)
+                _pause()
+
+            elif choice == '14':
+                out_dir = _ask("Local results directory", "./results")
+                display_results(Path(out_dir))
+                _pause()
+
+            elif choice == '18':
+                _file_viewer(client)
+
+            elif choice == '19':
+                client.diagnose_job_submission()
+                _pause(keep_output=True)
+
+            elif choice == '17':
+                client.test_email_interactive()
+                _pause()
+
+            elif choice == '15':
+                print(f"\n  {green('Disconnecting…')}")
+                client.disconnect()
+                print(f"  {green('Goodbye!')}  {dim('— GAMECA')}\n")
+                sys.exit(0)
+
+            else:
+                print(red("  Invalid selection — please choose a number from the menu."))
+                import time; time.sleep(1)
+
+        except KeyboardInterrupt:
+            print(f"\n  {yellow('Interrupted.')}")
+            _pause(keep_output=True)
+        except Exception:
             print()
-            print(_header("GAMECA Pipeline  ·  Workflow Overview"))
-            print(WORKFLOW)
-            input(f"  {dim('Press Enter to return to menu…')}")
-
-        elif choice == '0':
-            _step_rmsk_query(client)
-            input(f"  {dim('Press Enter to return to menu…')}")
-
-        elif choice == '20':
-            _step_dfam_query(client)
-            input(f"  {dim('Press Enter to return to menu…')}")
-
-        elif choice == '2':  _step_prep(client)
-        elif choice == '3':  _step_clustering(client)
-        elif choice == '4':  _step_alignment(client)
-        elif choice == '5':  _step_motif(client)
-        elif choice == '6':  _step_go(client)
-        elif choice == '7':  _step_expression(client)
-        elif choice == '8':  _step_enrichment(client)
-
-        elif choice == '9':
-            if client.set_parameter_interactive():
-                client.submit_batch_job()
-
-        elif choice == '16':
-            client.submit_motif_batch_job()
-            input(f"  {dim('Press Enter to return to menu…')}")
-
-        elif choice == '11':
-            client.check_job_status()
-            input(f"  {dim('Press Enter to return to menu…')}")
-
-        elif choice == '12':
-            client.watch_job()
-            input(f"  {dim('Press Enter to return to menu…')}")
-
-        elif choice == '13':
-            cached_remote = client._state.get("last_remote_dir", "").strip()
-            remote_override = _ask("Remote path (leave blank to auto-detect)", cached_remote) or cached_remote or None
-
-            default_local = str(client.local_output_dir) if client.local_output_dir else "./hpc_results"
-            local_dir = _ask("Local output directory", default_local)
-            if local_dir:
-                client.retrieve_results(local_dir, remote_out_override=remote_override)
-            input(f"  {dim('Press Enter to return to menu…')}")
-
-        elif choice == '14':
-            out_dir = _ask("Local results directory", "./results")
-            display_results(Path(out_dir))
-            input(f"  {dim('Press Enter to return to menu…')}")
-
-        elif choice == '18':
-            _file_viewer(client)
-
-        elif choice == '17':
-            client.test_email_interactive()
-            input(f"  {dim('Press Enter to return to menu…')}")
-
-        elif choice == '15':
-            print(f"\n  {green('Disconnecting…')}")
-            client.disconnect()
-            print(f"  {green('Goodbye!')}  {dim('— GAMECA')}\n")
-            sys.exit(0)
-
-        else:
-            print(red("  Invalid selection — please choose a number from the menu."))
-            import time; time.sleep(1)
+            print(red("  ── Unhandled error ─────────────────────────────────────"))
+            _tb.print_exc()
+            print(red("  ────────────────────────────────────────────────────────"))
+            _pause(keep_output=True)
 
 
 # ── Local mode ────────────────────────────────────────────────────────────────
@@ -2034,6 +2304,7 @@ def _print_banner():
     print()
     print(cyan(GAMECA_ART.rstrip()))
     print(f"  {dim(TAGLINE)}")
+    print(f"  {dim('ui build: ' + _UI_BUILD)}")
     print()
 
 
@@ -2082,10 +2353,10 @@ def _step_rmsk_query(client):
         _log(f"rmsk_{assembly}.txt.gz not found — downloading from UCSC…")
         dl_cmd = (
             f"mkdir -p {rmsk_dir} && "
-            f"python {client.remote_work_dir}/te_prep.py "
+            f"{client._python} {client.remote_work_dir}/te_prep.py "
             f"--download {assembly} --rmsk-dir {rmsk_dir}"
         )
-        if not _remote_run(client, f"Download rmsk ({assembly})", dl_cmd, timeout=900):
+        if not _remote_run(client, f"Download rmsk ({assembly})", dl_cmd, timeout=900, force_direct=True):
             return
     else:
         _log(f"rmsk_{assembly}.txt.gz already present — skipping download")
@@ -2141,7 +2412,7 @@ def _step_dfam_query(client):
     # Dfam uses the REST API per-family — no bulk file download needed
     _log(f"Counting sequences for family='{family}' in {assembly} via Dfam REST API…")
     count_out, count_err, count_rc = client.run_command(
-        f"python {client.remote_work_dir}/te_prep.py "
+        f"{client._python} {client.remote_work_dir}/te_prep.py "
         f"--family {family} --build {assembly} --count-only --source dfam",
         timeout=120,
     )
@@ -2254,9 +2525,15 @@ def main():
             "  python query.py --local --family THE1D-int --assembly hg38\n"
         ),
     )
-    parser.add_argument("-H", "--host",     help="HPC cluster hostname")
+    parser.add_argument("-H", "--host",     help="HPC cluster hostname or IP")
     parser.add_argument("-p", "--port", type=int, default=22, help="SSH port (default: 22)")
     parser.add_argument("-u", "--user",     help="SSH username")
+    parser.add_argument("-i", "--key", metavar="KEY_FILE",
+                        help="SSH private key file (e.g. ~/.ssh/id_rsa)")
+    parser.add_argument("-P", "--password", metavar="PASSWORD",
+                        help="SSH password (WARNING: visible in shell history)")
+    parser.add_argument("--scheduler", choices=["lsf", "slurm"],
+                        help="Force scheduler type. Auto-detected from PATH if omitted.")
     parser.add_argument("--local",          action="store_true",
                         help="Run in local mode (no HPC connection)")
     parser.add_argument("--results", metavar="DIR",
@@ -2303,7 +2580,21 @@ def main():
     print(HPC_NOTICE)
     print()
 
-    client = _connect(hostname=args.host, username=args.user, port=args.port)
+    client = _connect(hostname=args.host, username=args.user, port=args.port,
+                      key_path=args.key or "", password=args.password)
+
+    # Apply --scheduler override, or prompt if auto-detection failed
+    if args.scheduler:
+        client.scheduler = args.scheduler
+        print(f"  {green('›')} Scheduler override: {bold(args.scheduler.upper())}")
+    elif not client.scheduler:
+        print(f"\n  {yellow('⚠')}  Could not auto-detect a scheduler (bsub/sbatch not found on PATH).")
+        while True:
+            choice = _ask("Choose scheduler [lsf/slurm]").strip().lower()
+            if choice in ("lsf", "slurm"):
+                client.scheduler = choice
+                break
+            print(red("  Please enter 'lsf' or 'slurm'."))
 
     try:
         if _post_connect_launch_action(client):

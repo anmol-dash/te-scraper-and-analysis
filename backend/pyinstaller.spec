@@ -6,7 +6,6 @@ import os
 # Auto list: extend if you add submodules under backend/yourtool/.
 # Kept explicit so a third-party `yourtool` on sys.path cannot replace this package in the bundle.
 _hidden_auto = [
-    "hpc_client",
     "yourtool",
     "yourtool.cli",
     "yourtool.__main__",
@@ -22,6 +21,7 @@ _repo_root = os.path.abspath(os.path.join(SPECPATH, os.pardir))
 _pipeline_datas = [
     (os.path.join(_repo_root, name), ".")
     for name in [
+        "hpc_client.py",
         "query.py",
         "requirements.txt",
         "te_prep.py",

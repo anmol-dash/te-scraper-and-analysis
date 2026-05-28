@@ -25,6 +25,11 @@ def main() -> None:
         raise RuntimeError("Expected exactly one [project].version entry in backend/pyproject.toml")
     py_path.write_text(patched, encoding="utf-8")
 
+    init_path = repo_root / "backend" / "yourtool" / "__init__.py"
+    init_text = init_path.read_text(encoding="utf-8")
+    init_patched = re.sub(r'__version__\s*=\s*"[^"]*"', f'__version__ = "{version}"', init_text)
+    init_path.write_text(init_patched, encoding="utf-8")
+
 
 def replace_project_version(toml_text: str, version: str) -> tuple[str, int]:
     header_re = re.compile(r'^\[(?P<section>[^\]]+)\]\s*$')

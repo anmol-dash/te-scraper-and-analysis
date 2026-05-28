@@ -210,9 +210,12 @@ def download_rmsk(build, rmsk_dir):
 def get_rmsk_path(build, rmsk_dir):
     path = Path(rmsk_dir) / f"rmsk_{build}.txt.gz"
     if not path.exists():
-        print(f"FATAL: rmsk file not found: {path}")
-        print(f"Run first:  python te_prep.py --download {build}")
-        sys.exit(1)
+        if build not in RMSK_URLS:
+            print(f"FATAL: rmsk file not found: {path}")
+            print(f"Run first:  python te_prep.py --download {build}")
+            sys.exit(1)
+        print(f"rmsk file not found for {build} — downloading automatically...")
+        download_rmsk(build, rmsk_dir)
     return str(path)
 
 

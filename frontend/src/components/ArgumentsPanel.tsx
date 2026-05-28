@@ -1,6 +1,6 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useState } from "react";
-import { pyCancel, pyRun, pyRunFull } from "@/lib/ipc";
+import { hpcBatchParallel, pyCancel, pyRun, pyRunFull } from "@/lib/ipc";
 import { useAppStore } from "@/store/appStore";
 
 // ── Local pipeline panel ────────────────────────────────────────────────────
@@ -357,6 +357,8 @@ interface FieldState {
   jobId: string;
   localDir: string;
   remoteDir: string;
+  maxJobs: string;
+  parallelMode: boolean;
 }
 
 const defaultFields: FieldState = {
@@ -374,6 +376,8 @@ const defaultFields: FieldState = {
   pThreshold: "0.05",
   annotSource: "rmsk",
   jobId: "", localDir: "./hpc_results", remoteDir: "",
+  maxJobs: "10",
+  parallelMode: false,
 };
 
 function HpcPanel() {
@@ -534,23 +538,26 @@ function HpcPanel() {
       skip_go: fields.skipGo ? 1 : 0,
       skip_tsne: fields.skipTsne ? 1 : 0,
       annot_source: fields.annotSource,
+      max_jobs: parseInt(fields.maxJobs) || 10,
     };
     try {
       beginRun(globalThis.crypto.randomUUID());
-      const raw = await pyRunFull(["hpc-batch-submit", "--params", JSON.stringify(params)]);
-      const result = raw.result as { ok?: boolean; job_id?: string; output_dir?: string; work_dir?: string } | undefined;
-      if (result?.ok) {
-        if (result.work_dir) {
-          setHpcConnection({ host: hpcHost, scheduler: hpcScheduler, home: result.work_dir });
-        }
-        if (result.job_id) {
-          setHpcJobId(result.job_id);
-          setFields((prev) => ({ ...prev, jobId: result.job_id! }));
-          pushToast(`Job submitted — ID: ${result.job_id}`);
-        }
-        finishRun("done");
+      if (fields.parallelMode) {
+        await hpcBatchParallel(params);
       } else {
-        finishRun("errored");
+        const raw = await pyRunFull(["hpc-batch-submit", "--params", JSON.stringify(params)]);
+        const result = raw.result as { ok?: boolean; job_id?: string; output_dir?: string; work_dir?: string } | undefined;
+        if (result?.ok) {
+          if (result.work_dir) setHpcConnection({ host: hpcHost, scheduler: hpcScheduler, home: result.work_dir });
+          if (result.job_id) {
+            setHpcJobId(result.job_id);
+            setFields((prev) => ({ ...prev, jobId: result.job_id! }));
+            pushToast(`Job submitted — ID: ${result.job_id}`);
+          }
+          finishRun("done");
+        } else {
+          finishRun("errored");
+        }
       }
     } catch (e) {
       pushToast(e instanceof Error ? e.message : String(e));
@@ -809,10 +816,10 @@ function HpcPanel() {
 
         {/* JASPAR BED */}
         {(["motif","enrichment","batch"] as StepId[]).includes(step) && (
-          <Field label="JASPAR BED path" hint="Remote path on cluster (optional)">
+          <Field label="JASPAR BED path" hint="Override auto-download (leave blank — JASPAR 2022 is downloaded automatically from CMMT)">
             <input className={input} value={fields.jasparBed}
               onChange={(e) => set("jasparBed", e.target.value)}
-              placeholder="(auto-resolve)" disabled={busy} />
+              placeholder="(auto-download from CMMT)" disabled={busy} />
           </Field>
         )}
 
@@ -913,7 +920,16 @@ function HpcPanel() {
                   <input className={input} type="number" value={fields.cpus}
                     onChange={(e) => set("cpus", e.target.value)} disabled={busy} />
                 </Field>
+                <Field label="Max jobs" hint="Max parallel HPC jobs (for throttled clusters)">
+                  <input className={input} type="number" min={1} max={50} value={fields.maxJobs}
+                    onChange={(e) => set("maxJobs", e.target.value)} disabled={busy} />
+                </Field>
               </div>
+              <label className="flex items-center gap-2 text-xs cursor-pointer select-none">
+                <input type="checkbox" checked={fields.parallelMode} disabled={busy}
+                  onChange={(e) => set("parallelMode", e.target.checked)} />
+                Parallel stages — alignment, motif, and primers submit as separate jobs once clustering finishes
+              </label>
               <Field label="Module loads" hint="Space-separated, e.g. python/3.11 gcc/12">
                 <input className={input} value={fields.modules}
                   onChange={(e) => set("modules", e.target.value)}
@@ -1106,7 +1122,7 @@ function HpcPanel() {
           <button type="button" className={cancelBtn} onClick={() => void cancel()}>Cancel</button>
         ) : step === "batch" ? (
           <button type="button" className={runBtn} onClick={() => void submitBatch()}>
-            Submit Batch Job
+            {fields.parallelMode ? "Submit Parallel Stages" : "Submit Batch Job"}
           </button>
         ) : step === "retrieve" ? (
           <button type="button" className={runBtn} onClick={() => void retrieve()}>
@@ -1145,12 +1161,12 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
 
 // ── Top-level panel ────────────────────────────────────────────────────────────
 
-export default function ArgumentsPanel() {
+export default function ArgumentsPanel({ width }: { width: number }) {
   const mode = useAppStore((s) => s.mode);
   const setMode = useAppStore((s) => s.setMode);
 
   return (
-    <aside className="flex w-[320px] shrink-0 flex-col border-r border-[var(--app-border)] bg-[var(--app-panel)]">
+    <aside className="flex shrink-0 flex-col bg-[var(--app-panel)]" style={{ width }}>
       <div className="flex shrink-0 border-b border-[var(--app-border)]">
         {(["local", "hpc"] as const).map((m) => (
           <button

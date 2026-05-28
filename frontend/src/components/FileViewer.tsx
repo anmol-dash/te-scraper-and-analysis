@@ -1,5 +1,5 @@
 import { save } from "@tauri-apps/plugin-dialog";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { hpcListDir, hpcReadFile, hpcDownloadFile, hpcDownloadDir, type RemoteEntry } from "@/lib/ipc";
 import { useAppStore } from "@/store/appStore";
 
@@ -69,19 +69,15 @@ function ContextMenu({
   );
 }
 
-// ── HTML frame (blob URL so WKWebView renders Plotly correctly) ───────────────
+// ── HTML frame ────────────────────────────────────────────────────────────────
+// The iframe src is a gamecapreview:// URL served by the Tauri custom scheme
+// handler. WKWebView executes JS for registered schemes; blob:/srcdoc do not.
 
-function HtmlFrame({ html, title }: { html: string; title: string }) {
-  const blobUrl = useMemo(() => {
-    const blob = new Blob([html], { type: "text/html" });
-    return URL.createObjectURL(blob);
-  }, [html]);
-
-  useEffect(() => () => URL.revokeObjectURL(blobUrl), [blobUrl]);
-
+function HtmlFrame({ html, src, title }: { html?: string; src?: string; title: string }) {
   return (
     <iframe
-      src={blobUrl}
+      src={src}
+      srcDoc={src ? undefined : (html ?? "")}
       className="w-full border-0"
       style={{ height: "calc(100vh - 120px)", minHeight: "480px" }}
       title={title}
@@ -187,7 +183,7 @@ function ContentView({
           </table>
         )}
 
-        {file.type === "html" && <HtmlFrame html={file.text ?? ""} title={file.name} />}
+        {file.type === "html" && <HtmlFrame html={file.text} src={file.src} title={file.name} />}
 
         {file.type === "text" && (
           <pre className="whitespace-pre-wrap break-words p-3 font-mono text-xs leading-relaxed">
@@ -315,7 +311,7 @@ function DirList({
 
 // ── main component ────────────────────────────────────────────────────────────
 
-export default function FileViewer() {
+export default function FileViewer({ width }: { width: number }) {
   const hpcHome = useAppStore((s) => s.hpcHome);
   const hpcConnected = useAppStore((s) => s.hpcConnected);
   const pushToast = useAppStore((s) => s.pushToast);
@@ -373,7 +369,12 @@ export default function FileViewer() {
         setOpenFile((prev) => prev && { ...prev, loading: false, error: fc.error ?? "Failed to read file" });
         return;
       }
-      if (fc.type === "binary") {
+      if (fc.type === "local_html" && fc.local_path) {
+        // Serve via gamecapreview:// — WKWebView executes JS for registered schemes.
+        const filename = fc.local_path.split("/").pop() ?? "";
+        const src = `gamecapreview://localhost/${encodeURIComponent(filename)}`;
+        setOpenFile((prev) => prev && { ...prev, loading: false, type: "html", src });
+      } else if (fc.type === "binary") {
         const src = `data:${fc.mime};base64,${fc.data}`;
         setOpenFile((prev) => prev && { ...prev, loading: false, type: "image", src });
       } else if (fc.type === "text") {
@@ -439,7 +440,7 @@ export default function FileViewer() {
   const segments = path.split("/").filter(Boolean);
 
   return (
-    <aside className="flex w-[480px] shrink-0 flex-col border-l border-[var(--app-border)] bg-[var(--app-panel)]">
+    <aside className="flex shrink-0 flex-col bg-[var(--app-panel)]" style={{ width }}>
       {/* Path bar */}
       <div className="flex shrink-0 items-center gap-1 border-b border-[var(--app-border)] bg-[var(--app-bg)] px-2 py-1.5 text-xs">
         <button
@@ -536,4 +537,3 @@ export default function FileViewer() {
     </aside>
   );
 }
-

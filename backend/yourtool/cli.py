@@ -6,11 +6,15 @@ Supports cooperative cancellation via an optional threading.Event.
 from __future__ import annotations
 
 import argparse
+import base64
 import builtins
+import hashlib
 import json
 import mimetypes
 import os
+import re
 import sys
+import tempfile
 import time
 from pathlib import Path
 from threading import Event
@@ -72,6 +76,10 @@ def main(argv: Sequence[str] | None = None, cancel_event: Event | None = None) -
     p_hpc_batch = sub.add_parser("hpc-batch-submit", help="Configure and submit a GAMECA batch job.")
     p_hpc_batch.add_argument("--params", required=True, help="JSON object from the desktop UI.")
     p_hpc_batch.set_defaults(handler=_cmd_hpc_batch_submit)
+
+    p_hpc_par = sub.add_parser("hpc-batch-parallel", help="Submit pipeline stages as parallel HPC jobs and stream status.")
+    p_hpc_par.add_argument("--params", required=True, help="JSON object from the desktop UI (include max_jobs).")
+    p_hpc_par.set_defaults(handler=_cmd_hpc_batch_parallel)
 
     p_hpc_status = sub.add_parser("hpc-job-status", help="Print detailed status for the latest submitted job.")
     p_hpc_status.set_defaults(handler=_cmd_hpc_job_status)
@@ -142,8 +150,69 @@ def _client_required():
     return _HPC_CLIENT
 
 
+def _prefer_bundled_runtime() -> None:
+    """Keep bundled scripts ahead of updater-downloaded copies for runtime imports."""
+    repo_root = str(_REPO_ROOT)
+    sys.path[:] = [p for p in sys.path if p != repo_root]
+    sys.path.insert(0, repo_root)
+
+
+def _decode_base64_output(text: str) -> bytes:
+    b64_clean = re.sub(r"[^A-Za-z0-9+/=]", "", text)
+    b64_clean += "=" * (-len(b64_clean) % 4)
+    return base64.b64decode(b64_clean)
+
+
+def _download_remote_file(
+    client: Any,
+    remote_path: str,
+    local_path: Path,
+    *,
+    timeout: int,
+    max_bytes: int | None = None,
+    progress: bool = False,
+) -> tuple[bool, str, int]:
+    """Download a remote file using the best transport available on this client."""
+    scp_get = getattr(client, "_scp_get", None)
+    if callable(scp_get):
+        try:
+            if scp_get(remote_path, str(local_path), timeout=timeout):
+                return True, "", 0
+        except TypeError:
+            if scp_get(remote_path, str(local_path)):
+                return True, "", 0
+
+    if getattr(client, "use_sftp", False) and getattr(client, "sftp", None):
+        if progress:
+            last_pct: list[int] = [-1]
+
+            def _progress(transferred: int, total: int) -> None:
+                if not total:
+                    return
+                pct = int(transferred * 100 / total)
+                if pct - last_pct[0] >= 10:
+                    last_pct[0] = pct
+                    print(f"[SCP] {pct}%  ({transferred:,} / {total:,} bytes)", flush=True)
+
+            client.sftp.get(remote_path, str(local_path), callback=_progress)
+        else:
+            client.sftp.get(remote_path, str(local_path))
+        return True, "", 0
+
+    if max_bytes is None:
+        cmd = f"cat {json.dumps(remote_path)} | base64"
+    else:
+        cmd = f"head -c {max_bytes + 1} {json.dumps(remote_path)} | base64"
+    out, err, code = client.run_command(cmd, timeout=timeout)
+    if code != 0:
+        return False, err, code
+    local_path.write_bytes(_decode_base64_output(out))
+    return True, "", 0
+
+
 def _cmd_hpc_connect(args: argparse.Namespace, _cancel_event: Event | None) -> dict[str, Any]:
     global _HPC_CLIENT
+    _prefer_bundled_runtime()
     from hpc_client import HPCClient
 
     if _HPC_CLIENT is not None and getattr(_HPC_CLIENT, "connected", False):
@@ -166,9 +235,12 @@ def _cmd_hpc_connect(args: argparse.Namespace, _cancel_event: Event | None) -> d
 
 def _cmd_hpc_disconnect(_args: argparse.Namespace, _cancel_event: Event | None) -> dict[str, Any]:
     global _HPC_CLIENT
-    if _HPC_CLIENT is not None and getattr(_HPC_CLIENT, "connected", False):
-        _HPC_CLIENT.disconnect()
-    _HPC_CLIENT = None
+    if _HPC_CLIENT is not None:
+        try:
+            _HPC_CLIENT.disconnect()
+        except Exception:
+            pass
+        _HPC_CLIENT = None
     return {"ok": True}
 
 
@@ -276,8 +348,10 @@ def _apply_hpc_params(client: Any, params: dict[str, Any]) -> None:
 
 
 def _cmd_hpc_batch_submit(args: argparse.Namespace, _cancel_event: Event | None) -> dict[str, Any]:
-    client = _client_required()
     params = json.loads(args.params)
+    family = params.get("family", "?")
+    print(f"[Submit] Building job script for {family}…", flush=True)
+    client = _client_required()
     if not isinstance(params, dict):
         raise ValueError("--params must be a JSON object")
     _apply_hpc_params(client, params)
@@ -296,6 +370,52 @@ def _cmd_hpc_batch_submit(args: argparse.Namespace, _cancel_event: Event | None)
         "work_dir": client.remote_work_dir,
         "exit_code": 0 if ok else 1,
     }
+
+
+def _cmd_hpc_batch_parallel(args: argparse.Namespace, cancel_event: Event | None) -> dict[str, Any]:
+    params = json.loads(args.params)
+    if not isinstance(params, dict):
+        raise ValueError("--params must be a JSON object")
+    family = params.get("family", "?")
+    max_jobs = int(params.get("max_jobs", 10))
+    print(f"[Parallel] Preparing parallel pipeline for {family} (max_jobs={max_jobs})…", flush=True)
+    client = _client_required()
+    _apply_hpc_params(client, params)
+    old_input = builtins.input
+    try:
+        builtins.input = lambda _prompt="": "y"
+        job_infos = client.submit_parallel_pipeline(max_jobs=max_jobs)
+    finally:
+        builtins.input = old_input
+
+    if not job_infos:
+        return {"ok": False, "error": "No jobs were submitted", "exit_code": 1}
+
+    print(f"[Parallel] Monitoring {len(job_infos)} jobs — polling every 30 s…", flush=True)
+
+    terminal = {"DONE", "FAILED", "UNKNOWN"}
+    states = {ji["job_id"]: "PENDING" for ji in job_infos}
+
+    while not (cancel_event and cancel_event.is_set()):
+        time.sleep(30)
+        all_done = True
+        for ji in job_infos:
+            jid = ji["job_id"]
+            if states[jid] in terminal:
+                continue
+            new_state = client._get_scheduler_state(jid)
+            if new_state != states[jid]:
+                print(f"[Job {ji['stage']}] {states[jid]} → {new_state}", flush=True)
+                states[jid] = new_state
+                if new_state in terminal:
+                    print(f"[JOB DONE] {ji['stage']}: job {jid} finished ({new_state})", flush=True)
+            if new_state not in terminal:
+                all_done = False
+        if all_done:
+            break
+
+    print("[Parallel] All jobs reached terminal state.", flush=True)
+    return {"ok": True, "jobs": job_infos, "exit_code": 0}
 
 
 def _cmd_hpc_job_status(_args: argparse.Namespace, _cancel_event: Event | None) -> dict[str, Any]:
@@ -323,6 +443,7 @@ def _cmd_hpc_retrieve(args: argparse.Namespace, _cancel_event: Event | None) -> 
 
 
 def _cmd_hpc_list_dir(args: argparse.Namespace, _cancel_event: Event | None) -> dict[str, Any]:
+    print(f"[Nav] {args.path}", flush=True)
     client = _client_required()
     if client.use_sftp and client.sftp:
         entries = []
@@ -352,19 +473,20 @@ def _cmd_hpc_download_file(args: argparse.Namespace, _cancel_event: Event | None
     client = _client_required()
     local = Path(args.local_path)
     local.parent.mkdir(parents=True, exist_ok=True)
-    if client.use_sftp and client.sftp:
-        client.sftp.get(args.remote_path, str(local))
-    else:
-        out, err, code = client.run_command(
-            f"cat {json.dumps(args.remote_path)} | base64",
-            timeout=120,
-        )
-        if code != 0:
-            return {"ok": False, "error": err, "exit_code": code}
-        import base64, re as _re
-        b64_clean = _re.sub(r"[^A-Za-z0-9+/=]", "", out)
-        b64_clean += "=" * (-len(b64_clean) % 4)
-        local.write_bytes(base64.b64decode(b64_clean))
+    filename = Path(args.remote_path).name
+    print(f"[SCP] Downloading {filename}…", flush=True)
+    # Priority: local scp (fastest, OS-level timeout) → SFTP → SSH base64
+    ok, err, code = _download_remote_file(
+        client,
+        args.remote_path,
+        local,
+        timeout=120,
+        progress=True,
+    )
+    if not ok:
+        return {"ok": False, "error": err, "exit_code": code}
+    size = local.stat().st_size if local.exists() else 0
+    print(f"[SCP] Done — {size:,} bytes → {local}", flush=True)
     return {"ok": True, "local_path": str(local)}
 
 
@@ -374,44 +496,55 @@ def _cmd_hpc_download_dir(args: argparse.Namespace, _cancel_event: Event | None)
     local.parent.mkdir(parents=True, exist_ok=True)
     remote = args.remote_path.rstrip("/")
     dirname = remote.split("/")[-1] or "download"
+    print(f"[SCP] Downloading directory {dirname}…", flush=True)
     out, err, code = client.run_command(
         f"tar -czf - -C {json.dumps(remote + '/..')} {json.dumps(dirname)} | base64",
         timeout=300,
     )
     if code != 0:
         return {"ok": False, "error": err, "exit_code": code}
-    import base64, re as _re
+    import re as _re
     b64_clean = _re.sub(r"[^A-Za-z0-9+/=]", "", out)
     b64_clean += "=" * (-len(b64_clean) % 4)
     local.write_bytes(base64.b64decode(b64_clean))
+    size = local.stat().st_size if local.exists() else 0
+    print(f"[SCP] Done — {size:,} bytes → {local}", flush=True)
     return {"ok": True, "local_path": str(local)}
 
 
 def _cmd_hpc_read_file(args: argparse.Namespace, _cancel_event: Event | None) -> dict[str, Any]:
+    print(f"[Open] {Path(args.path).name}", flush=True)
     client = _client_required()
     max_bytes = max(1, int(args.max_mb * 1024 * 1024))
-    if client.use_sftp and client.sftp:
-        with client.sftp.file(args.path, "rb") as fh:
-            data = fh.read(max_bytes + 1)
-    else:
-        out, err, code = client.run_command(
-            f"head -c {max_bytes + 1} {json.dumps(args.path)} | base64",
-            timeout=30,
-        )
-        if code != 0:
-            return {"ok": False, "error": err, "exit_code": code}
-        import base64, re as _re
-        b64_clean = _re.sub(r"[^A-Za-z0-9+/=]", "", out)
-        b64_clean += "=" * (-len(b64_clean) % 4)
-        data = base64.b64decode(b64_clean)
+    mime = mimetypes.guess_type(args.path)[0] or "application/octet-stream"
+    ext = Path(args.path).suffix.lower()
+
+    # Download to a local temp file.  Priority: scp (fastest) → SFTP → SSH base64.
+    remote_hash = hashlib.sha256(args.path.encode("utf-8")).hexdigest()[:16]
+    tmp = Path(tempfile.gettempdir()) / "gameca_preview" / f"{remote_hash}_{Path(args.path).name}"
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    ok, err, code = _download_remote_file(
+        client,
+        args.path,
+        tmp,
+        timeout=60,
+        max_bytes=None if ext in (".html", ".htm") else max_bytes,
+    )
+    if not ok:
+        return {"ok": False, "error": err, "exit_code": code}
+
+    # HTML: served from the temp file via gamecapreview:// Tauri scheme; no IPC transfer.
+    if ext in (".html", ".htm"):
+        return {"ok": True, "type": "local_html", "local_path": str(tmp), "mime": mime}
+
+    data = tmp.read_bytes()
     if len(data) > max_bytes:
         return {"ok": False, "error": f"file exceeds {args.max_mb:g} MB", "exit_code": 1}
-    mime = mimetypes.guess_type(args.path)[0] or "application/octet-stream"
+
     try:
         text = data.decode("utf-8")
         return {"ok": True, "type": "text", "mime": "text/plain", "text": text, "size": len(data)}
     except UnicodeDecodeError:
-        import base64
         return {"ok": True, "type": "binary", "mime": mime, "data": base64.b64encode(data).decode(), "size": len(data)}
 
 

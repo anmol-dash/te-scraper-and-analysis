@@ -57,12 +57,19 @@ export interface DirListing {
 
 export interface FileContent {
   ok?: boolean;
-  type?: "text" | "binary";
+  type?: "text" | "binary" | "local_html";
   mime?: string;
-  data?: string;   // base64 for binary
-  text?: string;   // for text files
+  data?: string;       // base64 for binary
+  text?: string;       // for text files
+  local_path?: string; // for local_html previews rendered from the local temp file
   size?: number;
   error?: string;
+}
+
+export interface PreviewHtmlContent {
+  ok?: boolean;
+  html?: string;
+  size?: number;
 }
 
 export async function hpcListDir(path: string): Promise<DirListing> {
@@ -75,10 +82,18 @@ export async function hpcReadFile(path: string, maxMb = 10): Promise<FileContent
   return (raw.result ?? {}) as FileContent;
 }
 
+export async function readPreviewHtml(localPath: string): Promise<PreviewHtmlContent> {
+  return invoke<PreviewHtmlContent>("read_preview_html", { localPath });
+}
+
 export interface DownloadResult {
   ok?: boolean;
   local_path?: string;
   error?: string;
+}
+
+export async function hpcBatchParallel(params: Record<string, unknown>): Promise<RunResult> {
+  return pyRun(["hpc-batch-parallel", "--params", JSON.stringify(params)]);
 }
 
 export async function hpcDownloadFile(remotePath: string, localPath: string): Promise<DownloadResult> {

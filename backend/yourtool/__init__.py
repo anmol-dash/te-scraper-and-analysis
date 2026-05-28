@@ -1,3 +1,3 @@
 """Bundled CLI for the PyInstaller IPC wrapper."""
 
-__version__ = "0.4.8"
+__version__ = "0.4.20"

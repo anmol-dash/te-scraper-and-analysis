@@ -18,11 +18,13 @@ Output:
     cluster_N_enrichment.csv       Fisher p-values per cluster
     enrichment_heatmap.png         -log10(p) heatmap across clusters
 
-JASPAR BED resolution order
+JASPAR BED resolution order (--jaspar-bed is optional; auto-download always works)
   1. --jaspar-bed FILE
   2. TE_JASPAR_<BUILD> environment variable
-  3. <jaspar-dir>/JASPAR2024_<build>.sorted.bed.gz  (cached)
-  4. Auto-download from jaspar.elixir.no
+  3. <jaspar-dir>/JASPAR2022_<build>.sorted.bed.gz  (CMMT cache)
+  4. <jaspar-dir>/JASPAR2024_<build>.sorted.bed.gz  (legacy cache)
+  5. Auto-query CMMT JASPAR 2022 BigBed (bigBedToBed, efficient)
+  6. Auto-download CMMT per-motif TSV.gz files (no external tools needed)
 
 Usage:
     python te_motif.py \\
@@ -60,10 +62,17 @@ log = logging.getLogger("te_motif")
 
 # ── JASPAR download URLs ──────────────────────────────────────────────────────
 
+# CMMT (UBC) hosts per-assembly JASPAR 2022 UCSC tracks.  These are the
+# canonical, reliably-available source used for automatic download.
+CMMT_BASE_URL = "https://expdata.cmmt.ubc.ca/JASPAR/downloads/UCSC_tracks/2022"
+CMMT_ASSEMBLIES = {
+    "araTha1", "ce10", "ce11", "ci3", "danRer11", "dm6",
+    "hg19", "hg38", "mm10", "mm39", "sacCer3",
+}
+
 JASPAR_URLS = {
-    # Historical BED URLs are no longer available on the JASPAR server. Keep
-    # these here only so failures are explicit and validated instead of silently
-    # accepting a 404 HTML page as a BED file.
+    # Legacy JASPAR 2024 BED URLs — kept only for error messages; server
+    # routinely removes old releases so these may return 404.
     "hg38": "https://jaspar.elixir.no/static/data/beds/JASPAR2024_hg38.bed.gz",
     "hg19": "https://jaspar.elixir.no/static/data/beds/JASPAR2024_hg19.bed.gz",
     "mm10": "https://jaspar.elixir.no/static/data/beds/JASPAR2024_mm10.bed.gz",
@@ -71,10 +80,17 @@ JASPAR_URLS = {
 }
 
 JASPAR_BIGBED_URLS = {
-    "hg38": "https://mencius.uio.no/JASPAR/JASPAR_familial_binding_sites/2024/hg38/JASPAR2024_hg38.bb",
-    "hg19": "https://mencius.uio.no/JASPAR/JASPAR_familial_binding_sites/2024/hg19/JASPAR2024_hg19.bb",
-    "mm10": "https://mencius.uio.no/JASPAR/JASPAR_familial_binding_sites/2024/mm10/JASPAR2024_mm10.bb",
-    "mm39": "https://mencius.uio.no/JASPAR/JASPAR_familial_binding_sites/2024/mm39/JASPAR2024_mm39.bb",
+    "hg38":     f"{CMMT_BASE_URL}/JASPAR2022_hg38.bb",
+    "hg19":     f"{CMMT_BASE_URL}/JASPAR2022_hg19.bb",
+    "mm10":     f"{CMMT_BASE_URL}/JASPAR2022_mm10.bb",
+    "mm39":     f"{CMMT_BASE_URL}/JASPAR2022_mm39.bb",
+    "danRer11": f"{CMMT_BASE_URL}/JASPAR2022_danRer11.bb",
+    "dm6":      f"{CMMT_BASE_URL}/JASPAR2022_dm6.bb",
+    "sacCer3":  f"{CMMT_BASE_URL}/JASPAR2022_sacCer3.bb",
+    "araTha1":  f"{CMMT_BASE_URL}/JASPAR2022_araTha1.bb",
+    "ce10":     f"{CMMT_BASE_URL}/JASPAR2022_ce10.bb",
+    "ce11":     f"{CMMT_BASE_URL}/JASPAR2022_ce11.bb",
+    "mm39":     f"{CMMT_BASE_URL}/JASPAR2022_mm39.bb",
 }
 
 _DEFAULT_BASE = os.environ.get("TE_BASE_DIR",   str(Path.home() / "te_analysis"))
@@ -220,8 +236,16 @@ def _get_bigbed_to_bed(jaspar_dir):
     bin_dir.mkdir(parents=True, exist_ok=True)
     exe = bin_dir / "bigBedToBed"
     if exe.exists():
-        log.debug("bigBedToBed cached: %s", exe)
-        return str(exe)
+        # Verify the cached binary actually runs on this system's glibc
+        import subprocess as _sp
+        _probe = _sp.run([str(exe)], capture_output=True, text=True)
+        _combined = _probe.stdout + _probe.stderr
+        if "GLIBC" in _combined or "version `" in _combined or "version not found" in _combined:
+            log.warning("Cached bigBedToBed is incompatible with this system's glibc; removing")
+            exe.unlink(missing_ok=True)
+        else:
+            log.debug("bigBedToBed cached: %s", exe)
+            return str(exe)
 
     url = f"https://hgdownload.soe.ucsc.edu/admin/exe/{ucsc_platform}/bigBedToBed"
     log.info("bigBedToBed not found — downloading UCSC utility: %s", url)
@@ -269,7 +293,7 @@ def _build_locus_jaspar_bed_from_bigbed(build, jaspar_dir, loci_bed):
         log.warning("Loci BED is empty after parsing; cannot query bigBed.")
         return None
 
-    out_path = Path(jaspar_dir) / f"JASPAR2024_{build}.te_loci.bed"
+    out_path = Path(jaspar_dir) / f"JASPAR2022_{build}.te_loci.bed"
     tmp_path = out_path.with_suffix(".bed.part")
     total = 0
     log.info("Auto-querying JASPAR bigBed for %d TE loci", len(loci))
@@ -290,6 +314,15 @@ def _build_locus_jaspar_bed_from_bigbed(build, jaspar_dir, loci_bed):
                 errors += 1
                 log.warning("bigBedToBed failed for %s:%d-%d: %s",
                             chrom, start, end, result.stderr[:200])
+                if "GLIBC" in result.stderr or "version `" in result.stderr or \
+                        "version not found" in result.stderr:
+                    log.error("bigBedToBed is incompatible with this system's glibc — "
+                              "aborting bigBed query and removing cached binary")
+                    try:
+                        Path(tool).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    break
                 continue
             lines = [ln for ln in result.stdout.splitlines()
                      if ln and not ln.startswith(("#", "track"))]
@@ -320,6 +353,190 @@ def _build_locus_jaspar_bed_from_bigbed(build, jaspar_dir, loci_bed):
     return None
 
 
+# ── CMMT per-motif TSV.gz helpers ────────────────────────────────────────────
+
+def _list_cmmt_files(build):
+    """Return list of (filename, url) for all per-motif TSV.gz files on CMMT."""
+    import re, urllib.request
+    url = f"{CMMT_BASE_URL}/{build}/"
+    req = urllib.request.Request(url, headers={"User-Agent": "te_motif/1.0"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        html = resp.read().decode("utf-8", errors="replace")
+    # Match href with single or double quotes; strip any leading path component
+    files = re.findall(r"""href=["'](?:[^"']*/)?(MA\d+[\w.]+\.tsv\.gz)["']""", html)
+    if not files:
+        log.debug("CMMT directory listing sample (first 500 chars): %s", html[:500])
+    return [(f, f"{url}{f}") for f in files]
+
+
+def _build_loci_lookup(loci_bed):
+    """Return chr → sorted list of (start, end) for fast overlap testing."""
+    loci = {}
+    try:
+        with open(loci_bed) as fh:
+            for line in fh:
+                parts = line.strip().split("\t")
+                if len(parts) < 3:
+                    continue
+                try:
+                    start, end = int(parts[1]), int(parts[2])
+                except ValueError:
+                    continue
+                loci.setdefault(parts[0], []).append((start, end))
+    except Exception as exc:
+        log.warning("_build_loci_lookup: could not read %s: %s", loci_bed, exc)
+        return None
+    for chr_ in loci:
+        loci[chr_].sort()
+    return loci
+
+
+def _overlaps_any(chr_, start, end, loci_lookup):
+    """Return True if (chr_, start, end) overlaps any interval in loci_lookup."""
+    import bisect
+    intervals = loci_lookup.get(chr_)
+    if not intervals:
+        return False
+    idx = bisect.bisect_left(intervals, (start,))
+    if idx > 0 and intervals[idx - 1][1] > start:
+        return True
+    while idx < len(intervals) and intervals[idx][0] < end:
+        if intervals[idx][1] > start:
+            return True
+        idx += 1
+    return False
+
+
+def _download_cmmt_per_motif(build, jaspar_dir, loci_bed=None):
+    """Stream-download JASPAR 2022 per-motif TSV.gz files from CMMT.
+
+    Each file is decompressed on the fly.  When loci_bed is provided only rows
+    that overlap the TE loci are kept, avoiding multi-GB local storage.  The
+    merged result is sorted and cached as JASPAR2022_{build}.sorted.bed.gz.
+
+    Returns the path to the cached BED.gz, or None on failure.
+    """
+    import re, urllib.request
+
+    if build not in CMMT_ASSEMBLIES:
+        log.warning("Build '%s' not in CMMT assemblies; skipping per-motif download.", build)
+        return None
+
+    jaspar_dir = Path(jaspar_dir)
+    out_path = jaspar_dir / f"JASPAR2022_{build}.sorted.bed.gz"
+
+    log.info("CMMT per-motif download: build=%s  dir=%s", build, jaspar_dir)
+
+    # Fetch directory listing
+    try:
+        file_list = _list_cmmt_files(build)
+    except Exception as exc:
+        log.error("Could not list CMMT files for %s: %s", build, exc)
+        return None
+
+    if not file_list:
+        log.error("No .tsv.gz files found for build '%s' on CMMT", build)
+        return None
+    log.info("  %d motif files found for %s", len(file_list), build)
+
+    # Build interval lookup for filtering
+    loci_lookup = None
+    if loci_bed and Path(loci_bed).exists():
+        loci_lookup = _build_loci_lookup(loci_bed)
+        if loci_lookup:
+            log.info("  Loci filter active: %d chromosomes in TE loci", len(loci_lookup))
+        else:
+            log.warning("  Could not build loci lookup; downloading all rows (may be large)")
+
+    tmp_path = out_path.with_suffix(".bed.gz.part")
+    t0 = time.time()
+    total_written = 0
+
+    try:
+        with gzip.open(str(tmp_path), "wt") as out_fh:
+            for i, (fname, url) in enumerate(file_list, 1):
+                if i == 1 or i % 50 == 0 or i == len(file_list):
+                    log.info("  [%d/%d] %s", i, len(file_list), fname)
+                rows_written = 0
+                try:
+                    req = urllib.request.Request(
+                        url, headers={"User-Agent": "te_motif/1.0"})
+                    with urllib.request.urlopen(req, timeout=180) as resp:
+                        with gzip.open(resp, "rt", encoding="utf-8", errors="replace") as gz:
+                            for line in gz:
+                                parts = line.rstrip("\n").split("\t")
+                                if len(parts) < 7:
+                                    continue
+                                try:
+                                    start, end = int(parts[1]), int(parts[2])
+                                except ValueError:
+                                    continue
+                                chr_ = parts[0]
+                                if loci_lookup is not None:
+                                    if not _overlaps_any(chr_, start, end, loci_lookup):
+                                        continue
+                                # Write 6-col BED: chr start end motif_name score strand
+                                out_fh.write(
+                                    f"{chr_}\t{start}\t{end}\t{parts[3]}\t{parts[4]}\t{parts[6]}\n"
+                                )
+                                rows_written += 1
+                    total_written += rows_written
+                except Exception as exc:
+                    log.warning("  Failed to download/parse %s: %s", fname, exc)
+                    log.debug(traceback.format_exc())
+                    continue
+
+        if total_written == 0:
+            tmp_path.unlink(missing_ok=True)
+            log.error("CMMT per-motif: no rows written (loci filter too strict or download failed)")
+            return None
+
+        log.info("  %d rows written in %.1fs — sorting ...", total_written, time.time() - t0)
+
+        # Sort by chr, start  (subprocess pipeline if available, else pure-Python)
+        import shutil, subprocess as _sp
+        if shutil.which("sort") and shutil.which("bgzip"):
+            with open(out_path, "wb") as fh:
+                p1 = _sp.Popen(["zcat", str(tmp_path)], stdout=_sp.PIPE)
+                p2 = _sp.Popen(["sort", "-k1,1", "-k2,2n", "-S", "1G"],
+                                stdin=p1.stdout, stdout=_sp.PIPE)
+                p1.stdout.close()
+                p3 = _sp.Popen(["bgzip", "-c"], stdin=p2.stdout, stdout=fh)
+                p2.stdout.close()
+                p3.communicate(); p2.wait(); p1.wait()
+                if p3.returncode != 0:
+                    log.warning("bgzip pipeline failed; falling back to plain gzip sort")
+                    out_path.unlink(missing_ok=True)
+                else:
+                    tmp_path.unlink(missing_ok=True)
+        if not out_path.exists():
+            # Pure-Python sort fallback
+            rows = []
+            with gzip.open(str(tmp_path), "rt") as fh:
+                for line in fh:
+                    p = line.strip().split("\t")
+                    if len(p) >= 3:
+                        try:
+                            rows.append((p[0], int(p[1]), line))
+                        except ValueError:
+                            pass
+            rows.sort(key=lambda x: (x[0], x[1]))
+            with gzip.open(str(out_path), "wt") as fh:
+                for _, _, line in rows:
+                    fh.write(line)
+            tmp_path.unlink(missing_ok=True)
+
+        log.info("CMMT per-motif download complete: %.1f MB in %.1fs → %s",
+                 out_path.stat().st_size / 1e6, time.time() - t0, out_path)
+        return str(out_path)
+
+    except Exception as exc:
+        log.error("CMMT per-motif download failed: %s", exc)
+        log.debug(traceback.format_exc())
+        tmp_path.unlink(missing_ok=True)
+        return None
+
+
 def resolve_jaspar_bed(build, jaspar_bed_arg, jaspar_dir, loci_bed=None):
     """Return path to a valid JASPAR BED, downloading if necessary."""
     jaspar_dir = Path(jaspar_dir)
@@ -341,91 +558,54 @@ def resolve_jaspar_bed(build, jaspar_bed_arg, jaspar_dir, loci_bed=None):
             sys.exit(1)
         return env_path
 
+    # ── 1. CMMT 2022 cache (from per-motif or bigBed auto-download) ───────────
+    cmmt_cache = jaspar_dir / f"JASPAR2022_{build}.sorted.bed.gz"
+    if cmmt_cache.exists():
+        log.info("Found CMMT-cached JASPAR BED: %s (%.1f MB)",
+                 cmmt_cache, cmmt_cache.stat().st_size / 1e6)
+        if validate_jaspar_bed(cmmt_cache):
+            log.info("Cached JASPAR 2022 BED is valid — using it.")
+            return str(cmmt_cache)
+        log.warning("CMMT cache invalid; deleting and re-downloading: %s", cmmt_cache)
+        cmmt_cache.unlink()
+
+    # ── 2. Legacy JASPAR 2024 cache (backward-compat) ─────────────────────────
     local_path = jaspar_dir / f"JASPAR2024_{build}.sorted.bed.gz"
     if local_path.exists():
-        log.info("Found cached JASPAR BED: %s (%.1f MB)",
+        log.info("Found legacy-cached JASPAR BED: %s (%.1f MB)",
                  local_path, local_path.stat().st_size / 1e6)
         if validate_jaspar_bed(local_path):
-            log.info("Cached JASPAR BED is valid — using it.")
+            log.info("Legacy cached JASPAR BED is valid — using it.")
             return str(local_path)
-        log.warning("Cached JASPAR file is invalid; deleting: %s", local_path)
+        log.warning("Legacy cached JASPAR file is invalid; deleting: %s", local_path)
         local_path.unlink()
 
-    url = JASPAR_URLS.get(build)
-    if not url:
-        log.error("No JASPAR URL for build '%s'. Provide --jaspar-bed or set TE_JASPAR_%s.",
-                  build, build.upper())
-        sys.exit(1)
-
-    log.info("JASPAR BED not found locally — attempting download from: %s", url)
-    log.info("Destination: %s  (hg38 ~1-2 GB; may take several minutes)", local_path)
+    # ── 3. CMMT BigBed remote query (efficient; needs bigBedToBed) ────────────
+    log.info("No cached JASPAR BED found — auto-downloading from CMMT (JASPAR 2022) ...")
     log.info("Tip: set TE_JASPAR_%s=/path/to/file to skip future downloads", build.upper())
-
-    import shutil
-    import subprocess
-    tmp_path = local_path.with_suffix(local_path.suffix + ".part")
-    for tool in [
-        ["wget", "-q", "--show-progress", "-O", str(tmp_path), url],
-        ["curl", "-L", "-o", str(tmp_path), url],
-    ]:
-        if shutil.which(tool[0]) is None:
-            log.debug("%s not found — trying next downloader", tool[0])
-            continue
-        log.info("Downloading with %s ...", tool[0])
-        try:
-            if subprocess.run(tool).returncode == 0 and tmp_path.exists() and tmp_path.stat().st_size > 0:
-                if validate_jaspar_bed(tmp_path):
-                    tmp_path.replace(local_path)
-                    log.info("Downloaded %.0f MB → %s",
-                             local_path.stat().st_size / 1e6, local_path)
-                    return str(local_path)
-                log.warning("Downloaded file is not BED/GZIP; discarding %s", tmp_path)
-                tmp_path.unlink(missing_ok=True)
-        except OSError as exc:
-            log.warning("%s failed to start: %s", tool[0], exc)
-
-    log.info("wget/curl unavailable or failed — trying Python requests downloader")
-    try:
-        import requests
-        with requests.get(url, stream=True, timeout=60) as r:
-            r.raise_for_status()
-            downloaded = 0
-            with open(tmp_path, "wb") as fh:
-                for chunk in r.iter_content(chunk_size=1024 * 1024):
-                    if not chunk:
-                        continue
-                    fh.write(chunk)
-                    downloaded += len(chunk)
-                    if downloaded and downloaded % (100 * 1024 * 1024) < 1024 * 1024:
-                        log.info("  downloaded %.0f MB", downloaded / 1e6)
-        if tmp_path.exists() and tmp_path.stat().st_size > 0:
-            if validate_jaspar_bed(tmp_path):
-                tmp_path.replace(local_path)
-                log.info("Downloaded %.0f MB → %s",
-                         local_path.stat().st_size / 1e6, local_path)
-                return str(local_path)
-            log.warning("Downloaded file is not BED/GZIP; discarding %s", tmp_path)
-    except Exception as exc:
-        log.error("Python requests download failed: %s", exc)
-        log.debug(traceback.format_exc())
-    finally:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
-
     locus_bed = _build_locus_jaspar_bed_from_bigbed(build, jaspar_dir, loci_bed)
     if locus_bed:
         return locus_bed
 
-    bb = JASPAR_BIGBED_URLS.get(build)
+    # ── 4. CMMT per-motif TSV.gz streaming download (no external tools) ───────
+    log.info("bigBedToBed not available — falling back to per-motif CMMT download ...")
+    cmmt_path = _download_cmmt_per_motif(build, jaspar_dir, loci_bed=loci_bed)
+    if cmmt_path:
+        return cmmt_path
+
     log.error("FATAL: all JASPAR BED download methods failed.")
+    bb = JASPAR_BIGBED_URLS.get(build)
     if bb:
-        log.error("JASPAR now publishes this build as bigBed: %s", bb)
-        log.error("Convert/query that bigBed to BED, then rerun with:")
-        log.error("  --jaspar-bed /path/to/JASPAR2024_%s.bed.gz", build)
-    log.error("Manual wget command: wget -O %s '%s'", local_path, url)
+        log.error("CMMT hosts JASPAR 2022 data for this build.")
+        log.error("  BigBed URL : %s", bb)
+        log.error("  Per-motif  : %s/%s/", CMMT_BASE_URL, build)
+        log.error("")
+        log.error("To fix: download the bigBed on a machine with glibc >= 2.29 and convert:")
+        log.error("  wget -O JASPAR2022_%s.bb '%s'", build, bb)
+        log.error("  bigBedToBed JASPAR2022_%s.bb JASPAR2022_%s.bed", build, build)
+        log.error("  bgzip JASPAR2022_%s.bed && tabix -p bed JASPAR2022_%s.bed.gz", build, build)
+        log.error("  # then rerun with:  --jaspar-bed /path/to/JASPAR2022_%s.bed.gz", build)
+    log.error("Or pass --skip-motif to skip JASPAR analysis entirely.")
     sys.exit(1)
 
 

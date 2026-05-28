@@ -159,8 +159,12 @@ def parse_args(argv=None):
                    help="P-value threshold for motif/GO reporting")
     p.add_argument("--resume-from", choices=["sequences", "stats", "clustering", "dashboard", "primers", "alignment", "motif", "tfbs", "go"],
                    default=None, help="Resume an existing output folder from this stage")
+    p.add_argument("--stop-after", choices=["sequences", "stats", "clustering", "dashboard", "alignment", "motif", "go", "primers"],
+                   default=None, help="Stop the pipeline after this stage completes (for parallel job submission)")
     p.add_argument("--validate-existing", action="store_true",
                    help="Report which expected output files already exist, then continue/resume")
+    p.add_argument("--force", action="store_true",
+                   help="Force re-run of cached stages (bedtools overlaps, JASPAR index)")
     return p.parse_args(argv)
 
 
@@ -1053,7 +1057,7 @@ def run_motif_stage_full(args, out_dir, dirs, family_name,
 
     build      = getattr(args, "assembly", "hg38") or "hg38"
     SPECIES_ID = {"hg38":"9606","hg19":"9606","mm10":"10090","mm39":"10090"}.get(build,"9606")
-    FORCE      = False
+    FORCE      = getattr(args, "force", False)
 
     motif_dir  = dirs["motif"]
     enrich_dir = dirs["enrichment"]
@@ -1093,6 +1097,13 @@ def run_motif_stage_full(args, out_dir, dirs, family_name,
         if not _tp.exists():
             print(f"  ⚠  Not found: {_tp}  — falling back to auto-build / --jaspar-bed")
         elif not _tbi.exists():
+            _is_interactive = getattr(sys.stdin, "isatty", lambda: False)()
+            if not _is_interactive:
+                raise FileNotFoundError(
+                    f"JASPAR tabix index not found: {_tp}.tbi\n"
+                    f"  Run on the cluster:  tabix -p bed {_tp}\n"
+                    f"  Or pass --skip-motif to skip JASPAR analysis."
+                )
             print(f"  ⚠  No .tbi alongside {_tp.name}  — falling back to auto-build / --jaspar-bed")
         else:
             PREBUILT_TABIX = str(_tp)
@@ -2091,6 +2102,8 @@ def run_pipeline(args):
         sys.exit(1)
     stage_times["Sequences"] = time.time() - t0
     _checkpoint(OUT_DIR, "stage3_sequences", f"seq_ok={_seq_ok}/{len(df_family)}")
+    if getattr(args, "stop_after", None) == "sequences":
+        print("[Pipeline] Stopping after sequences stage."); sys.exit(0)
 
     # ── 4. Statistics ───────────────────────────────────────────────────────
     t0 = time.time()
@@ -2108,6 +2121,8 @@ def run_pipeline(args):
         expr_cols = []
     stage_times["Statistics"] = time.time() - t0
     _checkpoint(OUT_DIR, "stage4_statistics", f"expr_cols={expr_cols}")
+    if getattr(args, "stop_after", None) == "stats":
+        print("[Pipeline] Stopping after stats stage."); sys.exit(0)
 
     # ── 5. Clustering ───────────────────────────────────────────────────────
     t0 = time.time()
@@ -2197,6 +2212,8 @@ def run_pipeline(args):
         n_clusters = 0
     stage_times["Clustering"] = time.time() - t0
     _checkpoint(OUT_DIR, "stage5_clustering", f"n_clusters={n_clusters}")
+    if getattr(args, "stop_after", None) == "clustering":
+        print("[Pipeline] Stopping after clustering stage."); sys.exit(0)
 
     # Per-cluster stats: text files written per cluster, summary via SQL
     _diag("  Writing per-cluster stats")
@@ -2223,6 +2240,8 @@ def run_pipeline(args):
         _diag(f"  Dashboard FAILED (non-fatal): {type(e).__name__}: {e}\n{traceback.format_exc()}")
     stage_times["Dashboard"] = time.time() - t0
     _checkpoint(OUT_DIR, "stage6_dashboard")
+    if getattr(args, "stop_after", None) == "dashboard":
+        print("[Pipeline] Stopping after dashboard stage."); sys.exit(0)
 
     # ── 7. Alignment ────────────────────────────────────────────────────────
     if not args.skip_alignment:
@@ -2237,6 +2256,8 @@ def run_pipeline(args):
             log_error("ALIGNMENT", e)
         stage_times["Alignment"] = time.time() - t0
         _checkpoint(OUT_DIR, "stage7_alignment")
+        if getattr(args, "stop_after", None) == "alignment":
+            print("[Pipeline] Stopping after alignment stage."); sys.exit(0)
     else:
         _diag("STAGE 7: Alignment SKIPPED (--skip-alignment)")
 
@@ -2266,6 +2287,8 @@ def run_pipeline(args):
             )
         stage_times["Motif+TFBS+GO"] = time.time() - t0
         _checkpoint(OUT_DIR, "stage9_motif")
+        if getattr(args, "stop_after", None) in {"motif", "go"}:
+            print("[Pipeline] Stopping after motif/go stage."); sys.exit(0)
     else:
         _diag("STAGE 9: Motif SKIPPED (--skip-motif)")
 
@@ -2294,6 +2317,8 @@ def run_pipeline(args):
             log_error("PRIMER DESIGN", e)
         stage_times["Primers"] = time.time() - t0
         _checkpoint(OUT_DIR, "stage10_primers")
+        if getattr(args, "stop_after", None) == "primers":
+            print("[Pipeline] Stopping after primers stage."); sys.exit(0)
     else:
         _diag("STAGE 10: Primers SKIPPED (--skip-primers)")
 

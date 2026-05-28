@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import ArgumentsPanel from "@/components/ArgumentsPanel";
 import FatalModal from "@/components/FatalModal";
@@ -12,6 +12,15 @@ import { onCrash, onLog, onProgress, onSetup, onUpdate, pySetup } from "@/lib/ip
 import type { LogLevel } from "@/lib/logLevel";
 import { useAppStore } from "@/store/appStore";
 
+function Splitter({ onMouseDown }: { onMouseDown: (e: React.MouseEvent) => void }) {
+  return (
+    <div
+      onMouseDown={onMouseDown}
+      className="w-1 shrink-0 cursor-col-resize bg-[var(--app-border)] hover:bg-[var(--app-accent)] transition-colors"
+    />
+  );
+}
+
 function coerceLevel(level: string): LogLevel {
   if (level === "warn" || level === "error") {
     return level;
@@ -22,6 +31,35 @@ function coerceLevel(level: string): LogLevel {
 export default function App() {
   const fileViewerOpen = useAppStore((s) => s.fileViewerOpen);
   const setupPhase     = useAppStore((s) => s.setupPhase);
+
+  const [leftW,  setLeftW]  = useState(320);
+  const [rightW, setRightW] = useState(480);
+  const drag = useRef<{ side: "left" | "right"; startX: number; startW: number } | null>(null);
+
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!drag.current) return;
+      const { side, startX, startW } = drag.current;
+      const delta = e.clientX - startX;
+      if (side === "left") {
+        setLeftW(Math.max(180, Math.min(600, startW + delta)));
+      } else {
+        setRightW(Math.max(280, Math.min(800, startW - delta)));
+      }
+    };
+    const onUp = () => { drag.current = null; };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, []);
+
+  const startDrag = (side: "left" | "right") => (e: React.MouseEvent) => {
+    e.preventDefault();
+    drag.current = { side, startX: e.clientX, startW: side === "left" ? leftW : rightW };
+  };
   const setSetupEvent  = useAppStore((s) => s.setSetupEvent);
   const pushToast        = useAppStore((s) => s.pushToast);
   const setReleaseUpdate = useAppStore((s) => s.setReleaseUpdate);
@@ -38,6 +76,9 @@ export default function App() {
         ts: e.ts ?? Date.now(),
         source: e.source,
       });
+      if (e.message.startsWith("[JOB DONE]")) {
+        useAppStore.getState().pushToast(e.message.replace("[JOB DONE] ", ""));
+      }
     });
 
     const unsubProgress = onProgress((p) => {
@@ -113,10 +154,16 @@ export default function App() {
   return (
     <div className="flex h-screen flex-col bg-[var(--app-bg)] text-[var(--app-text)]">
       <StatusBar />
-      <div className="flex min-h-0 flex-1">
-        <ArgumentsPanel />
+      <div className="flex min-h-0 flex-1 select-none">
+        <ArgumentsPanel width={leftW} />
+        <Splitter onMouseDown={startDrag("left")} />
         <LogStream />
-        {fileViewerOpen && <FileViewer />}
+        {fileViewerOpen && (
+          <>
+            <Splitter onMouseDown={startDrag("right")} />
+            <FileViewer width={rightW} />
+          </>
+        )}
       </div>
       <ToastStack />
       <FatalModal />
