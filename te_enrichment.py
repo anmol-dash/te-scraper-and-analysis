@@ -120,6 +120,8 @@ def parse_args():
                    help="Re-run specific steps (motif go expression)")
     p.add_argument("--status",      action="store_true",
                    help="Print checkpoint status and exit")
+    p.add_argument("--notify-email", default="", metavar="EMAIL",
+                   help="Send a completion email to this address (requires Gmail App Password setup).")
     return p.parse_args()
 
 
@@ -224,6 +226,9 @@ def main():
     print("\n" + "=" * 60)
     print("Enrichment pipeline complete")
     _print_status(out_dir, all_steps)
+    if args.notify_email:
+        from te_notify import send_completion_email
+        send_completion_email(args.notify_email, "te_enrichment", str(out_dir))
 
 
 if __name__ == "__main__":

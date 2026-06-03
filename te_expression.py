@@ -91,6 +91,8 @@ def parse_args():
     p.add_argument("--no-log1p",     dest="log1p", action="store_false")
     p.add_argument("--force",        action="store_true",
                    help="Re-run even if output already exists")
+    p.add_argument("--notify-email", default="", metavar="EMAIL",
+                   help="Send a completion email to this address (requires Gmail App Password setup).")
     return p.parse_args()
 
 
@@ -604,6 +606,9 @@ def main():
         log1p        = args.log1p,
         force        = args.force,
     )
+    if args.notify_email:
+        from te_notify import send_completion_email
+        send_completion_email(args.notify_email, "te_expression", args.out_dir)
 
 
 if __name__ == "__main__":

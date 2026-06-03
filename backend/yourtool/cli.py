@@ -117,6 +117,14 @@ def main(argv: Sequence[str] | None = None, cancel_event: Event | None = None) -
     p_dl_update.add_argument("--filename", default="", help="Destination filename (inferred from URL if blank).")
     p_dl_update.set_defaults(handler=_cmd_download_update)
 
+    p_notify_get = sub.add_parser("notify-get", help="Read saved Gmail notification credentials.")
+    p_notify_get.set_defaults(handler=_cmd_notify_get)
+
+    p_notify_set = sub.add_parser("notify-set", help="Save Gmail notification credentials.")
+    p_notify_set.add_argument("--email", required=True, help="Gmail sender address.")
+    p_notify_set.add_argument("--password", required=True, help="Gmail App Password (16 chars).")
+    p_notify_set.set_defaults(handler=_cmd_notify_set)
+
     args = parser.parse_args(argv)
     handler = args.handler
     result = handler(args, cancel_event)
@@ -230,6 +238,7 @@ def _cmd_hpc_connect(args: argparse.Namespace, _cancel_event: Event | None) -> d
         "host": args.host,
         "scheduler": client.scheduler,
         "home": client.remote_work_dir,
+        "has_internet": bool(getattr(client, "has_internet", False)),
     }
 
 
@@ -546,6 +555,42 @@ def _cmd_hpc_read_file(args: argparse.Namespace, _cancel_event: Event | None) ->
         return {"ok": True, "type": "text", "mime": "text/plain", "text": text, "size": len(data)}
     except UnicodeDecodeError:
         return {"ok": True, "type": "binary", "mime": mime, "data": base64.b64encode(data).decode(), "size": len(data)}
+
+
+_NOTIFY_STATE_FILE = Path.home() / ".hpc_te_state.json"
+_NOTIFY_EMAIL_KEY = "gmail_sender_email"
+_NOTIFY_PW_KEY = "gmail_app_password"
+
+
+def _load_notify_state() -> dict[str, Any]:
+    try:
+        return json.loads(_NOTIFY_STATE_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_notify_state(state: dict[str, Any]) -> None:
+    _NOTIFY_STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+
+def _cmd_notify_get(_args: argparse.Namespace, _cancel_event: Event | None) -> dict[str, Any]:
+    state = _load_notify_state()
+    email = state.get(_NOTIFY_EMAIL_KEY, "").strip()
+    pw = state.get(_NOTIFY_PW_KEY, "").strip()
+    return {"ok": True, "email": email, "configured": bool(email and pw)}
+
+
+def _cmd_notify_set(args: argparse.Namespace, _cancel_event: Event | None) -> dict[str, Any]:
+    email = args.email.strip()
+    pw = args.password.strip().replace(" ", "")
+    if not email or not pw:
+        return {"ok": False, "error": "email and password are required"}
+    state = _load_notify_state()
+    state[_NOTIFY_EMAIL_KEY] = email
+    state[_NOTIFY_PW_KEY] = pw
+    _save_notify_state(state)
+    print(f"  Notification credentials saved for {email}", flush=True)
+    return {"ok": True, "email": email}
 
 
 def _cmd_download_update(args: argparse.Namespace, cancel_event: Event | None) -> dict[str, Any]:

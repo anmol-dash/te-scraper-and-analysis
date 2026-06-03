@@ -4,6 +4,7 @@ import ArgumentsPanel from "@/components/ArgumentsPanel";
 import FatalModal from "@/components/FatalModal";
 import FileViewer from "@/components/FileViewer";
 import LogStream from "@/components/LogStream";
+import NotificationsModal from "@/components/NotificationsModal";
 import SetupScreen from "@/components/SetupScreen";
 import UpdateModal from "@/components/UpdateModal";
 import StatusBar from "@/components/StatusBar";
@@ -166,6 +167,7 @@ export default function App() {
         )}
       </div>
       <ToastStack />
+      <NotificationsModal />
       <FatalModal />
       <UpdateModal />
     </div>

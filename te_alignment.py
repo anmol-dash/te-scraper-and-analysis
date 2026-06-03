@@ -421,6 +421,8 @@ def _parse_args():
     p.add_argument("--input",  required=True, help="CSV with Seq + Cluster columns")
     p.add_argument("--out-dir", default=".", help="Output directory")
     p.add_argument("--family", default="FAMILY")
+    p.add_argument("--notify-email", default="", metavar="EMAIL",
+                   help="Send a completion email to this address (requires Gmail App Password setup).")
     return p.parse_args()
 
 
@@ -433,3 +435,6 @@ if __name__ == "__main__":
     if "Cluster" not in df.columns:
         df["Cluster"] = 0
     run_alignment_pipeline(df, args.out_dir, args.family)
+    if args.notify_email:
+        from te_notify import send_completion_email
+        send_completion_email(args.notify_email, "te_alignment", args.out_dir)

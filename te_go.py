@@ -2,11 +2,14 @@
 """
 te_go.py  —  GAMECA step G: Gene / GO Annotation
 ─────────────────────────────────────────────────────────────────────────────
-Looks up gene function and GO terms for TF motifs that were identified as
-significantly enriched by te_motif.py, using the mygene.info REST API.
+Looks up gene function and GO terms for TF motifs identified as enriched by
+te_motif.py, using the mygene.info REST API.
 
-Input:   enrichment_results/ directory produced by te_motif.py
-         (cluster_N_enrichment.csv files)
+When enrichment results are absent, te_motif.py (JASPAR + Fisher) runs
+automatically first.  Pass --homer to also run HOMER in the same chain.
+
+Input:   clustered CSV from te_clustering.py  (--input)
+      OR enrichment_results/ directory from te_motif.py (--enrichment-dir)
 
 Output:
   <out_dir>/go_annotations/
@@ -17,17 +20,18 @@ Output:
       clusterN_antisense_go_bp.png       GO-BP bar chart (– strand)
 
 Usage:
-    python te_go.py \\
-        --enrichment-dir ./results/enrichment_results \\
-        --build hg38 \\
-        --out-dir ./results
+    # Simplest — pass the clustered CSV; te_motif runs automatically if needed
+    python te_go.py --input clustered.csv --build hg38
 
-    # With strand info from the original clustered CSV:
+    # Family + assembly shortcut — locates the CSV in standard output paths
+    python te_go.py --family AluY  --assembly hg38  --out-dir ./results
+    python te_go.py --family B1_Mm --assembly mm10  --out-dir ./results --homer
+
+    # Manual — point at existing enrichment results (legacy / direct)
     python te_go.py \\
         --enrichment-dir ./results/enrichment_results \\
         --clustered-csv  ./results/clustered.csv \\
-        --build hg38 \\
-        --out-dir ./results
+        --build hg38 --out-dir ./results
 """
 
 import argparse
@@ -47,6 +51,9 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import requests
 
+_DEFAULT_BASE = os.environ.get("TE_BASE_DIR",   str(Path.home() / "te_analysis"))
+_DEFAULT_JASP = os.environ.get("TE_JASPAR_DIR", str(Path(_DEFAULT_BASE) / "jaspar"))
+
 SPECIES_IDS = {"hg38": "9606", "hg19": "9606", "mm10": "10090", "mm39": "10090"}
 
 PALETTE = [
@@ -63,21 +70,63 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    p.add_argument("--enrichment-dir", required=True,
-                   help="Directory with cluster_N_enrichment.csv files (from te_motif.py)")
-    p.add_argument("--build", default="hg38",
-                   help="Genome build: hg38/hg19/mm10/mm39 (sets mygene species)")
+
+    # ── Primary inputs (one or more required) ────────────────────────────────
+    p.add_argument("--enrichment-dir", default=None,
+                   help="Directory with cluster_N_enrichment.csv files (from te_motif.py). "
+                        "Auto-resolved from --out-dir/enrichment_results if omitted; "
+                        "te_motif.py is run first when results are absent.")
+    p.add_argument("--input", default=None,
+                   help="Clustered CSV (from te_clustering.py). Triggers automatic "
+                        "te_motif.py run when enrichment results are absent.")
+    p.add_argument("--family", default=None,
+                   help="TE family name (e.g. AluY). Used to locate the clustered CSV "
+                        "under --out-dir when --input is not specified.")
+
+    # ── Genome / assembly ────────────────────────────────────────────────────
+    p.add_argument("--build", "--assembly", default="hg38",
+                   help="Genome build: hg38/hg19/mm10/mm39 (default: hg38). "
+                        "--assembly is an accepted synonym.")
+
+    # ── Output ───────────────────────────────────────────────────────────────
     p.add_argument("--out-dir", default=".",
                    help="Output directory (go_annotations/ created inside)")
     p.add_argument("--clustered-csv", default=None,
-                   help="Clustered CSV (from te_clustering.py) — enables strand GO plots")
+                   help="Clustered CSV for strand GO plots (inferred from --input when possible)")
+
+    # ── GO options ───────────────────────────────────────────────────────────
     p.add_argument("--p-threshold", type=float, default=0.05,
                    help="Fisher p-value cutoff for GO query (default: 0.05)")
     p.add_argument("--top-motifs", type=int, default=30,
                    help="Number of top motifs per cluster to annotate (default: 30)")
     p.add_argument("--force", action="store_true",
                    help="Re-run even if gene_functions.csv already exists")
-    return p.parse_args()
+
+    # ── JASPAR options (forwarded to te_motif when auto-chaining) ────────────
+    p.add_argument("--jaspar-bed", default=None,
+                   help="Path to JASPAR BED (auto-downloaded if omitted)")
+    p.add_argument("--jaspar-dir", default=_DEFAULT_JASP,
+                   help=f"Cache directory for JASPAR BED files (default: {_DEFAULT_JASP})")
+
+    # ── HOMER (forwarded to te_motif when auto-chaining) ─────────────────────
+    p.add_argument("--homer", action="store_true",
+                   help="Also run HOMER findMotifsGenome.pl when te_motif is auto-chained")
+    p.add_argument("--homer-genome", default=None,
+                   help="HOMER genome name or FASTA path (defaults to --build value)")
+    p.add_argument("--homer-size",    default="200",
+                   help="HOMER -size parameter (default: 200)")
+    p.add_argument("--homer-threads", type=int, default=4,
+                   help="HOMER -p threads per cluster (default: 4)")
+    p.add_argument("--notify-email", default="", metavar="EMAIL",
+                   help="Send a completion email to this address (requires Gmail App Password setup).")
+
+    args = p.parse_args()
+    if not args.enrichment_dir and not args.input and not args.family:
+        p.error(
+            "provide at least one of: --enrichment-dir, --input (clustered CSV), "
+            "or --family (to locate the clustered CSV automatically)"
+        )
+    return args
 
 
 # ── mygene.info helpers ───────────────────────────────────────────────────────
@@ -364,22 +413,93 @@ def _strand_go_plots(clustered_csv, out_dir, cluster_ids,
 
 
 def main():
-    args = parse_args()
+    args    = parse_args()
+    build   = args.build
+    out_dir = Path(args.out_dir)
+
+    # ── Resolve clustered CSV ─────────────────────────────────────────────────
+    input_csv = args.input
+    if not input_csv and args.family:
+        family_lc = args.family.lower()
+        candidates = [
+            out_dir / f"{family_lc}_clustered.csv",
+            out_dir / "01_data" / f"{family_lc}_clustered.csv",
+            out_dir / family_lc / "01_data" / f"{family_lc}_clustered.csv",
+        ]
+        for c in candidates:
+            if c.exists():
+                input_csv = str(c)
+                print(f"  Found clustered CSV: {c}")
+                break
+        if not input_csv:
+            print(
+                f"  [INFO] Could not find {family_lc}_clustered.csv under {out_dir}.\n"
+                f"  Run te_clustering.py first, or pass --input explicitly."
+            )
+
+    # ── Resolve enrichment directory ──────────────────────────────────────────
+    enrich_dir = Path(args.enrichment_dir) if args.enrichment_dir else (out_dir / "enrichment_results")
+
+    # ── Auto-chain te_motif.py when enrichment results are absent ─────────────
+    needs_motif = (
+        not enrich_dir.exists()
+        or not any(enrich_dir.glob("cluster_*_enrichment.csv"))
+    )
+    if needs_motif:
+        if not input_csv:
+            print(
+                "FATAL: No enrichment results found in:\n"
+                f"  {enrich_dir}\n"
+                "Provide --input (clustered CSV), --enrichment-dir, or --family to\n"
+                "locate the clustered CSV automatically under --out-dir."
+            )
+            sys.exit(1)
+        print(f"\n[AUTO-CHAIN] Enrichment results not found — running te_motif.py first")
+        try:
+            from te_motif import run_motif_analysis, run_homer
+        except ImportError:
+            print("FATAL: te_motif.py not found on PYTHONPATH; cannot auto-chain.")
+            sys.exit(1)
+        run_motif_analysis(
+            input_csv      = input_csv,
+            build          = build,
+            out_dir        = str(out_dir),
+            jaspar_bed_arg = args.jaspar_bed,
+            jaspar_dir     = args.jaspar_dir,
+            p_threshold    = args.p_threshold,
+            force          = args.force,
+        )
+        if args.homer:
+            print("\n[AUTO-CHAIN] Running HOMER (--homer)")
+            run_homer(
+                input_csv = input_csv,
+                build     = build,
+                out_dir   = str(out_dir),
+                genome    = args.homer_genome,
+                size      = args.homer_size,
+                threads   = args.homer_threads,
+                force     = args.force,
+            )
+
+    # ── GO annotation ──────────────────────────────────────────────────────────
     print("=" * 60)
     print("GAMECA — GO Annotation")
-    print(f"  Enrichment dir: {args.enrichment_dir}")
-    print(f"  Build:          {args.build}")
-    print(f"  OutDir:         {args.out_dir}")
+    print(f"  Enrichment dir: {enrich_dir}")
+    print(f"  Build:          {build}")
+    print(f"  OutDir:         {out_dir}")
     print("=" * 60)
     run_go_annotation(
-        enrichment_dir = args.enrichment_dir,
-        build          = args.build,
-        out_dir        = args.out_dir,
-        clustered_csv  = args.clustered_csv,
+        enrichment_dir = str(enrich_dir),
+        build          = build,
+        out_dir        = str(out_dir),
+        clustered_csv  = input_csv or args.clustered_csv,
         p_threshold    = args.p_threshold,
         top_motifs     = args.top_motifs,
         force          = args.force,
     )
+    if args.notify_email:
+        from te_notify import send_completion_email
+        send_completion_email(args.notify_email, "te_go", str(out_dir))
 
 
 if __name__ == "__main__":

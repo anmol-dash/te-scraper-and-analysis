@@ -22,7 +22,7 @@ HPC MODE (default):
   python query.py --test
 
 Speed options:
-  --fetch-workers 20      # more parallel UCSC workers (default 10)
+  --fetch-workers 5       # more UCSC worker threads (default 3; concurrency capped at 3)
   --parallel-primers      # parallel genome-wide primer search
   python setup_cython.py build_ext --inplace   # compile Cython for batch ops
 """
@@ -126,7 +126,9 @@ def parse_args(argv=None):
                    help="Timeout for primer genome search in seconds (default: 120)")
     # ── Local mode ─────────────────────────────────────────────────────────────
     p.add_argument("--local",    action="store_true",
-                   help="Run locally: auto-download rmsk, fetch seqs via UCSC API")
+                   help="Run locally: auto-download rmsk/dfam, fetch seqs via UCSC API")
+    p.add_argument("--source",   type=str, default="rmsk", choices=["rmsk", "dfam"],
+                   help="Coordinate source for --local mode: rmsk (RepeatMasker) or dfam (default: rmsk)")
     p.add_argument("--assembly", type=str, default="hg38",
                    help="Genome assembly for local mode: hg38, hg19, mm10, mm39 (default: hg38)")
     p.add_argument("--rmsk-dir", type=str, default=None,
@@ -137,8 +139,8 @@ def parse_args(argv=None):
                    help="Optional CSV/TSV/BED-like expression assembly with chr/start/stop columns")
     p.add_argument("--expression-buffer", type=int, default=50,
                    help="Expand expression start/stop by this many bp when matching TE loci (default: 50)")
-    p.add_argument("--fetch-workers", type=int, default=10,
-                   help="Parallel UCSC fetch workers (default: 10)")
+    p.add_argument("--fetch-workers", type=int, default=3,
+                   help="Parallel UCSC fetch workers (default: 3; concurrency capped at 3 regardless)")
     p.add_argument("--parallel-primers", action="store_true",
                    help="Parallelize primer genome search across chromosomes")
     # ── Misc ───────────────────────────────────────────────────────────────────
@@ -322,28 +324,18 @@ def create_test_data():
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _load_local_data(args):
-    """Download rmsk (if needed), parse family loci, return DataFrame with coords.
+    """Download rmsk or dfam (if needed), parse family loci, return DataFrame with coords.
 
     Called when --local is set and --input is not provided.
     """
-    from te_prep import download_rmsk, get_rmsk_path, parse_rmsk_family
     from pathlib import Path
 
     assembly = args.assembly
     family   = args.family
+    source   = getattr(args, "source", "rmsk")
     rmsk_dir = args.rmsk_dir or str(Path.home() / "te_analysis" / "rmsk")
 
-    progress_print(f"LOCAL MODE: {family} on {assembly}")
-
-    # Auto-download rmsk if not present
-    rmsk_path_candidate = Path(rmsk_dir) / f"rmsk_{assembly}.txt.gz"
-    if not rmsk_path_candidate.exists():
-        progress_print(f"  rmsk_{assembly}.txt.gz not found — downloading (~150 MB, one-time)...")
-        download_rmsk(assembly, rmsk_dir)
-    else:
-        progress_print(f"  rmsk found: {rmsk_path_candidate}")
-
-    rmsk_path = get_rmsk_path(assembly, rmsk_dir)
+    progress_print(f"LOCAL MODE: {family} on {assembly} (source={source})")
 
     # Standard chromosomes filter
     if assembly.startswith("hg"):
@@ -351,14 +343,34 @@ def _load_local_data(args):
     else:
         std = set([f"chr{i}" for i in range(1, 20)] + ["chrX", "chrY"])
 
-    progress_print(f"  Parsing rmsk for '{family}'...")
-    hits = parse_rmsk_family(rmsk_path, family, std_chroms=std)
+    if source == "dfam":
+        from te_prep import parse_dfam_family
+        progress_print(f"  Fetching Dfam nrph hits for '{family}' ({assembly})...")
+        hits = parse_dfam_family(None, family, build=assembly, std_chroms=std)
+        if not hits:
+            print(f"ERROR: No Dfam loci found for '{family}' in {assembly}.")
+            print(f"  Name is case-sensitive. Try searching:")
+            print(f"    python te_prep.py --search {family.lower()} --build {assembly} --source dfam")
+            sys.exit(1)
+    else:
+        from te_prep import download_rmsk, get_rmsk_path, parse_rmsk_family
+        # Auto-download rmsk if not present
+        rmsk_path_candidate = Path(rmsk_dir) / f"rmsk_{assembly}.txt.gz"
+        if not rmsk_path_candidate.exists():
+            progress_print(f"  rmsk_{assembly}.txt.gz not found — downloading (~150 MB, one-time)...")
+            download_rmsk(assembly, rmsk_dir)
+        else:
+            progress_print(f"  rmsk found: {rmsk_path_candidate}")
 
-    if not hits:
-        print(f"ERROR: No loci found for repName='{family}' in {assembly}.")
-        print(f"  repName is case-sensitive. Search families with:")
-        print(f"    python te_prep.py --search {family.lower()} --build {assembly}")
-        sys.exit(1)
+        rmsk_path = get_rmsk_path(assembly, rmsk_dir)
+        progress_print(f"  Parsing rmsk for '{family}'...")
+        hits = parse_rmsk_family(rmsk_path, family, std_chroms=std)
+
+        if not hits:
+            print(f"ERROR: No loci found for repName='{family}' in {assembly}.")
+            print(f"  repName is case-sensitive. Search families with:")
+            print(f"    python te_prep.py --search {family.lower()} --build {assembly}")
+            sys.exit(1)
 
     df = pd.DataFrame(hits)
     df["TE_name"] = df["repName"]
@@ -608,10 +620,61 @@ def _add_ucsc_urls(df, assembly, fetched_from_ucsc=True):
         df["ucsc_url"] = ""
 
 
-def _fetch_sequences_parallel(df, assembly="hg38", n_workers=10):
-    """Fetch sequences from UCSC API in parallel using ThreadPoolExecutor.
+def _check_ucsc_connectivity():
+    """Return (ok, error_msg). Uses curl — more reliable than Python socket on HPC nodes
+    where nsswitch/libc DNS may differ from the system curl resolver."""
+    import subprocess
+    try:
+        r = subprocess.run(
+            "curl -s --connect-timeout 6 --max-time 8 -o /dev/null "
+            "-w '%{http_code}' 'https://api.genome.ucsc.edu/'",
+            shell=True, capture_output=True, text=True, timeout=12,
+        )
+        code = r.stdout.strip()
+        if r.returncode == 0 and code not in ("", "000"):
+            return True, None
+        return False, f"curl exit={r.returncode} http={code} stderr={r.stderr.strip()[:120]}"
+    except Exception as e:
+        return False, str(e)
 
-    ~10x faster than the original sequential loop for large families.
+
+_UCSC_CONNECTIVITY_MSG = (
+    "FATAL: Cannot reach api.genome.ucsc.edu (DNS resolution failed).\n"
+    "  HPC compute nodes typically block outbound internet.\n"
+    "  Options:\n"
+    "    1) Provide a local genome FASTA:  --genome /path/to/{build}.fa\n"
+    "    2) Run te_prep.py on a login node (has internet), then pass the CSV via --input.\n"
+    "    3) Use --source dfam only if dfam.org is reachable from your cluster.\n"
+)
+
+
+def _curl_json(url, timeout=30):
+    """Fetch a URL with curl (via shell=True) and return the parsed JSON dict.
+
+    shell=True routes DNS through /bin/sh, matching the same resolver path as
+    interactive curl. Without it, subprocess curl uses a different libc DNS path
+    that fails on some HPC nodes (exit 6 = can't resolve, exit 28 = timeout).
+    """
+    import subprocess, json as _json, shlex
+    cmd = f"curl -s --connect-timeout 8 --max-time {timeout} {shlex.quote(url)}"
+    result = subprocess.run(
+        cmd, shell=True, capture_output=True, text=True, timeout=timeout + 8,
+    )
+    if result.returncode != 0:
+        raise ConnectionError(
+            f"curl exit={result.returncode}: {(result.stderr or result.stdout).strip()[:120]}"
+        )
+    try:
+        return _json.loads(result.stdout)
+    except _json.JSONDecodeError as exc:
+        raise ValueError(f"JSON parse error ({exc}): body={result.stdout[:80]!r}")
+
+
+def _fetch_sequences_parallel(df, assembly="hg38", n_workers=10):
+    """Fetch sequences from UCSC API in parallel via curl.
+
+    Uses curl instead of Python requests to bypass Python DNS resolution issues
+    on HPC nodes where socket.getaddrinfo fails but curl resolves fine.
     Returns list of sequences (same order as df rows).
     """
     import threading
@@ -620,9 +683,13 @@ def _fetch_sequences_parallel(df, assembly="hg38", n_workers=10):
     n = len(df)
     seqs = [None] * n
     failed = []
-    lock = threading.Lock()
-    # Semaphore to respect UCSC rate limits (~10 concurrent OK)
-    sem = threading.Semaphore(n_workers)
+    _concurrency = min(n_workers, 3)
+    sem = threading.Semaphore(_concurrency)
+    _print_lock = threading.Lock()
+
+    def _log(msg):
+        with _print_lock:
+            progress_print(msg)
 
     def _fetch_one(i):
         chrom = df["chr"].iloc[i]
@@ -632,23 +699,35 @@ def _fetch_sequences_parallel(df, assembly="hg38", n_workers=10):
             f"https://api.genome.ucsc.edu/getData/sequence?"
             f"genome={assembly};chrom={chrom};start={start};end={stop}"
         )
-        retries = 3
-        for attempt in range(retries):
+        for attempt in range(5):
             try:
                 with sem:
-                    r = requests.get(url, timeout=30)
-                    r.raise_for_status()
-                    res = r.json()
-                    if "error" in res:
-                        raise ValueError(res["error"])
-                    return i, _orient_sequence(res["dna"], df.iloc[i])
+                    time.sleep(0.4)  # ≤2.5 req/sec across all workers
+                    _log(f"  [{i}] GET {url}")
+                    res = _curl_json(url)
+                http_code = res.get("statusCode", 200)
+                _log(f"  [{i}] HTTP {http_code}")
+                if http_code == 429:
+                    wait = min(120, 30 * 2 ** attempt)
+                    _log(f"  [{i}] rate-limited — sleeping {wait}s before retry {attempt+1}")
+                    time.sleep(wait)
+                    continue
+                if "error" in res:
+                    raise ValueError(res["error"])
+                dna = res.get("dna", "")
+                _log(f"  [{i}] OK  len={len(dna)}  seq={dna}")
+                return i, _orient_sequence(dna, df.iloc[i])
             except Exception as exc:
-                if attempt == retries - 1:
+                _log(f"  [{i}] attempt {attempt+1}/5 FAILED: {type(exc).__name__}: {exc}")
+                if attempt == 4:
+                    _log(f"  [{i}] giving up — filling with Ns")
                     return i, None
-                time.sleep(0.5 * (attempt + 1))
+                wait = min(60, 2 ** attempt)
+                _log(f"  [{i}] retrying in {wait}s")
+                time.sleep(wait)
         return i, None
 
-    progress_print(f"  Fetching {n} sequences in parallel ({n_workers} workers)...")
+    progress_print(f"  Fetching {n} sequences in parallel ({_concurrency} workers)...")
     done = 0
 
     with ThreadPoolExecutor(max_workers=n_workers) as exe:
@@ -2062,6 +2141,7 @@ def run_pipeline(args):
                 progress_print(f"Extracting {len(df_family)} sequences from local genome...")
                 failed = []
                 seqlist = []
+                assembly = getattr(args, "assembly", "hg38") or "hg38"
                 for i in range(len(df_family)):
                     progress_bar(i + 1, len(df_family), "  Extracting")
                     try:
@@ -2082,7 +2162,7 @@ def run_pipeline(args):
             else:
                 # Parallel UCSC API fetch — ~10x faster than sequential
                 assembly = getattr(args, "assembly", "hg38") or "hg38"
-                n_workers = getattr(args, "fetch_workers", 10)
+                n_workers = getattr(args, "fetch_workers", 3)
                 progress_print(f"UCSC fetch settings: assembly={assembly}, workers={n_workers}")
                 seqlist = _fill_missing_sequences_parallel(
                     df_family,

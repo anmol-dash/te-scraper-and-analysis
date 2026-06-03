@@ -102,6 +102,17 @@ def clustering_analysis(df, kmer=6, min_cluster_size=None, out_dir=None,
             df[k2] = v
         return df, np.zeros(n, dtype=int)
 
+    # Guard: detect degenerate all-N input before spending time on k-mer encoding
+    n_degenerate = sum(1 for s in seqs if not s or set(s.upper()) <= {"N"})
+    if n_degenerate > 0:
+        _pp(f"  WARNING: {n_degenerate}/{n} sequences are all-N or empty (sequence fetch likely failed)")
+    if n_degenerate > n * 0.5:
+        raise RuntimeError(
+            f"{n_degenerate}/{n} sequences are all-N or empty.\n"
+            "  Sequence fetching failed upstream — check te_prep.py output for UCSC fetch warnings,\n"
+            "  or re-run te_prep with --genome <local.fa> to use a local FASTA instead."
+        )
+
     # ── Step 1: k-mer encoding (sparse float32) ────────────────────────────
     _pp(f"  Step 1/5: Encoding {n} sequences as {kmer}-mer counts (sparse)…")
     vec = CountVectorizer(
@@ -386,6 +397,8 @@ def _parse_args():
     p.add_argument("--debug",    action="store_true")
     p.add_argument("--skip-tsne", action="store_true",
                    help="Skip t-SNE for faster UMAP-only reclustering")
+    p.add_argument("--notify-email", default="", metavar="EMAIL",
+                   help="Send a completion email to this address (requires Gmail App Password setup).")
     return p.parse_args()
 
 
@@ -415,3 +428,6 @@ if __name__ == "__main__":
     out_path = args.output or args.input
     df_out.to_csv(out_path, index=False)
     print(f"Saved to {out_path}")
+    if args.notify_email:
+        from te_notify import send_completion_email
+        send_completion_email(args.notify_email, "te_clustering", args.out_dir)

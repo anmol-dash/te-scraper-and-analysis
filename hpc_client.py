@@ -37,6 +37,7 @@ import stat
 import sys
 import tarfile
 import tempfile
+import threading
 import zipfile
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -72,12 +73,14 @@ class HPCClient:
         self._scheduler_live = False  # True only if the daemon responds
         self._python = "python3"    # remote python binary, detected on connect
         self._current_job_info_path = None  # info file for the most recently submitted job
+        self.has_internet = False   # whether the connected node can reach UCSC/Dfam
 
         # Default parameters
         self.params = {
             "FAMILY_NAME": "MT2_Mm",
             "SPECIES": "mouse",
             "ASSEMBLY": "mm10",      # UCSC assembly/build used for automatic loading
+            "SOURCE_DB": "rmsk",     # Coordinate source: rmsk (RepeatMasker) or dfam
             "LOCAL_ASSEMBLY_PATH": "",  # Optional genome FASTA path on HPC
             "JASPAR_BED_PATH": "",      # Optional pre-downloaded JASPAR BED/BED.GZ on HPC
             "JASPAR_TABIX_PATH": "",    # bgzip+tabix-indexed JASPAR .bed.gz (reusable across families)
@@ -123,6 +126,9 @@ class HPCClient:
         self._transport = None
         self._password = None
         self._username = None
+        self._hostname = None
+        self._port = 22
+        self._key_path = ""
         self.use_sftp = False
 
         self._state = self._load_state()
@@ -137,9 +143,12 @@ class HPCClient:
         """Connect to the HPC cluster via SSH."""
         print(f"\nConnecting to {hostname}...")
 
-        # Store password for keyboard-interactive auth
+        # Store credentials for reconnection
         self._password = password
         self._username = username
+        self._hostname = hostname
+        self._port = port
+        self._key_path = key_path
         self._transport = None
 
         def keyboard_interactive_handler(title, instructions, prompt_list):
@@ -240,6 +249,16 @@ class HPCClient:
 
             # Auto-detect python binary
             self._python = self._detect_python()
+
+            # Check whether this node can reach the internet (login nodes usually can,
+            # compute nodes usually cannot).  Uses curl to avoid Python DNS quirks.
+            print("Checking internet connectivity (UCSC/Dfam)...")
+            self.has_internet = self._check_internet()
+            if self.has_internet:
+                print("  Internet: reachable — UCSC API fetch will work on this node")
+            else:
+                print("  Internet: NOT reachable from this node")
+                print("  Sequence fetching will require a local genome FASTA (--genome).")
 
             return True
 
@@ -387,6 +406,27 @@ exit 1
                 pass
         print("Disconnected from HPC.", flush=True)
 
+    def _ensure_connected(self) -> bool:
+        """Check if the SSH transport is alive; silently reconnect if not."""
+        if self._transport and self._transport.is_active():
+            return True
+        if not self._hostname or not self._username:
+            return False
+        _log("SSH transport lost — attempting reconnect")
+        print("SSH connection dropped — reconnecting...", flush=True)
+        ok = self.connect(
+            self._hostname, self._username,
+            password=self._password or "",
+            port=self._port,
+            work_dir=self.remote_work_dir or "",
+            key_path=self._key_path or "",
+        )
+        if ok:
+            print("Reconnected.", flush=True)
+        else:
+            print("Reconnect failed — please restart and re-enter credentials.", flush=True)
+        return ok
+
     def _scp_get(self, remote_path: str, local_path: str, timeout: int = 60) -> bool:
         """Download a remote file as fast as possible.
 
@@ -505,6 +545,20 @@ exit 1
             if code == 0 and out.strip():
                 return binary
         return "python3"  # best guess if neither found
+
+    def _check_internet(self) -> bool:
+        """Test whether this node can reach UCSC via curl (more reliable than Python DNS).
+
+        Uses curl because Python's socket.getaddrinfo can fail on some HPC nodes
+        even when curl resolves names correctly (different libc/nsswitch paths).
+        Returns True if the node has outbound HTTPS access.
+        """
+        out, _, code = self.run_command(
+            "curl -s --connect-timeout 6 --max-time 8 -o /dev/null "
+            "-w '%{http_code}' 'https://api.genome.ucsc.edu/' 2>/dev/null || echo FAIL",
+            timeout=15,
+        )
+        return code == 0 and out.strip() not in ("", "FAIL", "000")
 
     def ensure_venv_cmd(self) -> str:
         """Return a shell block that creates/activates the venv and installs deps.
@@ -747,6 +801,9 @@ fi
         if not self.connected:
             raise RuntimeError("Not connected to HPC")
 
+        if not self._ensure_connected():
+            raise RuntimeError("SSH session not active and reconnect failed")
+
         summary_stream = stream_output == "summary"
         raw_stream = bool(stream_output) and not summary_stream
         _log(f"Remote command start (timeout={timeout}s, stream={stream_output}): {command[:240]}")
@@ -970,6 +1027,7 @@ fi
             "24": "JASPAR_BED_PATH",
             "25": "JASPAR_TABIX_PATH",
             "27": "NOTIFY_EMAIL",
+            "31": "SOURCE_DB",
         }
         int_params = {
             "4": "K", "5": "PRIMER_K", "6": "TOP_N_GLOBAL",
@@ -1016,6 +1074,7 @@ fi
             print("  Descriptions:")
             print("    [1]  FAMILY_NAME: TE family repName to analyse")
             print("    [2]  SPECIES: human or mouse")
+            print("    [31] SOURCE_DB: coordinate source — rmsk (RepeatMasker) or dfam")
             print("    [4]  K: K-mer size for clustering")
             print("    [20] PCA_DIMS: SVD dimensions before UMAP (40 is faster, 50 default quality)")
             print("    [21] N_EPOCHS: UMAP epochs (120 fast, 200 more thorough)")
@@ -1061,6 +1120,9 @@ fi
                 cur = self.params.get(key, "")
                 val = input(f"  {key} [{cur}]: ").strip()
                 if val:
+                    if key == "SOURCE_DB" and val not in {"rmsk", "dfam"}:
+                        print(f"  Invalid source '{val}' — must be rmsk or dfam")
+                        continue
                     self.params[key] = val
                     if key == "SPECIES":
                         species = val.strip().lower()
@@ -1126,6 +1188,7 @@ fi
             args += [
                 "--local",
                 "--assembly", self.params["ASSEMBLY"],
+                "--source",   self.params.get("SOURCE_DB", "rmsk"),
                 "--fetch-workers", str(self.params["FETCH_WORKERS"]),
             ]
 
@@ -1207,6 +1270,8 @@ echo "  Input data: OK ({quoted})"'''
                 _log(f"SFTP upload failed for {label} ({e}); falling back to shell base64")
                 self.use_sftp = False
                 self.sftp = None
+                # SFTP failure often kills the transport — reconnect before shell fallback
+                self._ensure_connected()
 
         encoded_full = base64.b64encode(content.encode()).decode()
         chunk_size = 65000
@@ -2073,6 +2138,32 @@ exit $EXIT_CODE
         print(f"  Out dir   : {out_dir or '(not set — motif/command job)'}")
         print(f"  Job log   : {job_out or '(unknown)'}")
 
+        # ── 0. Raw scheduler snapshot (always shown, regardless of job_id) ─────
+        print()
+        print("  --- Raw scheduler queue ---")
+        if self.scheduler == "slurm":
+            sq_out, sq_err, sq_rc = self.run_command(
+                "squeue -u \"$USER\" -o '%.10i %.8T %.12M %.6D %R' 2>&1 || squeue 2>&1 | head -30",
+                timeout=15)
+            print(f"  squeue -u $USER  (exit {sq_rc}):")
+            for ln in (sq_out or sq_err or "(no output)").rstrip().splitlines():
+                print(f"    {ln}")
+        elif self.scheduler == "lsf":
+            bj_out, bj_err, bj_rc = self.run_command("bjobs 2>&1", timeout=15)
+            print(f"  bjobs  (exit {bj_rc}):")
+            for ln in (bj_out or bj_err or "(no output)").rstrip().splitlines():
+                print(f"    {ln}")
+
+        py_out, _, _ = self.run_command(
+            "ps aux 2>/dev/null | grep -E '[p]ython.*te_|[p]ython.*query' | head -10",
+            timeout=10)
+        if py_out.strip():
+            print("  Running python pipeline processes:")
+            for ln in py_out.rstrip().splitlines():
+                print(f"    {ln}")
+        else:
+            print("  No python pipeline processes found in ps.")
+
         # ── 1. Ask scheduler first — never trust .done alone ─────────────────
         sched_state = self._get_scheduler_state(job_id)
         done_out, _, _ = self.run_command(f"cat {job_done} 2>/dev/null", timeout=10)
@@ -2251,6 +2342,24 @@ exit $EXIT_CODE
         print(f"  Error log : {job_errlog}")
 
         self._diagnostic_command("Scheduler commands visible", "command -v bsub; command -v bjobs; command -v bpeek; command -v sbatch; command -v squeue; echo PATH=$PATH", timeout=20)
+
+        # Raw queue snapshot — always run so user can see what's actually there
+        if self.scheduler == "slurm":
+            self._diagnostic_command(
+                "squeue all user jobs",
+                "squeue -u \"$USER\" -o '%.10i %.8T %.12M %.6D %R' 2>&1 || squeue 2>&1 | head -30",
+                timeout=15)
+            self._diagnostic_command(
+                "running python pipeline processes",
+                "ps aux 2>/dev/null | grep -E '[p]ython.*te_|[p]ython.*query' | head -10 || echo '(none)'",
+                timeout=10)
+        elif self.scheduler == "lsf":
+            self._diagnostic_command("bjobs all", "bjobs 2>&1", timeout=15)
+            self._diagnostic_command(
+                "running python pipeline processes",
+                "ps aux 2>/dev/null | grep -E '[p]ython.*te_|[p]ython.*query' | head -10 || echo '(none)'",
+                timeout=10)
+
         if self.scheduler == "lsf":
             self._diagnostic_command("bjobs summary", f"bjobs {shlex.quote(job_id)} 2>&1", timeout=20)
             self._diagnostic_command("bjobs long", f"bjobs -l {shlex.quote(job_id)} 2>&1", timeout=30)
@@ -3353,6 +3462,9 @@ exit $EXIT_CODE
                 print(f"Error: Remote directory not found: {remote_out}")
                 return
 
+            if not self._ensure_connected():
+                print("Cannot stream results: SSH session lost and reconnect failed.")
+                return
             try:
                 channel = self._transport.open_session()
                 channel.exec_command(f"cd '{remote_out}' && tar -cf - .")
@@ -3512,6 +3624,9 @@ exit $EXIT_CODE
                     print(f"    Error: {e}")
         else:
             file_args = " ".join(shlex.quote(r) for r, _ in chosen)
+            if not self._ensure_connected():
+                print("Cannot stream files: SSH session lost and reconnect failed.")
+                return
             try:
                 channel = self._transport.open_session()
                 channel.exec_command(f"cd '{remote_dir}' && tar -cf - {file_args}")
@@ -3631,6 +3746,161 @@ print("Email sent successfully.")"""
             self._save_state()
         except Exception as e:
             print(f"  Send failed: {e}")
+
+    def submit_email_test_job(self):
+        """Submit a trivial batch job, poll for completion, then send a notification email."""
+        import datetime as _dt
+        import smtplib
+        import time as _time
+
+        print("\n" + "="*60)
+        print("TEST EMAIL NOTIFICATION")
+        print("="*60)
+        print()
+
+        # Credentials are mandatory here — _get_email_creds prompts if missing
+        sender, pw = self._get_email_creds()
+        if not sender or not pw:
+            print("  App password is required for this test — aborting.")
+            return
+
+        # Recipient
+        stored_to = self._state.get("test_receiver_email", sender).strip()
+        prompt = f"  Send test email to [{stored_to}]: "
+        to = input(prompt).strip() or stored_to
+        if not to:
+            print("  No recipient — aborting.")
+            return
+        self._state["test_receiver_email"] = to
+        self._save_state()
+
+        # Show the exact script that will run (password masked), same as option [17]
+        script_preview = f"""\
+import smtplib
+from email.mime.text import MIMEText
+
+SENDER   = "{sender}"
+RECEIVER = "{to}"
+PASSWORD = "{'*' * len(pw)}"  # actual password loaded from state file
+
+msg = MIMEText("GAMECA batch test job completed.")
+msg["Subject"] = "GAMECA: Email notification test passed"
+msg["From"]    = SENDER
+msg["To"]      = RECEIVER
+
+with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+    smtp.login(SENDER, PASSWORD)
+    smtp.send_message(msg)
+
+print("Email sent successfully.")"""
+
+        print()
+        print("-"*60)
+        print("EMAIL SCRIPT (password masked):")
+        print("-"*60)
+        print(script_preview)
+        print("-"*60)
+        print()
+
+        confirm = input("Submit batch job and send email on completion? (y/n) [y]: ").strip().lower()
+        if confirm == "n":
+            print("  Aborted.")
+            return
+
+        # Build a minimal 1-CPU job that writes a done marker
+        _ts        = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        job_name   = "gameca_email_test"
+        job_script = f"{self.remote_work_dir}/gameca_email_test_{_ts}.sh"
+        job_out    = f"{self.remote_work_dir}/gameca_email_test_{_ts}.out"
+        job_err    = f"{self.remote_work_dir}/gameca_email_test_{_ts}.err"
+        job_done   = f"{self.remote_work_dir}/gameca_email_test_{_ts}.done"
+
+        sched_header = self._job_script_header(
+            job_name, job_out, job_err,
+            mem_mb=500, cpus=1, walltime="00:05", queue=self.params.get("QUEUE", "normal"),
+        )
+
+        script = f'''#!/bin/bash
+{sched_header}
+
+echo "GAMECA — email notification test job"
+echo "Host: $(hostname)"
+echo "Date: $(date)"
+
+# Create a small marker file in the user's home
+echo "GAMECA email test completed at $(date)" > "$HOME/gameca_email_test_{_ts}.txt"
+echo "Job: ${{LSB_JOBID:-${{SLURM_JOB_ID:-?}}}}" >> "$HOME/gameca_email_test_{_ts}.txt"
+
+echo "Job complete."
+echo 0 > {job_done}
+exit 0
+'''
+
+        print(f"\n  Creating test job script ...")
+        create_cmd = f"cat > {job_script} << 'GAMECA_TEST_EOF'\n{script}\nGAMECA_TEST_EOF"
+        out, err, code = self.run_command(create_cmd, timeout=30)
+        if code != 0:
+            print(f"  Error creating script: {err}")
+            return
+        self.run_command(f"chmod +x {job_script}", timeout=10)
+        self.run_command(f"rm -f {job_out} {job_err} {job_done}", timeout=10)
+
+        submit_cmd = self._submit_job_cmd(job_script)
+        print(f"  Submitting: {submit_cmd}")
+        out, err, code = self.run_command(submit_cmd, timeout=30)
+        job_id = self._parse_job_id(out + err)
+
+        if code != 0:
+            print(f"  Submission failed (exit {code}):")
+            if out.strip(): print(f"  stdout: {out.strip()}")
+            if err.strip(): print(f"  stderr: {err.strip()}")
+            return
+
+        print(f"\n  Job submitted — ID: {job_id or '?'}")
+        if job_id:
+            self.current_job_id = job_id
+
+        # Poll for the done marker (up to 5 minutes)
+        print(f"  Waiting for job to finish (polling every 15 s, timeout 5 min) ...")
+        deadline = _time.time() + 300
+        done = False
+        while _time.time() < deadline:
+            chk_out, _, chk_code = self.run_command(f"cat {job_done} 2>/dev/null", timeout=10)
+            if chk_code == 0 and chk_out.strip():
+                done = True
+                break
+            _time.sleep(15)
+
+        if done:
+            print(f"  Job finished.")
+        else:
+            print(f"  Job did not complete within 5 minutes — sending email anyway.")
+
+        # Send the notification email from the local machine, same code path as option [17]
+        print(f"\n  Sending notification email to {to} ...")
+        msg = MIMEText(
+            f"Your GAMECA email notification test job completed.\n\n"
+            f"Sender:    {sender}\n"
+            f"Recipient: {to}\n"
+            f"Job ID:    {job_id or '?'}\n\n"
+            f"Email notifications are working correctly."
+        )
+        msg["Subject"] = "GAMECA: Email notification test passed"
+        msg["From"]    = sender
+        msg["To"]      = to
+
+        try:
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+                smtp.login(sender, pw)
+                smtp.send_message(msg)
+            print(f"  Email sent successfully to {to}.")
+        except smtplib.SMTPAuthenticationError:
+            print("  Auth failed — check that the App Password is correct.")
+            print("  Re-run option [g] to update your credentials.")
+            self._state.pop(self._APP_PASSWORD_STATE_KEY, None)
+            self._save_state()
+        except Exception as exc:
+            print(f"  Email send failed: {exc}")
 
     def main_menu(self):
         """Main interactive menu after connection."""

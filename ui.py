@@ -100,6 +100,24 @@ def _ask_species_assembly(default_species: str = "human", default_assembly: str 
     return species, assembly
 
 
+def _ask_source(default: str = "rmsk") -> str:
+    """Ask whether to fetch TE coordinates from RepeatMasker (rmsk) or Dfam."""
+    raw = _ask("Coordinate source — rmsk (RepeatMasker) or dfam (Dfam)", default).strip().lower()
+    if raw not in {"rmsk", "dfam"}:
+        print(f"  Unknown source '{raw}' — defaulting to {default}")
+        return default
+    return raw
+
+
+def _ask_notify_email(client) -> str:
+    """Ask for a completion-notification email, remembering the answer across steps."""
+    stored = client.params.get("NOTIFY_EMAIL", "")
+    email = _ask("Email for completion notification (blank = none)", stored).strip()
+    if email:
+        client.params["NOTIFY_EMAIL"] = email
+    return email
+
+
 # ── ASCII art ─────────────────────────────────────────────────────────────────
 
 GAMECA_ART = r"""
@@ -412,7 +430,10 @@ def _ensure_input_csv(client, prompt: str = "Input clustered CSV (remote path)")
 
     # Offer to run te_prep now
     print()
-    print(f"  {yellow('›')} No input CSV — run te_prep.py first to download rmsk and extract sequences.")
+    print(f"  {yellow('›')} No input CSV — run te_prep.py first to download coordinates and extract sequences.")
+    if not getattr(client, "has_internet", False):
+        print(f"  {yellow('⚠')}  This node has no internet — UCSC sequence fetch will fail.")
+        print(f"       A local genome FASTA (--genome) is required, or run te_prep on a login node.")
     run_prep = _confirm("Run te_prep now?", default=True)
     if not run_prep:
         print("  Skipping — re-run this step once you have a CSV.")
@@ -421,22 +442,31 @@ def _ensure_input_csv(client, prompt: str = "Input clustered CSV (remote path)")
     # Collect te_prep parameters
     species, build = _ask_species_assembly()
     family  = _ask("TE family name (e.g. HERVK, THE1D-int)")
+    source  = _ask_source()
     genome  = _ask("Local assembly FASTA path on cluster (blank = none)", "")
+    rmsk_dir = _ask("Pre-downloaded rmsk directory on cluster (blank = auto-download)", "")
     out_dir = _ask("Output directory (remote)", client.remote_work_dir + "/te_data")
+    email   = _ask_notify_email(client)
 
     if not _sync_remote_files(client, ["te_prep.py"]):
         return ""
 
     cmd = (
         f"cd {client.remote_work_dir} && "
-        f"{client._python} te_prep.py --build {shlex.quote(build)}"
+        f"{client._python} -u te_prep.py --build {shlex.quote(build)}"
     )
     if family:
         cmd += f" --family {shlex.quote(family)}"
+    cmd += f" --source {source}"
     if genome:
         cmd += f" --genome-fa {shlex.quote(genome)}"
+    if rmsk_dir:
+        cmd += f" --rmsk-dir {shlex.quote(rmsk_dir)}"
     cmd += f" --base-dir {shlex.quote(out_dir)}"
-    if not _remote_run(client, "te_prep", cmd, timeout=600, force_direct=True):
+    if email:
+        cmd += f" --notify-email {shlex.quote(email)}"
+    # force_direct=True: run on the login node (has internet) not a compute node
+    if not _remote_run(client, "te_prep", cmd, timeout=1800, force_direct=True):
         print(red("  te_prep failed — cannot continue."))
         return ""
 
@@ -450,23 +480,35 @@ def _ensure_input_csv(client, prompt: str = "Input clustered CSV (remote path)")
 def _step_prep(client):
     import shlex as _sl
     print()
-    print(_divider("te_prep.py  ·  Download rmsk + extract sequences"))
+    print(_divider("te_prep.py  ·  Download rmsk/dfam + extract sequences"))
+    if not getattr(client, "has_internet", False):
+        print(f"  {yellow('⚠')}  This node has no internet — UCSC sequence fetch will fail.")
+        print(f"       A local genome FASTA (--genome) is required.")
     species, build = _ask_species_assembly()
     family  = _ask("TE family name (e.g. HERVK)")
+    source  = _ask_source()
     genome  = _ask("Local assembly FASTA path on cluster (blank = none)", "")
+    rmsk_dir = _ask("Pre-downloaded rmsk directory on cluster (blank = auto-download)", "")
     out_dir = _ask("Remote output directory", client.remote_work_dir + "/te_data")
+    email   = _ask_notify_email(client)
     if not _sync_remote_files(client, ["te_prep.py"]):
         return
     cmd = (
         f"cd {_sl.quote(client.remote_work_dir)} && "
-        f"{client._python} te_prep.py --build {_sl.quote(build)}"
+        f"{client._python} -u te_prep.py --build {_sl.quote(build)}"
     )
     if family:
         cmd += f" --family {_sl.quote(family)}"
+    cmd += f" --source {source}"
     if genome:
         cmd += f" --genome-fa {_sl.quote(genome)}"
+    if rmsk_dir:
+        cmd += f" --rmsk-dir {_sl.quote(rmsk_dir)}"
     cmd += f" --base-dir {_sl.quote(out_dir)}"
-    _remote_run(client, "te_prep", cmd, timeout=600, force_direct=True)
+    if email:
+        cmd += f" --notify-email {_sl.quote(email)}"
+    # force_direct=True: run on the login node (has internet) not a compute node
+    _remote_run(client, "te_prep", cmd, timeout=1800, force_direct=True)
 
 
 def _batch_submit(client, label, cmd, scripts):
@@ -476,8 +518,13 @@ def _batch_submit(client, label, cmd, scripts):
     job_id = client.submit_command_as_batch_job(label, cmd)
     if job_id:
         client.current_job_id = job_id
-        print(f"\n  {green('✓')} Job submitted  (ID/PID: {bold(str(job_id))})")
-        print(f"  Monitor with option {bold('11')}  (Check batch job status)")
+        safe = re.sub(r"[^a-z0-9_]", "_", label.lower())[:20]
+        work = client.remote_work_dir
+        print(f"\n  {green('✓')} Job submitted  (ID: {bold(str(job_id))})")
+        print(f"  {dim('·')} Track in scheduler:  squeue -j {job_id}")
+        print(f"  {dim('·')} Output log:          {work}/{safe}_*.out")
+        print(f"  {dim('·')} Error log:           {work}/{safe}_*.err")
+        print(f"  {dim('·')} Monitor with option  {bold('11')}  or tail with  {bold('12')}")
     else:
         print(f"\n  {red('✗')} Submission failed — see [SUBMIT] log above.")
     return job_id
@@ -494,12 +541,15 @@ def _step_clustering(client):
     out_dir = _ask("Visualization directory (remote)", client.remote_work_dir + "/results")
     kmer    = _ask("k-mer size", "6")
     family  = _ask("Family name", "FAMILY")
+    email   = _ask_notify_email(client)
     cmd = (
         f"cd {_sl.quote(client.remote_work_dir)} && "
         f"{client._python} -u te_clustering.py "
         f"--input {_sl.quote(inp)} --output {_sl.quote(out)} "
         f"--kmer {_sl.quote(kmer)} --out-dir {_sl.quote(out_dir)} --family {_sl.quote(family)}"
     )
+    if email:
+        cmd += f" --notify-email {_sl.quote(email)}"
     _batch_submit(client, "te_clustering", cmd, ["te_clustering.py"])
 
 
@@ -513,6 +563,7 @@ def _step_alignment(client):
     out_dir = _ask("Output directory (remote)", client.remote_work_dir + "/results")
     family  = _ask("Family name", "FAMILY")
     skip_ci = _confirm("Skip CIAlign?", default=False)
+    email   = _ask_notify_email(client)
     cmd = (
         f"cd {_sl.quote(client.remote_work_dir)} && "
         f"{client._python} -u te_alignment.py "
@@ -520,6 +571,8 @@ def _step_alignment(client):
     )
     if skip_ci:
         cmd += " --no-cialign"
+    if email:
+        cmd += f" --notify-email {_sl.quote(email)}"
     _batch_submit(client, "te_alignment", cmd, ["te_alignment.py"])
 
 
@@ -553,6 +606,7 @@ def _step_motif(client):
         homer_genome  = _ask("HOMER genome name or FASTA (blank = same as build)", "")
         homer_size    = _ask("HOMER -size value", "200")
         homer_threads = _ask("HOMER threads per cluster", "4")
+    email = _ask_notify_email(client)
 
     cluster_cmd = (
         f"{client._python} -u te_clustering.py "
@@ -570,6 +624,8 @@ def _step_motif(client):
         if homer_genome.strip():
             motif_cmd += f" --homer-genome {_sl.quote(homer_genome.strip())}"
         motif_cmd += f" --homer-size {_sl.quote(homer_size)} --homer-threads {_sl.quote(homer_threads)}"
+    if email:
+        motif_cmd += f" --notify-email {_sl.quote(email)}"
 
     cmd = (
         f"cd {_sl.quote(client.remote_work_dir)} && "
@@ -609,6 +665,7 @@ def _step_go(client):
         default_inp = f"{client.remote_work_dir}/te_data/{family}/{family}_sequences.csv"
         inp = _ask("Input sequences CSV (remote path)", default_inp)
         clustered_out = inp.replace(".csv", "_clustered.csv")
+        email = _ask_notify_email(client)
 
         cluster_cmd = (
             f"{client._python} -u te_clustering.py "
@@ -626,6 +683,8 @@ def _step_go(client):
             f"--build {_sl.quote(build)} --out-dir {_sl.quote(out_dir)} "
             f"--clustered-csv {_sl.quote(clustered_out)}"
         )
+        if email:
+            go_cmd += f" --notify-email {_sl.quote(email)}"
         cmd = (
             f"cd {_sl.quote(client.remote_work_dir)} && "
             f"echo '[GAMECA] Step 1/3: clustering ...' && {cluster_cmd} && "
@@ -651,6 +710,7 @@ def _step_go(client):
                 clustered = default_clustered
         elif _confirm("Include clustered CSV for strand plots?", default=False):
             clustered = _ask("Clustered CSV (remote path)")
+        email = _ask_notify_email(client)
 
         cmd = (
             f"cd {_sl.quote(client.remote_work_dir)} && "
@@ -660,6 +720,8 @@ def _step_go(client):
         )
         if clustered:
             cmd += f" --clustered-csv {_sl.quote(clustered)}"
+        if email:
+            cmd += f" --notify-email {_sl.quote(email)}"
         _batch_submit(client, "te_go", cmd, ["te_go.py"])
 
 
@@ -671,11 +733,14 @@ def _step_expression(client):
     if not inp:
         return
     out_dir = _ask("Output directory (remote)", client.remote_work_dir + "/results")
+    email   = _ask_notify_email(client)
     cmd = (
         f"cd {_sl.quote(client.remote_work_dir)} && "
         f"{client._python} -u te_expression.py "
         f"--input {_sl.quote(inp)} --out-dir {_sl.quote(out_dir)}"
     )
+    if email:
+        cmd += f" --notify-email {_sl.quote(email)}"
     _batch_submit(client, "te_expression", cmd, ["te_expression.py"])
 
 
@@ -701,6 +766,7 @@ def _step_enrichment(client):
         jaspar = _ask("JASPAR BED path (remote)")
     skip_go   = _confirm("Skip GO annotation?",    default=False)
     skip_expr = _confirm("Skip expression plots?", default=False)
+    email     = _ask_notify_email(client)
 
     cluster_cmd = (
         f"{client._python} -u te_clustering.py "
@@ -714,6 +780,7 @@ def _step_enrichment(client):
     if jaspar:    enrich_cmd += f" --jaspar-bed {_sl.quote(jaspar)}"
     if skip_go:   enrich_cmd += " --skip-go"
     if skip_expr: enrich_cmd += " --skip-expression"
+    if email:     enrich_cmd += f" --notify-email {_sl.quote(email)}"
 
     cmd = (
         f"cd {_sl.quote(client.remote_work_dir)} && "
@@ -932,6 +999,7 @@ MENU = [
     (None, "Session",                                     "section"),
     ("19", "Diagnose job submission  (test nohup + sbatch)","action"),
     ("17", "Test email  (set sender / receiver / password)","action"),
+    ("21", "Test email notification  (submit batch job → auto-email on finish)","action"),
     ("15", "Disconnect and exit",                         "action"),
 ]
 
@@ -954,7 +1022,8 @@ def _print_menu(client):
     print()
     sched = (client.scheduler or "?").upper()
     host  = getattr(client, "_hostname", "cluster")
-    print(f"  {green('●')}  Connected  {bold(host)}  {dim('·')}  scheduler: {bold(sched)}")
+    net_indicator = green("internet ✓") if getattr(client, "has_internet", False) else red("no internet ✗")
+    print(f"  {green('●')}  Connected  {bold(host)}  {dim('·')}  scheduler: {bold(sched)}  {dim('·')}  {net_indicator}")
     print()
     print(_divider("Menu"))
     for key, label, kind in MENU:
@@ -1076,6 +1145,10 @@ def interactive_menu(client):
                 client.test_email_interactive()
                 _pause()
 
+            elif choice == '21':
+                client.submit_email_test_job()
+                _pause(keep_output=True)
+
             elif choice == '15':
                 print(f"\n  {green('Disconnecting…')}")
                 client.disconnect()
@@ -1110,13 +1183,14 @@ def _step_local_run():
         return None, None
 
     species, assembly = _ask_species_assembly()
+    source    = _ask_source()
     max_loci  = _ask("Max loci to analyse (blank = all)", "")
     genome    = _ask("Path to local assembly FASTA (blank = UCSC API for sequences)", "")
     expr_csv  = _ask("Expression assembly CSV/TSV/BED with chr/start/stop (blank = none)", "")
     expr_buf  = ""
     if expr_csv.strip():
         expr_buf = _ask("Expression coordinate buffer bp", "50")
-    workers   = _ask("Parallel UCSC fetch workers", "10")
+    workers   = _ask("Parallel UCSC fetch workers", "3")
     out_root  = _ask("Output directory", "results")
 
     cmd = [
@@ -1125,8 +1199,9 @@ def _step_local_run():
         "--local",
         "--family",   family,
         "--assembly", assembly,
+        "--source",   source,
         "--output",   out_root,
-        "--fetch-workers", workers or "10",
+        "--fetch-workers", workers or "3",
     ]
 
     if genome.strip():
@@ -2353,7 +2428,7 @@ def _step_rmsk_query(client):
         _log(f"rmsk_{assembly}.txt.gz not found — downloading from UCSC…")
         dl_cmd = (
             f"mkdir -p {rmsk_dir} && "
-            f"{client._python} {client.remote_work_dir}/te_prep.py "
+            f"{client._python} -u {client.remote_work_dir}/te_prep.py "
             f"--download {assembly} --rmsk-dir {rmsk_dir}"
         )
         if not _remote_run(client, f"Download rmsk ({assembly})", dl_cmd, timeout=900, force_direct=True):

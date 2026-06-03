@@ -386,6 +386,8 @@ def _parse_args():
     p.add_argument("--timeout", type=int, default=120, help="Primer search timeout (s)")
     p.add_argument("--out-dir", default="primers", help="Output directory")
     p.add_argument("--family",  default="FAMILY")
+    p.add_argument("--notify-email", default="", metavar="EMAIL",
+                   help="Send a completion email to this address (requires Gmail App Password setup).")
     return p.parse_args()
 
 
@@ -406,3 +408,6 @@ if __name__ == "__main__":
         primer_timeout=args.timeout, out_dir=args.out_dir,
         family_name=args.family,
     )
+    if args.notify_email:
+        from te_notify import send_completion_email
+        send_completion_email(args.notify_email, "te_primers", args.out_dir)

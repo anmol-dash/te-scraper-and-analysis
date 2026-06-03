@@ -39,8 +39,17 @@ from pathlib import Path
 
 warnings.filterwarnings("ignore")
 
-import numpy as np
-import pandas as pd
+# numpy and pandas are only needed for the full analysis path (not --count-only).
+# Import lazily so the HPC can run count/query modes without these packages.
+try:
+    import numpy as np
+    import pandas as pd
+    _HAS_PANDAS = True
+except ImportError:
+    np = None  # type: ignore[assignment]
+    pd = None  # type: ignore[assignment]
+    _HAS_PANDAS = False
+
 # requests, threading, and ThreadPoolExecutor are imported lazily inside
 # fetch_sequences_ucsc() so the HPC can run te_prep.py without them.
 
@@ -143,8 +152,10 @@ Examples:
                    help="Annotation source: rmsk (UCSC RepeatMasker) or dfam (Dfam nrph hits) [default: rmsk]")
     p.add_argument("--dfam-url", default=None,
                    help="Override Dfam download URL for this build")
-    p.add_argument("--fetch-workers", type=int, default=10,
-                   help="Parallel UCSC fetch workers when no genome FASTA is available (default: 10)")
+    p.add_argument("--fetch-workers", type=int, default=3,
+                   help="Parallel UCSC fetch workers when no genome FASTA is available (default: 3; capped at 3 concurrent regardless)")
+    p.add_argument("--notify-email", default="", metavar="EMAIL",
+                   help="Send a completion email to this address (requires Gmail App Password setup).")
     return p.parse_args()
 
 
@@ -172,35 +183,31 @@ def download_rmsk(build, rmsk_dir):
     print(f"Downloading {url} → {outpath}")
     print("  (hg38 ~150 MB, may take a few minutes)")
 
-    import subprocess
+    import subprocess, shlex
 
-    # Try system download tools; skip gracefully when the binary is missing
-    for tool in [
-        ["curl", "-L", "--progress-bar", "-o", str(outpath), url],
-        ["wget", "-q", "--show-progress", "-O", str(outpath), url],
+    # Use shell=True so DNS resolution goes through /bin/sh — required on nodes
+    # where list-form subprocess DNS fails. Also try -4 to force IPv4 in case
+    # IPv6 resolution is broken on this node.
+    for tool_cmd in [
+        f"curl -4 -L --progress-bar -o {shlex.quote(str(outpath))} {shlex.quote(url)}",
+        f"curl -L --progress-bar -o {shlex.quote(str(outpath))} {shlex.quote(url)}",
+        f"wget -q --show-progress -O {shlex.quote(str(outpath))} {shlex.quote(url)}",
     ]:
         try:
-            ret = subprocess.run(tool)
-            if ret.returncode == 0:
+            ret = subprocess.run(tool_cmd, shell=True)
+            if ret.returncode == 0 and outpath.exists() and outpath.stat().st_size > 0:
                 size_mb = outpath.stat().st_size / 1e6
                 print(f"Done: {outpath} ({size_mb:.0f} MB)")
                 return str(outpath)
-        except FileNotFoundError:
-            continue  # binary not available on this system
+            if outpath.exists():
+                outpath.unlink()  # remove partial download
+        except Exception:
+            continue
 
-    # Pure-Python fallback using urllib (no external tools required)
-    print("  curl/wget not found — using Python urllib (no progress bar)...")
-    import urllib.request
-    try:
-        urllib.request.urlretrieve(url, str(outpath))
-        size_mb = outpath.stat().st_size / 1e6
-        print(f"Done: {outpath} ({size_mb:.0f} MB)")
-        return str(outpath)
-    except Exception as e:
-        if outpath.exists():
-            outpath.unlink()
-        print(f"FATAL: Download failed: {e}")
-        sys.exit(1)
+    raise RuntimeError(
+        f"rmsk bulk download failed for {build}: hgdownload.soe.ucsc.edu unreachable. "
+        f"Will fall back to UCSC REST API."
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -223,6 +230,7 @@ def parse_rmsk_family(rmsk_path, family, std_chroms=None):
     """Stream rmsk.txt.gz and return list of dicts for rows matching repName."""
     hits = []
     t0 = time.time()
+    family_lc = str(family).lower()
     print(f"  Scanning {Path(rmsk_path).name} for repName='{family}'...")
 
     with gzip.open(rmsk_path, "rt") as f:
@@ -230,7 +238,7 @@ def parse_rmsk_family(rmsk_path, family, std_chroms=None):
             fields = line.rstrip("\n").split("\t")
             if len(fields) < 13:
                 continue
-            if fields[COL_REPNAME] != family:
+            if fields[COL_REPNAME] != family and fields[COL_REPNAME].lower() != family_lc:
                 continue
             chrom = fields[COL_CHROM]
             if std_chroms and chrom not in std_chroms:
@@ -253,15 +261,70 @@ def parse_rmsk_family(rmsk_path, family, std_chroms=None):
     return hits
 
 
+def fetch_rmsk_from_api(family, build, std_chroms=None):
+    """Fetch rmsk loci for one family from the UCSC REST API, chromosome by chromosome.
+
+    Fallback when hgdownload.soe.ucsc.edu is unreachable.
+    Uses api.genome.ucsc.edu/getData/track which is accessible from more networks.
+    Returns the same list-of-dicts format as parse_rmsk_family().
+    """
+    if build.startswith("hg"):
+        all_chroms = [f"chr{i}" for i in range(1, 23)] + ["chrX", "chrY"]
+    else:
+        all_chroms = [f"chr{i}" for i in range(1, 20)] + ["chrX", "chrY"]
+
+    chroms = [c for c in all_chroms if std_chroms is None or c in std_chroms]
+    hits = []
+    print(f"  UCSC REST API fallback: querying rmsk '{family}' in {build} "
+          f"across {len(chroms)} chromosomes...", flush=True)
+
+    for chrom in chroms:
+        base = (f"https://api.genome.ucsc.edu/getData/track"
+                f"?genome={build};track=rmsk;chrom={chrom}")
+        offset = None
+        chrom_hits = 0
+        while True:
+            url = base + (f";offset={offset}" if offset is not None else "")
+            try:
+                data = _curl_json(url, timeout=120)
+            except Exception as exc:
+                print(f"    {chrom}: fetch error — {exc}", flush=True)
+                break
+            for rec in data.get("rmsk", []):
+                if rec.get("repName") == family:
+                    hits.append({
+                        "Chromosome": rec["genoName"],
+                        "Start":      int(rec["genoStart"]),
+                        "Stop":       int(rec["genoEnd"]),
+                        "strand":     rec.get("strand", "+"),
+                        "repName":    rec["repName"],
+                        "repClass":   rec.get("repClass", ""),
+                        "repFamily":  rec.get("repFamily", ""),
+                        "swScore":    int(rec.get("swScore", 0)),
+                        "milliDiv":   int(rec.get("milliDiv", 0)),
+                    })
+                    chrom_hits += 1
+            next_off = data.get("nextOffset")
+            if not next_off or next_off == offset:
+                break
+            offset = next_off
+        if chrom_hits:
+            print(f"    {chrom}: {chrom_hits} hits", flush=True)
+
+    print(f"  API rmsk done: {len(hits)} loci for '{family}'", flush=True)
+    return hits
+
+
 def count_family_rmsk(rmsk_path, family, std_chroms=None):
     """Stream rmsk.txt.gz and return the hit count without building a list."""
     count = 0
+    family_lc = str(family).lower()
     with gzip.open(rmsk_path, "rt") as f:
         for line in f:
             fields = line.rstrip("\n").split("\t")
             if len(fields) < 13:
                 continue
-            if fields[COL_REPNAME] != family:
+            if fields[COL_REPNAME] != family and fields[COL_REPNAME].lower() != family_lc:
                 continue
             if std_chroms and fields[COL_CHROM] not in std_chroms:
                 continue
@@ -311,19 +374,30 @@ _DFAM_COL_START  = 9   # alignment start
 _DFAM_COL_END    = 10  # alignment end
 
 
+def _curl_bytes(url, timeout=120):
+    """Fetch a URL with curl (shell=True) and return the raw response bytes."""
+    import subprocess, shlex
+    result = subprocess.run(
+        f"curl -s -L --connect-timeout 10 --max-time {timeout} {shlex.quote(url)}",
+        shell=True, capture_output=True, timeout=timeout + 15,
+    )
+    if result.returncode != 0:
+        raise ConnectionError(
+            f"curl exit={result.returncode}: {result.stderr.decode(errors='replace').strip()[:120]}"
+        )
+    return result.stdout  # bytes
+
+
 def _dfam_lookup_accession(family_name):
     """Return Dfam accession for a family name via the REST API."""
-    import urllib.request, urllib.parse, json as _json
+    import urllib.parse
     url = (f"{DFAM_API_BASE}/families"
            f"?name_prefix={urllib.parse.quote(family_name)}&limit=10")
     try:
-        req = urllib.request.Request(url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = _json.loads(resp.read())
+        data = _curl_json(url, timeout=20)
         for entry in data.get("results", []):
             if entry.get("name") == family_name:
                 return entry["accession"]
-        # Fallback: return first result if exact match not found
         results = data.get("results", [])
         if results:
             print(f"  WARNING: exact match for '{family_name}' not found; "
@@ -339,7 +413,6 @@ def _dfam_fetch_raw(family_name, build):
     """Fetch per-family Dfam annotations from the REST API.
     Returns the raw gzip bytes (the API returns a gzip-compressed TSV).
     """
-    import urllib.request, io as _io
     accession = _dfam_lookup_accession(family_name)
     if not accession:
         print(f"FATAL: Family '{family_name}' not found in Dfam.", flush=True)
@@ -350,10 +423,7 @@ def _dfam_fetch_raw(family_name, build):
            f"/assemblies/{assembly}/annotations?nrph=true")
     print(f"  Dfam REST API: {url}", flush=True)
     try:
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            raw = resp.read()
-        return raw
+        return _curl_bytes(url, timeout=120)
     except Exception as e:
         print(f"FATAL: Dfam API fetch failed: {e}", flush=True)
         sys.exit(1)
@@ -482,16 +552,75 @@ def _ucsc_api_url(chrom, start, stop, assembly):
     )
 
 
+def _check_ucsc_connectivity():
+    """Return (ok, error_msg). Uses curl — more reliable than Python socket on HPC nodes
+    where nsswitch/libc DNS may differ from the system curl resolver."""
+    import subprocess
+    try:
+        r = subprocess.run(
+            "curl -s --connect-timeout 6 --max-time 8 -o /dev/null "
+            "-w '%{http_code}' 'https://api.genome.ucsc.edu/'",
+            shell=True, capture_output=True, text=True, timeout=12,
+        )
+        code = r.stdout.strip()
+        if r.returncode == 0 and code not in ("", "000"):
+            return True, None
+        return False, f"curl exit={r.returncode} http={code} stderr={r.stderr.strip()[:120]}"
+    except Exception as e:
+        return False, str(e)
+
+
+_CONNECTIVITY_ERROR = """\
+  FATAL: This node cannot reach api.genome.ucsc.edu (DNS resolution failed).
+  HPC compute nodes typically block outbound internet — UCSC API is unreachable.
+
+  Options:
+    1) Provide a local genome FASTA with --genome /path/to/{build}.fa
+       (fastest, no network required)
+    2) On a login node that has internet access, run te_prep.py manually,
+       then pass the resulting CSV as --input to te_prep / query.py on the cluster.
+    3) Use --source dfam only if your cluster allows outbound HTTPS to dfam.org.
+"""
+
+
+def _curl_json(url, timeout=30):
+    """Fetch a URL with curl (via shell=True) and return the parsed JSON dict.
+
+    shell=True is critical: it routes DNS through /bin/sh, matching the same
+    resolver path as interactive curl. Without it, subprocess curl uses a
+    different libc DNS path that fails on some HPC nodes (exit 6 / exit 28).
+    """
+    import subprocess, json as _json, shlex
+    cmd = f"curl -s --connect-timeout 8 --max-time {timeout} {shlex.quote(url)}"
+    result = subprocess.run(
+        cmd, shell=True, capture_output=True, text=True, timeout=timeout + 8,
+    )
+    if result.returncode != 0:
+        raise ConnectionError(
+            f"curl exit={result.returncode}: {(result.stderr or result.stdout).strip()[:120]}"
+        )
+    try:
+        return _json.loads(result.stdout)
+    except _json.JSONDecodeError as exc:
+        raise ValueError(f"JSON parse error ({exc}): body={result.stdout[:80]!r}")
+
+
 def fetch_sequences_ucsc(df, assembly="hg38", n_workers=10):
-    """Fetch sequences from UCSC API in parallel. Returns (seqs, urls) lists."""
+    """Fetch sequences from UCSC API in parallel via curl. Returns (seqs, urls) lists."""
     import threading
-    import requests
     from concurrent.futures import ThreadPoolExecutor, as_completed
     n = len(df)
     seqs = [None] * n
     urls = [""] * n
     failed = []
-    sem = threading.Semaphore(n_workers)
+    # Cap concurrency at 3 — UCSC rate-limits aggressively
+    _concurrency = min(n_workers, 3)
+    sem = threading.Semaphore(_concurrency)
+    _print_lock = threading.Lock()
+
+    def _log(msg):
+        with _print_lock:
+            print(msg, flush=True)
 
     def _fetch_one(i):
         row   = df.iloc[i]
@@ -499,26 +628,45 @@ def fetch_sequences_ucsc(df, assembly="hg38", n_workers=10):
         start = int(row.get("start", row.get("Start", 0)))
         stop  = int(row.get("stop",  row.get("Stop",  0)))
         url   = _ucsc_api_url(chrom, start, stop, assembly)
-        for attempt in range(3):
+        for attempt in range(5):
             try:
                 with sem:
-                    r = requests.get(url, timeout=30)
-                    r.raise_for_status()
-                    res = r.json()
-                    if "error" in res:
-                        raise ValueError(res["error"])
-                    return i, _orient_sequence(res["dna"], row), url
-            except Exception:
-                if attempt == 2:
+                    time.sleep(0.4)  # ≤2.5 req/sec across all workers
+                    _log(f"    [{i}] GET {url}")
+                    res = _curl_json(url)
+                http_code = res.get("statusCode", 200)
+                _log(f"    [{i}] HTTP {http_code}")
+                if http_code == 429:
+                    wait = min(120, 30 * 2 ** attempt)
+                    _log(f"    [{i}] rate-limited — sleeping {wait}s before retry {attempt+1}")
+                    time.sleep(wait)
+                    continue
+                if "error" in res:
+                    raise ValueError(res["error"])
+                dna = res.get("dna", "")
+                _log(f"    [{i}] OK  len={len(dna)}  seq={dna}")
+                return i, _orient_sequence(dna, row), url
+            except Exception as exc:
+                _log(f"    [{i}] attempt {attempt+1}/5 FAILED: {type(exc).__name__}: {exc}")
+                if attempt == 4:
+                    _log(f"    [{i}] giving up — filling with Ns")
                     return i, None, url
-                time.sleep(0.5 * (attempt + 1))
+                wait = min(60, 2 ** attempt)
+                _log(f"    [{i}] retrying in {wait}s")
+                time.sleep(wait)
         return i, None, url
 
-    print(f"  Fetching {n:,} sequences from UCSC ({n_workers} workers, assembly={assembly})...")
+    print(f"  Fetching {n:,} sequences from UCSC ({_concurrency} workers, assembly={assembly})...", flush=True)
     done = 0
     with ThreadPoolExecutor(max_workers=n_workers) as exe:
         futures = {exe.submit(_fetch_one, i): i for i in range(n)}
         for fut in as_completed(futures):
+            if _abort.is_set():
+                # Cancel remaining submitted work
+                for f in futures:
+                    f.cancel()
+                print(_CONNECTIVITY_ERROR.format(build=assembly), flush=True)
+                sys.exit(1)
             i, seq, url = fut.result()
             urls[i] = url
             if seq is None:
@@ -528,7 +676,7 @@ def fetch_sequences_ucsc(df, assembly="hg38", n_workers=10):
                 seqs[i] = seq
             done += 1
             if done % max(1, n // 20) == 0 or done == n:
-                print(f"    {done:,}/{n:,}", flush=True)
+                print(f"  --- progress: {done:,}/{n:,} done, {len(failed)} failed so far ---", flush=True)
 
     if failed:
         print(f"  WARNING: {len(failed)} sequences failed to fetch (filled with Ns)")
@@ -702,14 +850,29 @@ def main():
     CLUSTERED_PATH = BASE_DIR / "clustered_data.csv"
 
     # Annotation path (only for rmsk; dfam uses REST API)
-    ann_path = None if source == "dfam" else get_rmsk_path(build, args.rmsk_dir)
+    ann_path = None
+    _rmsk_api_fallback = False
+    if source == "rmsk":
+        try:
+            ann_path = get_rmsk_path(build, args.rmsk_dir)
+        except RuntimeError as _dl_err:
+            print(f"\n  {_dl_err}", flush=True)
+            print(f"  → Falling back to UCSC REST API (api.genome.ucsc.edu)...\n", flush=True)
+            _rmsk_api_fallback = True
+
+    if _rmsk_api_fallback:
+        _input_str = f"UCSC REST API — rmsk track, {build} (hgdownload unreachable)"
+    elif ann_path:
+        _input_str = str(Path(ann_path).resolve())
+    else:
+        _input_str = "Dfam REST API"
 
     print("=" * 60)
     print("TE Family Data Prep")
     print(f"  Family:    {family}")
     print(f"  Build:     {build}")
-    print(f"  Source:    {source}")
-    print(f"  Input:     {Path(ann_path).resolve() if ann_path else 'Dfam REST API'}")
+    print(f"  Source:    {source}{' (REST API fallback)' if _rmsk_api_fallback else ''}")
+    print(f"  Input:     {_input_str}")
     print(f"  Genome FA: {genome_fa or '(none — UCSC API fallback)'}")
     print(f"  Output:    {BASE_DIR.resolve()}")
     print(f"  Date:      {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -721,6 +884,8 @@ def main():
 
     if source == "dfam":
         hits = parse_dfam_family(None, family, build=build, std_chroms=std_chroms)
+    elif _rmsk_api_fallback:
+        hits = fetch_rmsk_from_api(family, build, std_chroms=std_chroms)
     else:
         hits = parse_rmsk_family(ann_path, family, std_chroms)
 
@@ -728,6 +893,10 @@ def main():
         src_hint = "dfam" if source == "dfam" else "rmsk"
         print(f"\nFATAL: No loci for family='{family}' in {build} ({source}).")
         print(f"Name is case-sensitive. To search:  python te_prep.py --search {family.lower()} --build {build} --source {src_hint}")
+        sys.exit(1)
+
+    if not _HAS_PANDAS:
+        print("FATAL: numpy/pandas not installed — run: pip install numpy pandas", flush=True)
         sys.exit(1)
 
     df = pd.DataFrame(hits).sort_values(["Chromosome", "Start"]).reset_index(drop=True)
@@ -761,6 +930,16 @@ def main():
         seqs, ucsc_urls = fetch_sequences_ucsc(df, assembly=build, n_workers=args.fetch_workers)
         df["Seq"] = seqs
         df["ucsc_url"] = ucsc_urls
+        n_all_n = sum(1 for s in seqs if s and set(s.upper()) <= {"N"})
+        if n_all_n:
+            pct = 100 * n_all_n / len(seqs)
+            print(f"  WARNING: {n_all_n}/{len(seqs)} ({pct:.1f}%) sequences are all-N (UCSC fetch failed)")
+        if n_all_n == len(seqs):
+            sys.exit(
+                "FATAL: Every sequence fetch failed.\n"
+                "  Check network access to api.genome.ucsc.edu from the compute node,\n"
+                "  or provide a local genome FASTA via --genome."
+            )
     else:
         print(f"\n{'='*60}\nSTEP 3: Extract sequences from local FASTA\n{'='*60}")
         seqs = extract_sequences(genome_fa, df)
@@ -799,6 +978,9 @@ def main():
     print(f"\nNext steps:")
     print(f"  python te_enrichment.py {family} {build} --base-dir {args.base_dir}")
     print(f"  python query.py --input {CLUSTERED_PATH} --family {family}")
+    if args.notify_email:
+        from te_notify import send_completion_email
+        send_completion_email(args.notify_email, "te_prep", str(BASE_DIR))
 
 
 if __name__ == "__main__":

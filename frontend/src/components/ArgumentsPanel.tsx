@@ -229,6 +229,7 @@ function buildCommand(step: StepId, f: FieldState, hpcHome: string, scheduler: s
         `--n-epochs ${f.nEpochs || "120"}`,
       ];
       if (f.minClusterSize) clusterParts.push(`--min-cluster-size ${f.minClusterSize}`);
+      if (f.notifyEmail.trim()) clusterParts.push(`--notify-email ${f.notifyEmail.trim()}`);
       if (f.fetchFromUcsc) {
         // Chain: te_prep.py (fetch) → te_clustering.py (cluster)
         const seqDir = `${outDir}/${family.toLowerCase()}_seqs`;
@@ -250,6 +251,7 @@ function buildCommand(step: StepId, f: FieldState, hpcHome: string, scheduler: s
         `--family ${f.family || "FAMILY"}`,
       ];
       if (f.skipCialign) parts.push("--no-cialign");
+      if (f.notifyEmail.trim()) parts.push(`--notify-email ${f.notifyEmail.trim()}`);
       return parts.join(" ");
     }
     case "motif": {
@@ -265,6 +267,7 @@ function buildCommand(step: StepId, f: FieldState, hpcHome: string, scheduler: s
         if (f.homerGenome.trim()) parts.push(`--homer-genome ${f.homerGenome.trim()}`);
         parts.push(`--homer-size ${f.homerSize}`, `--homer-threads ${f.homerThreads}`);
       }
+      if (f.notifyEmail.trim()) parts.push(`--notify-email ${f.notifyEmail.trim()}`);
       return parts.join(" ");
     }
     case "go": {
@@ -275,14 +278,18 @@ function buildCommand(step: StepId, f: FieldState, hpcHome: string, scheduler: s
         `--out-dir ${resolvePath(f.outDir, "results")}`,
       ];
       if (f.clusteredCsv.trim()) parts.push(`--clustered-csv ${f.clusteredCsv.trim()}`);
+      if (f.notifyEmail.trim()) parts.push(`--notify-email ${f.notifyEmail.trim()}`);
       return parts.join(" ");
     }
-    case "expression":
-      return [
+    case "expression": {
+      const parts = [
         `${cd} python te_expression.py`,
         `--input ${resolvePath(f.inputCsv, "clustered.csv")}`,
         `--out-dir ${resolvePath(f.outDir, "results")}`,
-      ].join(" ");
+      ];
+      if (f.notifyEmail.trim()) parts.push(`--notify-email ${f.notifyEmail.trim()}`);
+      return parts.join(" ");
+    }
     case "enrichment": {
       const parts = [
         `${cd} python te_enrichment.py`,
@@ -293,6 +300,7 @@ function buildCommand(step: StepId, f: FieldState, hpcHome: string, scheduler: s
       if (f.jasparBed.trim()) parts.push(`--jaspar-bed ${f.jasparBed.trim()}`);
       if (f.skipGo) parts.push("--skip-go");
       if (f.skipExpr) parts.push("--skip-expression");
+      if (f.notifyEmail.trim()) parts.push(`--notify-email ${f.notifyEmail.trim()}`);
       return parts.join(" ");
     }
     case "job-status":
@@ -396,6 +404,7 @@ function HpcPanel() {
   const hpcHost = useAppStore((s) => s.hpcHost);
   const hpcScheduler = useAppStore((s) => s.hpcScheduler);
   const hpcHome = useAppStore((s) => s.hpcHome);
+  const hpcHasInternet = useAppStore((s) => s.hpcHasInternet);
   const setHpcConnection = useAppStore((s) => s.setHpcConnection);
   const hpcJobId = useAppStore((s) => s.hpcJobId);
   const setHpcJobId = useAppStore((s) => s.setHpcJobId);
@@ -439,12 +448,13 @@ function HpcPanel() {
         "--scheduler", scheduler,
         "--work-dir", workDir.trim(),
       ]);
-      const result = raw.result as { ok?: boolean; host?: string; scheduler?: string; home?: string } | undefined;
+      const result = raw.result as { ok?: boolean; host?: string; scheduler?: string; home?: string; has_internet?: boolean } | undefined;
       if (result?.ok) {
         setHpcConnection({
           host: result.host ?? host,
           scheduler: result.scheduler ?? "",
           home: result.home ?? "",
+          hasInternet: result.has_internet ?? false,
         });
         finishRun("done");
       } else {
@@ -457,7 +467,7 @@ function HpcPanel() {
   }, [host, port, user, password, scheduler, workDir, beginRun, finishRun, pushToast, setHpcConnection]);
 
   const disconnect = useCallback(async () => {
-    try { await pyRun(["hpc-disconnect"]); } catch (_) {}
+    try { await pyRunFull(["hpc-disconnect"]); } catch (_) {}
     setHpcConnection(null);
   }, [setHpcConnection]);
 
@@ -548,7 +558,7 @@ function HpcPanel() {
         const raw = await pyRunFull(["hpc-batch-submit", "--params", JSON.stringify(params)]);
         const result = raw.result as { ok?: boolean; job_id?: string; output_dir?: string; work_dir?: string } | undefined;
         if (result?.ok) {
-          if (result.work_dir) setHpcConnection({ host: hpcHost, scheduler: hpcScheduler, home: result.work_dir });
+          if (result.work_dir) setHpcConnection({ host: hpcHost, scheduler: hpcScheduler, home: result.work_dir, hasInternet: hpcHasInternet });
           if (result.job_id) {
             setHpcJobId(result.job_id);
             setFields((prev) => ({ ...prev, jobId: result.job_id! }));
@@ -563,7 +573,7 @@ function HpcPanel() {
       pushToast(e instanceof Error ? e.message : String(e));
       finishRun("errored");
     }
-  }, [fields, beginRun, finishRun, pushToast, setHpcJobId, setHpcConnection, hpcHost, hpcScheduler]);
+  }, [fields, beginRun, finishRun, pushToast, setHpcJobId, setHpcConnection, hpcHost, hpcScheduler, hpcHasInternet]);
 
   const retrieve = useCallback(async () => {
     try {
@@ -626,16 +636,23 @@ function HpcPanel() {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {/* Connection banner */}
-      <div className="flex items-center gap-2 border-b border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 text-xs">
-        <span className="h-2 w-2 rounded-full bg-green-500 shrink-0" />
-        <span className="font-medium truncate">{hpcHost}</span>
-        <span className="text-[var(--app-muted)] truncate">{hpcScheduler} · {hpcHome}</span>
-        <button type="button" className="ml-auto shrink-0 text-[var(--app-muted)] hover:text-[var(--app-text)] transition" onClick={toggleFileViewer}>
-          Browse files
-        </button>
-        <button type="button" className="shrink-0 text-[var(--app-muted)] hover:text-red-500 transition" onClick={() => void disconnect()}>
-          Disconnect
-        </button>
+      <div className="flex flex-col border-b border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2 text-xs">
+        <div className="flex items-center gap-2">
+          <span className="h-2 w-2 rounded-full bg-green-500 shrink-0" />
+          <span className="font-medium truncate">{hpcHost}</span>
+          <span className="text-[var(--app-muted)] truncate">{hpcScheduler} · {hpcHome}</span>
+          <button type="button" className="ml-auto shrink-0 text-[var(--app-muted)] hover:text-[var(--app-text)] transition" onClick={toggleFileViewer}>
+            Browse files
+          </button>
+          <button type="button" className="shrink-0 text-[var(--app-muted)] hover:text-red-500 transition" onClick={() => void disconnect()}>
+            Disconnect
+          </button>
+        </div>
+        {!hpcHasInternet && (
+          <p className="mt-1 text-amber-600 dark:text-amber-400">
+            ⚠ No internet — UCSC/Dfam fetch unavailable. A local genome FASTA is required.
+          </p>
+        )}
       </div>
 
       {/* Job ID badge */}
@@ -878,6 +895,15 @@ function HpcPanel() {
           </Field>
         )}
 
+        {/* Shared: notify email for individual steps */}
+        {(["prep","clustering","alignment","motif","go","expression","enrichment"] as StepId[]).includes(step) && (
+          <Field label="Notify email" hint="Send completion email — click Notifications in the toolbar to set up Gmail App Password">
+            <input className={input} type="email" value={fields.notifyEmail}
+              onChange={(e) => set("notifyEmail", e.target.value)}
+              placeholder="you@example.com" disabled={busy} />
+          </Field>
+        )}
+
         {/* ── BATCH JOB fields ── */}
         {step === "batch" && (
           <div className="space-y-3">
@@ -955,7 +981,7 @@ function HpcPanel() {
               ))}
             </div>
 
-            <Field label="Notify email" hint="For job-complete notifications (requires Gmail App Password)">
+            <Field label="Notify email" hint="Send completion email — click Notifications in the toolbar to set up Gmail App Password">
               <input className={input} type="email" value={fields.notifyEmail}
                 onChange={(e) => set("notifyEmail", e.target.value)}
                 placeholder="you@example.com" disabled={busy} />

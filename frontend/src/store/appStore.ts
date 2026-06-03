@@ -51,13 +51,17 @@ type AppStore = {
   hpcHost: string;
   hpcScheduler: string;
   hpcHome: string;
-  setHpcConnection: (info: { host: string; scheduler: string; home: string } | null) => void;
+  hpcHasInternet: boolean;
+  setHpcConnection: (info: { host: string; scheduler: string; home: string; hasInternet?: boolean } | null) => void;
 
   hpcJobId: string | null;
   setHpcJobId: (id: string | null) => void;
 
   fileViewerOpen: boolean;
   toggleFileViewer: () => void;
+
+  notificationsOpen: boolean;
+  toggleNotifications: () => void;
 
   mode: "local" | "hpc";
   setMode: (m: "local" | "hpc") => void;
@@ -144,11 +148,12 @@ export const useAppStore = create<AppStore>((set, get) => ({
   hpcHost: "",
   hpcScheduler: "",
   hpcHome: "",
+  hpcHasInternet: false,
   setHpcConnection: (info) =>
     set(
       info
-        ? { hpcConnected: true, hpcHost: info.host, hpcScheduler: info.scheduler, hpcHome: info.home }
-        : { hpcConnected: false, hpcHost: "", hpcScheduler: "", hpcHome: "" },
+        ? { hpcConnected: true, hpcHost: info.host, hpcScheduler: info.scheduler, hpcHome: info.home, hpcHasInternet: info.hasInternet ?? false }
+        : { hpcConnected: false, hpcHost: "", hpcScheduler: "", hpcHome: "", hpcHasInternet: false },
     ),
 
   hpcJobId: null,
@@ -156,6 +161,9 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   fileViewerOpen: false,
   toggleFileViewer: () => set((s) => ({ fileViewerOpen: !s.fileViewerOpen })),
+
+  notificationsOpen: false,
+  toggleNotifications: () => set((s) => ({ notificationsOpen: !s.notificationsOpen })),
 
   mode: "local",
   setMode: (m) => set({ mode: m }),

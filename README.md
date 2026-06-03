@@ -1,6 +1,6 @@
 # GAMECA — Gene Alignment, Motif, Expression & Clustering Analysis
 
-GAMECA is a modular transposable-element (TE) analysis pipeline — prepare → cluster → align → motif → GO → expression — with integrated **LSF** and **Slurm** HPC support. This repository ships the Python tooling plus a **Tauri** desktop shell that wraps the workflow in a native UI and communicates with a bundled Python sidecar over newline-delimited JSON (NDJSON) IPC.
+GAMECA is a modular transposable-element (TE) analysis pipeline — prepare → cluster → align → motif → GO → expression → primers — with integrated **LSF** and **Slurm** HPC support. This repository ships the Python tooling plus a **Tauri** desktop shell that wraps the workflow in a native UI and communicates with a bundled Python sidecar over newline-delimited JSON (NDJSON) IPC.
 
 Current version: **v0.4.14**
 
@@ -15,13 +15,15 @@ Installers are published on GitHub Releases:
 
 | Feature | Details |
 |---------|---------|
-| **Full TE pipeline** | k-mer → SVD → UMAP/t-SNE → HDBSCAN clustering; MAFFT alignment; JASPAR + Fisher motif enrichment; GO annotation; expression boxplots |
+| **Full TE pipeline** | k-mer → SVD → UMAP/t-SNE → HDBSCAN clustering; MAFFT alignment; JASPAR + Fisher motif enrichment; GO annotation; expression boxplots; k-mer primer design |
 | **HPC integration** | SSH client auto-detects LSF vs Slurm; uploads scripts, submits batch jobs, streams live output, retrieves results |
 | **Annotation sources** | **RMSK** (UCSC RepeatMasker) and **Dfam** (REST API — no bulk download required) for TE locus coordinates |
 | **Local mode** | Runs entirely on your Mac; sequences fetched from UCSC API when no genome FASTA is available |
+| **Cython acceleration** | `te_fast.pyx` speeds up k-mer matrix construction, GC content, and length calculations ~3–5× when compiled |
 | **Desktop shell** | Tauri + React frontend; Python sidecar streams logs/progress/cancellation over IPC |
 | **Auto-update** | On launch, scripts update silently from the latest commit; app update prompts when a new GitHub Release is published |
 | **File browser** | Remote filesystem browser with sort-by-name/date, CSV table viewer, inline Plotly HTML visualisation |
+| **Smart GO step** | GO annotation only needs a family name and species — auto-detects enrichment results and chains clustering → motif → GO if they are absent |
 
 ## Quick start
 
@@ -51,9 +53,14 @@ Core analysis
 
 Enrichment
   Motif                 – JASPAR + Fisher + HOMER
-  GO annotation         – mygene.info
+  GO annotation         – family + species only; chains clustering → motif → GO automatically
+                          if enrichment results are not yet present
   Expression            – boxplots per cluster
   Full enrichment       – motif + GO + expression combined
+
+Primer design
+  Primers               – k-mer candidate generation; genome-wide specificity via GenomeCache;
+                          per-cluster top-primer summary
 
 Full pipeline
   Batch job             – bsub / sbatch with all steps
@@ -63,24 +70,52 @@ Results
   File browser          – remote filesystem with sort, CSV viewer, HTML plots
 ```
 
+## Supported assemblies
+
+| Species | Assemblies |
+|---------|------------|
+| Human   | `hg38`, `hg19` |
+| Mouse   | `mm10`, `mm39` |
+
 ## Repository layout
 
 ```
-backend/            Python IPC sidecar (PyInstaller → pytool binary)
-  main.py           NDJSON server: routes commands, streams logs, manages setup/updates
-  yourtool/cli.py   CLI handlers: hpc-connect, hpc-upload, hpc-run, hpc-batch-submit …
-frontend/           React + Tailwind UI (Tauri webview)
-src-tauri/          Rust shell
-hpc_client.py       SSH/bsub/sbatch client
-te_prep.py          TE coordinate fetching (RMSK + Dfam REST API) + sequence extraction
-te_clustering.py    k-mer → SVD → UMAP/t-SNE → HDBSCAN
-te_alignment.py     MAFFT + CIAlign consensus
-te_motif.py         JASPAR motif enrichment
-te_go.py            GO annotation
-te_expression.py    Expression analysis
-te_enrichment.py    Full enrichment orchestrator
-ui.py               Terminal UI (HPC menu, rmsk/Dfam query, batch submit)
-query.py            Main pipeline driver (~2400 lines)
+backend/                  Python IPC sidecar (PyInstaller → pytool binary)
+  yourtool/
+    cli.py                CLI handlers: hpc-connect, hpc-upload, hpc-run, hpc-batch-submit …
+  tests/
+    test_cli_hpc_files.py HPC file-sync integration tests
+    test_ipc.py           IPC protocol tests
+frontend/                 React + Tailwind UI (Tauri webview)
+src-tauri/                Rust shell
+
+hpc_client.py             SSH/bsub/sbatch client; auto-detects LSF vs Slurm;
+                          venv created in remote_work_dir (writable project directory)
+query.py                  Main pipeline driver (~2400 lines); stages 1–10 with checkpoints
+ui.py                     Terminal UI: HPC menu, rmsk/Dfam query, batch submit
+
+te_prep.py                TE coordinate fetching (RMSK + Dfam REST API) + sequence extraction
+te_clustering.py          k-mer → SVD → UMAP/t-SNE → HDBSCAN
+te_alignment.py           MAFFT + CIAlign + majority-vote consensus
+te_motif.py               JASPAR bedtools intersect + Fisher enrichment + optional HOMER
+te_go.py                  GO annotation via mygene.info
+te_expression.py          Expression boxplots, stage profiles, chromosomal heatmaps
+te_enrichment.py          Full enrichment orchestrator (motif + GO + expression)
+te_primers.py             k-mer primer design with genome-wide specificity checking
+te_genome.py              Shared genome utilities: GenomeCache (in-memory FASTA),
+                          primer search, reverse-complement helpers
+te_fast.pyx               Cython-accelerated hot paths (k-mer matrix, GC, lengths)
+te_fast.c                 Generated C source (committed so the cluster doesn't need Cython)
+setup_cython.py           Build script: python setup_cython.py build_ext --inplace
+
+presentation.py           Batch figure generation for presentations (ideogram, DAG,
+                          enrichment heatmap, primer scatter, etc.)
+
+requirements.txt          Python dependencies (pinned ranges)
+
+test_pipeline.py          End-to-end pipeline smoke tests
+test_strand_orientation.py Strand-handling unit tests
+test_jaspar_path.py       JASPAR cache path resolution tests
 ```
 
 ## System requirements
@@ -111,6 +146,14 @@ pnpm tauri build
 ```
 
 > **Note:** Always rebuild PyInstaller before `pnpm tauri build` if you changed any Python file. The sidecar binary must be copied into `src-tauri/binaries/` manually.
+
+### Optional: compile the Cython extension
+
+```bash
+python setup_cython.py build_ext --inplace
+```
+
+If `te_fast.cpython-*.so` is present it is used automatically; the pipeline falls back to pure Python otherwise. The pre-generated `te_fast.c` is committed so cluster nodes only need a C compiler (`gcc`), not Cython.
 
 ## Auto-update behaviour
 

@@ -8,8 +8,10 @@ export default function StatusBar() {
   const progress = useAppStore((s) => s.progress);
   const setFatalMessage = useAppStore((s) => s.setFatalMessage);
   const hpcConnected = useAppStore((s) => s.hpcConnected);
+  const hpcHasInternet = useAppStore((s) => s.hpcHasInternet);
   const fileViewerOpen = useAppStore((s) => s.fileViewerOpen);
   const toggleFileViewer = useAppStore((s) => s.toggleFileViewer);
+  const toggleNotifications = useAppStore((s) => s.toggleNotifications);
   const [pingOk, setPingOk] = useState<boolean | null>(null);
   const [version, setVersion] = useState<string>("");
   const failStreakRef = useRef(0);
@@ -112,18 +114,41 @@ export default function StatusBar() {
       <div className="text-sm font-medium">{runLabel}</div>
 
       {hpcConnected && (
-        <button
-          type="button"
-          onClick={toggleFileViewer}
-          className={`shrink-0 rounded px-2.5 py-1 text-xs font-medium transition ${
-            fileViewerOpen
-              ? "bg-[var(--app-accent)] text-white"
-              : "border border-[var(--app-border)] text-[var(--app-muted)] hover:text-[var(--app-text)]"
-          }`}
-        >
-          {fileViewerOpen ? "✕ Files" : "📁 Files"}
-        </button>
+        <>
+          <span
+            className="inline-flex items-center gap-1 text-xs"
+            title={hpcHasInternet ? "Cluster has internet access" : "Cluster node has no internet — UCSC/Dfam fetch unavailable"}
+          >
+            <span
+              className="inline-flex h-2 w-2 rounded-full"
+              style={{ backgroundColor: hpcHasInternet ? "#16a34a" : "#d97706" }}
+            />
+            <span className={hpcHasInternet ? "text-green-600 dark:text-green-400" : "text-amber-600 dark:text-amber-400"}>
+              {hpcHasInternet ? "internet ✓" : "no internet"}
+            </span>
+          </span>
+          <button
+            type="button"
+            onClick={toggleFileViewer}
+            className={`shrink-0 rounded px-2.5 py-1 text-xs font-medium transition ${
+              fileViewerOpen
+                ? "bg-[var(--app-accent)] text-white"
+                : "border border-[var(--app-border)] text-[var(--app-muted)] hover:text-[var(--app-text)]"
+            }`}
+          >
+            {fileViewerOpen ? "✕ Files" : "📁 Files"}
+          </button>
+        </>
       )}
+
+      <button
+        type="button"
+        onClick={toggleNotifications}
+        title="Email notification settings"
+        className="shrink-0 rounded px-2.5 py-1 text-xs font-medium border border-[var(--app-border)] text-[var(--app-muted)] hover:text-[var(--app-text)] transition"
+      >
+        Notifications
+      </button>
 
       <div className="min-w-0 flex-1">
         {progress?.message ? (

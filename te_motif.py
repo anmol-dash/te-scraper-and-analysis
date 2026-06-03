@@ -193,6 +193,8 @@ def parse_args():
                    help="Chain te_go.py GO annotation immediately after motif analysis")
     p.add_argument("--go-top-motifs", type=int, default=30,
                    help="Top motifs per cluster to annotate in chained GO run (default: 30)")
+    p.add_argument("--notify-email", default="", metavar="EMAIL",
+                   help="Send a completion email to this address (requires Gmail App Password setup).")
     args = p.parse_args()
     if not args.input and not args.bed_input:
         p.error("Provide --input (clustered CSV) or --bed-input (existing BED file).")
@@ -1449,6 +1451,10 @@ def main():
             force          = args.force,
         )
         log.info("GO annotation complete.")
+
+    if args.notify_email:
+        from te_notify import send_completion_email
+        send_completion_email(args.notify_email, "te_motif", args.out_dir)
 
 
 if __name__ == "__main__":

@@ -128,6 +128,24 @@ export async function appReportFatal(args: {
   return { ok: Boolean(raw?.ok), url: raw?.url ?? null };
 }
 
+export interface NotifyCredentials {
+  ok: boolean;
+  email: string;
+  configured: boolean;
+}
+
+export async function notifyGet(): Promise<NotifyCredentials> {
+  const raw = await pyRunFull(["notify-get"]);
+  const r = (raw.result ?? {}) as Record<string, unknown>;
+  return { ok: Boolean(r.ok), email: String(r.email ?? ""), configured: Boolean(r.configured) };
+}
+
+export async function notifySet(email: string, password: string): Promise<{ ok: boolean; error?: string }> {
+  const raw = await pyRunFull(["notify-set", "--email", email, "--password", password]);
+  const r = (raw.result ?? {}) as Record<string, unknown>;
+  return { ok: Boolean(r.ok), error: r.error ? String(r.error) : undefined };
+}
+
 export async function pySetup(): Promise<{ ok: boolean; done: boolean }> {
   const raw = await invoke<{ ok?: boolean; done?: boolean }>("py_setup");
   return { ok: Boolean(raw?.ok), done: Boolean(raw?.done) };
