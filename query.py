@@ -32,6 +32,8 @@ import datetime
 import ast
 import os
 import re
+import shutil
+import subprocess
 import sys
 import time
 import traceback
@@ -149,6 +151,9 @@ def parse_args(argv=None):
     p.add_argument("--skip-genome",   action="store_true", help="Skip genome-wide primer search")
     p.add_argument("--skip-alignment",action="store_true")
     p.add_argument("--skip-primers",  action="store_true")
+    p.add_argument("--skip-standout", action="store_true",
+                   help="Skip Stage 11 standout analysis modules "
+                        "(phylo, gRNA, fold, overlays)")
     p.add_argument("--skip-motif",    action="store_true",
                    help="Skip JASPAR motif / TF binding analysis")
     p.add_argument("--skip-go",       action="store_true",
@@ -159,7 +164,7 @@ def parse_args(argv=None):
                    help="Directory for cached/downloaded JASPAR BED files")
     p.add_argument("--p-threshold",   type=float, default=0.05,
                    help="P-value threshold for motif/GO reporting")
-    p.add_argument("--resume-from", choices=["sequences", "stats", "clustering", "dashboard", "primers", "alignment", "motif", "tfbs", "go"],
+    p.add_argument("--resume-from", choices=["sequences", "stats", "clustering", "dashboard", "primers", "alignment", "motif", "tfbs", "go", "standout"],
                    default=None, help="Resume an existing output folder from this stage")
     p.add_argument("--stop-after", choices=["sequences", "stats", "clustering", "dashboard", "alignment", "motif", "go", "primers"],
                    default=None, help="Stop the pipeline after this stage completes (for parallel job submission)")
@@ -338,7 +343,7 @@ def _load_local_data(args):
     progress_print(f"LOCAL MODE: {family} on {assembly} (source={source})")
 
     # Standard chromosomes filter
-    if assembly.startswith("hg"):
+    if assembly.startswith("hg") or assembly in ("hs1", "chm13"):
         std = set([f"chr{i}" for i in range(1, 23)] + ["chrX", "chrY"])
     else:
         std = set([f"chr{i}" for i in range(1, 20)] + ["chrX", "chrY"])
@@ -1135,7 +1140,8 @@ def run_motif_stage_full(args, out_dir, dirs, family_name,
     import requests as _requests
 
     build      = getattr(args, "assembly", "hg38") or "hg38"
-    SPECIES_ID = {"hg38":"9606","hg19":"9606","mm10":"10090","mm39":"10090"}.get(build,"9606")
+    SPECIES_ID = {"hg38":"9606","hg19":"9606","mm10":"10090","mm39":"10090",
+                  "hs1":"9606","chm13":"9606"}.get(build,"9606")
     FORCE      = getattr(args, "force", False)
 
     motif_dir  = dirs["motif"]
@@ -1957,6 +1963,145 @@ def run_motif_tfbs_go(args, out_dir, dirs, family_name, run_motif=True, run_tfbs
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# STAGE 11 HELPER (also called standalone via --resume-from standout)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _run_standout_analysis(args, out_dir, dirs, family_name, stage_times):
+    """Run all Stage 11 standout analysis modules.
+
+    Called both from the end of run_pipeline() and when
+    --resume-from standout is requested (parallel job submission path).
+    """
+    if getattr(args, "skip_standout", False):
+        _diag("STAGE 11: Standout analysis SKIPPED (--skip-standout)")
+        return
+
+    t0 = time.time()
+    _diag("STAGE 11: Standout analysis modules")
+    print("\n" + "=" * 60)
+    print("STANDOUT ANALYSIS MODULES")
+    print("  phylo / gRNA / transduction / antisense / CTCF")
+    print("  epigenetic / ortholog / multi-assembly / fold / motif_gain")
+    print("=" * 60)
+
+    clustered_csv = dirs["data"] / f"{family_name.lower()}_clustered.csv"
+    reports_dir   = out_dir / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    log_path      = out_dir / "standout_analysis.log"
+
+    if not clustered_csv.exists():
+        _diag("  STAGE 11: clustered CSV not found — skipping")
+        print(f"  WARNING: {clustered_csv.name} not found; skipping standout analysis.")
+        _checkpoint(out_dir, "stage11_standout")
+        stage_times["Standout analysis"] = time.time() - t0
+        return
+
+    if hasattr(sys, '_MEIPASS'):
+        _sdir = Path(sys._MEIPASS)
+    else:
+        _sdir = Path(__file__).resolve().parent
+    _py = shutil.which("python3") or shutil.which("python") or sys.executable
+    cons_fa = out_dir / "cluster_alignments" / "all_cluster_consensuses.fa"
+
+    _assembly_arg = getattr(args, "assembly", "hg38") or "hg38"
+    _MODULES = [
+        ("phylo",         "run_phylo_analysis.py",
+         ["--subst-rate", "2.2e-9", "--clock-divisor", "2",
+          "--intact-orf-aa", "100"]),
+        ("grna",          "run_grna_offtarget.py",
+         ["--cas", "SpCas9", "--max-mm", "2"]),
+        ("transduction",  "run_transduction.py",
+         ["--tail-bp", "150", "--min-shared", "3"]),
+        ("antisense",     "run_antisense_promoter.py",
+         ["--promoter-bp", "200"]),
+        ("ctcf_tad",      "run_ctcf_tad.py",
+         ["--motif-mismatch", "3"]),
+        ("epigenetic",    "run_epigenetic_overlay.py",   []),
+        ("ortholog",      "run_ortholog_insertion.py",   []),
+        ("multiassembly", "run_multiassembly_liftover.py",
+         ["--source-assembly", _assembly_arg]),
+        ("fold",          "run_fold_prediction.py",
+         ["--per-cluster", "--min-aa", "100", "--top-n", "5"]
+         + (["--consensus-fasta", str(cons_fa)] if cons_fa.exists() else [])),
+        ("divergence",    "run_divergence.py",
+         ["--assembly", _assembly_arg]
+         + (["--consensus-fasta", str(cons_fa)] if cons_fa.exists() else [])),
+        ("ltr_struct",    "run_ltr_struct.py",  []),
+        ("subfamily",     "run_subfamily.py",
+         ["--assembly", _assembly_arg]
+         + (["--consensus-fasta", str(cons_fa)] if cons_fa.exists() else [])),
+        ("benchmark",     "run_benchmark.py",
+         ["--assembly", _assembly_arg]),
+        ("motif_gain",    "run_motif_gain.py",
+         ["--assembly", _assembly_arg]
+         + (["--consensus-fasta", str(cons_fa)] if cons_fa.exists() else [])),
+        ("expression",    "te_expression.py",
+         ["--out-dir", str(out_dir)]),
+    ]
+
+    _diag(f"  STAGE 11: {len(_MODULES)} modules | script_dir={_sdir} | python={_py}")
+    print(f"  Input:   {clustered_csv}")
+    print(f"  Reports: {reports_dir}")
+    print(f"  Log:     {log_path}")
+
+    with open(log_path, "w", buffering=1) as _lf:
+        _lf.write("GAMECA Standout Analysis Log\n")
+        _lf.write(f"Family:  {family_name}\n")
+        _lf.write(f"Input:   {clustered_csv}\n")
+        _lf.write(f"Python:  {_py}\n")
+        _lf.write(f"Started: {datetime.datetime.now():%Y-%m-%d %H:%M:%S}\n")
+        _lf.write("=" * 60 + "\n")
+
+        _sa_ok, _sa_fail, _sa_skip = 0, 0, 0
+        _sa_results: list[tuple[str, str, float]] = []
+        for mod_name, mod_script, mod_extra in _MODULES:
+            script_path = _sdir / mod_script
+            _lf.write(f"\n{'='*60}\n[{mod_name}]\n{'='*60}\n")
+            _lf.flush()
+
+            if not script_path.exists():
+                msg = f"  [{mod_name}] SKIP (script not found: {script_path})"
+                print(msg); _diag(msg); _lf.write(msg + "\n")
+                _sa_skip += 1
+                _sa_results.append((mod_name, "SKIP", 0.0))
+                continue
+
+            cmd = ([_py, str(script_path),
+                    "--input",       str(clustered_csv),
+                    "--reports-dir", str(reports_dir),
+                    "--family",      family_name]
+                   + mod_extra)
+            _lf.write(f"CMD: {' '.join(cmd)}\n\n"); _lf.flush()
+            _diag(f"  STAGE 11 [{mod_name}]: {' '.join(cmd)}")
+            print(f"  [{mod_name}] running...", end="", flush=True)
+            t_mod = time.time()
+            rc = subprocess.run(cmd, stdout=_lf, stderr=subprocess.STDOUT).returncode
+            elapsed = time.time() - t_mod
+            _lf.write(f"\n[EXIT {rc}  {elapsed:.0f}s]\n"); _lf.flush()
+            if rc == 0:
+                print(f" ok ({elapsed:.0f}s)"); _sa_ok += 1
+                _diag(f"  STAGE 11 [{mod_name}]: ok ({elapsed:.0f}s)")
+                _sa_results.append((mod_name, "OK", elapsed))
+            else:
+                print(f" FAILED rc={rc} ({elapsed:.0f}s)"); _sa_fail += 1
+                _diag(f"  STAGE 11 [{mod_name}]: FAILED rc={rc}")
+                _sa_results.append((mod_name, f"FAILED rc={rc}", elapsed))
+
+        _lf.write(f"\n{'='*60}\nSTAGE 11 SUMMARY\n{'='*60}\n")
+        for _nm, _st, _el in _sa_results:
+            _lf.write(f"  {_nm:<20} {_st:<18} {_el:.0f}s\n")
+        _lf.write(f"\nDone: ok={_sa_ok} failed={_sa_fail} skipped={_sa_skip}\n")
+        _lf.write(f"Finished: {datetime.datetime.now():%Y-%m-%d %H:%M:%S}\n")
+        print(f"\n  Done: {_sa_ok} ok / {_sa_fail} failed / {_sa_skip} skipped")
+        if _sa_fail:
+            print("  FAILED modules: "
+                  + ", ".join(n for n, s, _ in _sa_results if s.startswith("FAILED")))
+
+    _checkpoint(out_dir, "stage11_standout")
+    stage_times["Standout analysis"] = time.time() - t0
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # MAIN PIPELINE
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -2015,6 +2160,22 @@ def run_pipeline(args):
             log_error(f"RESUME FROM {args.resume_from.upper()}", e)
             sys.exit(1)
         print("\nResume run complete.")
+        return None
+
+    if args.resume_from == "standout":
+        # Skip all pipeline stages — run only Stage 11 standout analysis modules.
+        # Used by the parallel-job submission path as Job 5 after Jobs 2-4 complete.
+        _pipeline_start_sa = time.time()
+        _stage_times_sa = {}
+        try:
+            _run_standout_analysis(args, OUT_DIR, DIRS, FAMILY_NAME, _stage_times_sa)
+        except SystemExit:
+            raise
+        except Exception as e:
+            log_error("RESUME FROM STANDOUT", e)
+            sys.exit(1)
+        total_sa = time.time() - _pipeline_start_sa
+        print(f"\nResume run complete (standout analysis only, {total_sa:.0f}s).")
         return None
 
     pipeline_start = time.time()
@@ -2402,6 +2563,9 @@ def run_pipeline(args):
     else:
         _diag("STAGE 10: Primers SKIPPED (--skip-primers)")
 
+    # ── 11. Standout analysis modules ───────────────────────────────────────
+    _run_standout_analysis(args, OUT_DIR, DIRS, FAMILY_NAME, stage_times)
+
     # ── Summary ─────────────────────────────────────────────────────────────
     total = time.time() - pipeline_start
     print("\n" + "=" * 60)
@@ -2417,16 +2581,33 @@ def run_pipeline(args):
     for stage, seconds in stage_times.items():
         print(f"    {stage:<14} {seconds:>8.1f}s")
     print()
-    print(f"  Sequences:     {FAMILY_NAME.lower()}_sequences.csv")
-    print(f"  Dashboard:     07_visualizations/index.html")
-    print(f"  CIAlign:       cialign_plots/index.html")
-    print(f"  Primers:       06_primers/selected_primers_summary.csv")
-    print(f"  Clustering:    03_clustering/clustering_visualization.html")
-    print(f"  Expr clusters: 03_clustering/clustering_visualization_expr.html  (if expression data present)")
-    print(f"  Consensus:     05_consensus/")
-    print(f"  Motifs:        motif_analysis/overall_top_motifs.png")
-    print(f"  TF binding:    05_tfbs/cluster_tf_binding_heatmap.html")
-    print(f"  GO:            go_annotations/")
+    print(f"  Sequences:       {FAMILY_NAME.lower()}_sequences.csv")
+    print(f"  Dashboard:       07_visualizations/index.html")
+    print(f"  CIAlign:         cialign_plots/index.html")
+    print(f"  Primers:         06_primers/selected_primers_summary.csv")
+    print(f"  Clustering:      03_clustering/clustering_visualization.html")
+    print(f"  Expr clusters:   03_clustering/clustering_visualization_expr.html  (if expression data present)")
+    print(f"  Consensus:       05_consensus/")
+    print(f"  Motifs:          motif_analysis/overall_top_motifs.png")
+    print(f"  TF binding:      05_tfbs/cluster_tf_binding_heatmap.html")
+    print(f"  GO:              go_annotations/")
+    print()
+    print(f"  ── Standout analysis (reports/) ──")
+    print(f"  Divergence:      reports/divergence_per_locus.csv")
+    print(f"  Landscape plot:  reports/fig_repeat_landscape.png  (.pdf also)")
+    print(f"  LTR annotation:  reports/ltr_struct_annotated.csv")
+    print(f"  LTR plot:        reports/fig_ltr_struct.png")
+    print(f"  Subfamilies:     reports/subfamily_table.csv")
+    print(f"  Subfamily tree:  reports/fig_subfamily_tree.png")
+    print(f"  Subfamily Nwk:   reports/subfamily_tree.nwk")
+    print(f"  DE tests:        expression_plots/de_pairwise.csv")
+    print(f"  DE heatmap:      expression_plots/de_heatmap.png")
+    print(f"  DE volcano:      expression_plots/de_volcano.png")
+    print(f"  Benchmark:       reports/benchmark_table.csv")
+    print(f"  Benchmark plot:  reports/fig_benchmark.png")
+    print(f"  Motif gains:     reports/motif_gain_per_copy.csv")
+    print(f"  Motif gain bar:  reports/fig_motif_gains_bar.png")
+    print(f"  Motif heatmap:   reports/fig_motif_gains_heatmap.png")
     print("=" * 60)
 
     return df_family

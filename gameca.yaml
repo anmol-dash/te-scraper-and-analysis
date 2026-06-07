@@ -1,0 +1,94 @@
+# GAMECA declarative pipeline config (#8)
+# Run:  python gameca_pipeline.py --config gameca.yaml
+# Resume-safe: completed stages are skipped via te_provenance checkpoints (#6).
+#
+# Top-level family / input / reports_dir are injected into every stage unless the
+# stage's own args override them. Stages form a DAG through `depends_on`.
+
+family: LTR5_Hs
+input: loci_with_sequences.csv
+reports_dir: ./reports
+parallel: true      # run independent stages in each wave concurrently
+
+stages:
+  # ── core phylogenetics / age structure (#1 #2 #14) ──
+  - name: phylo
+    script: run_phylo_analysis.py
+    args:
+      subst-rate: 2.2e-9
+      clock-divisor: 2        # LTR family → paired-LTR style age estimate
+      intact-orf-aa: 100
+
+  # ── allele-aware gRNA off-target + Pareto (#3) ──
+  - name: grna_offtarget
+    script: run_grna_offtarget.py
+    args:
+      cas: SpCas9
+      max-mm: 2
+    depends_on: [phylo]
+
+  # ── 3' transduction lineages (#12b) ──
+  - name: transduction
+    script: run_transduction.py
+    args:
+      tail-bp: 150
+      min-shared: 3
+
+  # ── antisense / bidirectional promoter (#13) ──
+  - name: antisense
+    script: run_antisense_promoter.py
+    args:
+      promoter-bp: 200
+
+  # ── CTCF / TAD-boundary (#12) ──
+  # Use preset to auto-download ENCODE CTCF peaks + Rao 2014 TADs:
+  #   ctcf-preset: K562    # choices: K562 GM12878 HeLa-S3
+  #   tads-preset: K562    # choices: K562 GM12878 IMR90
+  # Or supply explicit BED files:
+  #   ctcf: ctcf_peaks.bed
+  #   tads: tad_boundaries.bed
+  - name: ctcf_tad
+    script: run_ctcf_tad.py
+    args:
+      motif-mismatch: 3
+      ctcf-preset: K562
+      tads-preset: K562
+
+  # ── epigenetic overlay (#4) ──
+  # Use preset to auto-download ENCODE H3K9me3 + ATAC + UCSC CpG islands:
+  #   preset: K562    # choices: K562 GM12878 HeLa-S3 IMR-90 H1-hESC
+  # Or supply explicit BED files:
+  #   tracks: [H3K9me3=h3k9me3.bed, ATAC=atac.bed]
+  - name: epigenetic
+    script: run_epigenetic_overlay.py
+    args:
+      preset: K562
+
+  # ── orthologous insertion across species (#5) ──
+  # Use --species to auto-download UCSC liftOver chains:
+  #   species: [panTro6, rheMac10, mm39]
+  # Choices: panTro6 rheMac10 mm39 rn7 canFam6 galGal6 bosTau9
+  - name: ortholog
+    script: run_ortholog_insertion.py
+    args:
+      species: [panTro6, rheMac10, mm39]
+
+  # ── multi-assembly liftover (#7) ──
+  # Use --target-assemblies to auto-download UCSC chains:
+  #   target-assemblies: [hg19, t2t]
+  # t2t resolves to hs1 (T2T-CHM13); choices: hg19 t2t/hs1
+  - name: multiassembly
+    script: run_multiassembly_liftover.py
+    args:
+      source-assembly: hg38
+      target-assemblies: [hg19, t2t]
+
+  # ── protein structure of consensus sequences (#11) — needs ColabFold on HPC ──
+  - name: fold
+    script: run_fold_prediction.py
+    args:
+      per-cluster: true
+      min-aa: 100
+      top-n: 5
+    depends_on: [phylo]
+    continue_on_error: true

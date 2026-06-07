@@ -24,8 +24,12 @@ RUN apt-get update \
         libssl-dev \
         mafft \
         procps \
+        wget \
         zlib1g-dev \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && wget -q http://hgdownload.soe.ucsc.edu/admin/exe/linux.x86_64/liftOver \
+        -O /usr/local/bin/liftOver && chmod +x /usr/local/bin/liftOver \
+        || echo "WARNING: liftOver download failed; ortholog/multiassembly degrade gracefully"
 
 COPY requirements.txt .
 RUN python -m pip install --upgrade pip setuptools wheel \

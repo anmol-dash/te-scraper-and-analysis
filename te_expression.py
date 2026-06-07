@@ -519,6 +519,156 @@ def _compute_stats(df, cl_col, expr_cols, labels, log1p, expr_dir):
     return df_stats
 
 
+# ── 6. Differential expression between clusters ───────────────────────────────
+
+def _de_between_clusters(df, cl_col, expr_cols, log1p, expr_dir):
+    """Pairwise Wilcoxon rank-sum test between all cluster pairs with BH correction.
+
+    For each expression column, tests every ordered pair of clusters (A vs B)
+    using scipy.stats.mannwhitneyu (two-sided).  P-values are corrected across
+    all tests (columns × pairs) using the Benjamini-Hochberg procedure.
+
+    Outputs:
+        de_pairwise.csv     all pairwise results with adjusted p-values
+        de_heatmap.png      −log10(p_adj) heatmap (cluster × cluster, per column sum)
+        de_significant.csv  subset passing p_adj < 0.05
+    """
+    try:
+        from scipy import stats as _stats
+    except ImportError:
+        print("  [SKIP] DE testing requires scipy — install with: pip install scipy")
+        return
+
+    cluster_ids = sorted([c for c in df[cl_col].unique() if c >= 0])
+    if len(cluster_ids) < 2:
+        print("  [SKIP] Need ≥2 clusters for DE testing")
+        return
+
+    pairs = [(a, b) for i, a in enumerate(cluster_ids)
+             for b in cluster_ids[i + 1:]]
+
+    rows = []
+    for col in expr_cols:
+        for cA, cB in pairs:
+            grpA = _apply(df[df[cl_col] == cA][col].dropna().values, log1p)
+            grpB = _apply(df[df[cl_col] == cB][col].dropna().values, log1p)
+            if len(grpA) < 3 or len(grpB) < 3:
+                continue
+            try:
+                stat, pval = _stats.mannwhitneyu(grpA, grpB, alternative="two-sided")
+            except Exception:
+                stat, pval = np.nan, 1.0
+            meanA = float(np.mean(grpA))
+            meanB = float(np.mean(grpB))
+            rows.append({
+                "column":   col,
+                "clusterA": cA,
+                "clusterB": cB,
+                "n_A":      len(grpA),
+                "n_B":      len(grpB),
+                "mean_A":   round(meanA, 4),
+                "mean_B":   round(meanB, 4),
+                "log2fc":   round(np.log2((meanA + 1e-9) / (meanB + 1e-9)), 4),
+                "stat_U":   round(float(stat), 2) if not np.isnan(stat) else None,
+                "p_value":  pval,
+            })
+
+    if not rows:
+        print("  [SKIP] No valid cluster pairs for DE testing")
+        return
+
+    de_df = pd.DataFrame(rows)
+
+    # BH correction across all tests
+    pvals = de_df["p_value"].values
+    n_tests = len(pvals)
+    sorted_idx = np.argsort(pvals)
+    bh_thresh = np.arange(1, n_tests + 1) * 0.05 / n_tests
+    p_adj = np.ones(n_tests)
+    for k in range(n_tests - 1, -1, -1):
+        i = sorted_idx[k]
+        if k == n_tests - 1:
+            p_adj[i] = min(1.0, pvals[i] * n_tests / (k + 1))
+        else:
+            p_adj[i] = min(p_adj[sorted_idx[k + 1]],
+                           pvals[i] * n_tests / (k + 1))
+
+    de_df["p_adj_BH"] = np.round(p_adj, 6)
+    de_df["significant"] = de_df["p_adj_BH"] < 0.05
+
+    de_csv = expr_dir / "de_pairwise.csv"
+    de_df.to_csv(de_csv, index=False)
+    print(f"  Saved de_pairwise.csv  ({len(de_df)} tests, "
+          f"{int(de_df['significant'].sum())} sig at p_adj<0.05)")
+
+    sig_df = de_df[de_df["significant"]].sort_values("p_adj_BH")
+    sig_df.to_csv(expr_dir / "de_significant.csv", index=False)
+    print(f"  Saved de_significant.csv  ({len(sig_df)} rows)")
+
+    # ── Heatmap: average −log10(p_adj) per cluster pair summed over columns ──
+    try:
+        mat = np.zeros((len(cluster_ids), len(cluster_ids)))
+        cid_idx = {cid: i for i, cid in enumerate(cluster_ids)}
+        for _, row_ in de_df.iterrows():
+            i_ = cid_idx[row_["clusterA"]]
+            j_ = cid_idx[row_["clusterB"]]
+            val = -np.log10(max(row_["p_adj_BH"], 1e-300))
+            mat[i_, j_] = max(mat[i_, j_], val)
+            mat[j_, i_] = max(mat[j_, i_], val)
+
+        fig, ax = plt.subplots(figsize=(max(5, len(cluster_ids) * 0.9 + 2),
+                                         max(4, len(cluster_ids) * 0.9 + 1.5)))
+        im = ax.imshow(mat, aspect="auto", cmap="Reds")
+        plt.colorbar(im, ax=ax, label=r"$-\log_{10}(p_{\mathrm{adj}})$", shrink=0.8)
+        ticks = range(len(cluster_ids))
+        ax.set_xticks(ticks); ax.set_yticks(ticks)
+        lbl = [f"C{c}" for c in cluster_ids]
+        ax.set_xticklabels(lbl, fontsize=10)
+        ax.set_yticklabels(lbl, fontsize=10)
+        ax.set_title("Differential Expression Between Clusters\n"
+                     r"($-\log_{10}$ BH-adjusted Wilcoxon p-value)",
+                     fontweight="bold")
+        for i_ in range(len(cluster_ids)):
+            for j_ in range(len(cluster_ids)):
+                if i_ != j_:
+                    ax.text(j_, i_, f"{mat[i_, j_]:.1f}", ha="center", va="center",
+                            fontsize=8,
+                            color="white" if mat[i_, j_] > mat.max() * 0.6 else "black")
+        plt.tight_layout()
+        hm_path = expr_dir / "de_heatmap.png"
+        plt.savefig(hm_path, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"  Saved de_heatmap.png")
+    except Exception as e:
+        print(f"  WARNING: DE heatmap failed: {e}")
+
+    # ── Volcano-style plot: log2FC vs −log10(p_adj), all columns combined ────
+    try:
+        sig_mask = de_df["significant"].values
+        fig2, ax2 = plt.subplots(figsize=(8, 5))
+        ax2.scatter(de_df.loc[~sig_mask, "log2fc"],
+                    -np.log10(de_df.loc[~sig_mask, "p_adj_BH"].clip(lower=1e-300)),
+                    s=12, alpha=0.4, color="#aaaaaa", label="n.s.")
+        ax2.scatter(de_df.loc[sig_mask, "log2fc"],
+                    -np.log10(de_df.loc[sig_mask, "p_adj_BH"].clip(lower=1e-300)),
+                    s=18, alpha=0.7, color="#E8604C", label=f"sig (n={sig_mask.sum()})")
+        ax2.axhline(-np.log10(0.05), color="black", linestyle="--", linewidth=1,
+                    label="p_adj = 0.05")
+        ax2.axvline(0, color="gray", linestyle="-", linewidth=0.5)
+        ax2.set_xlabel("log₂ fold change (cluster A / B)")
+        ax2.set_ylabel(r"$-\log_{10}(p_{\mathrm{adj}})$")
+        ax2.set_title(f"DE Volcano — {df.shape[0]:,} loci, all columns × all cluster pairs",
+                      fontweight="bold")
+        ax2.legend(fontsize=9)
+        ax2.spines[["top","right"]].set_visible(False)
+        plt.tight_layout()
+        plt.savefig(expr_dir / "de_volcano.png", dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"  Saved de_volcano.png")
+    except Exception as e:
+        print(f"  WARNING: DE volcano failed: {e}")
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def run_expression_analysis(input_csv, out_dir, stage_cols=None, stage_labels=None,
@@ -583,6 +733,9 @@ def run_expression_analysis(input_csv, out_dir, stage_cols=None, stage_labels=No
 
     print("\n  --- Extended stats ---")
     _compute_stats(df, cl_col, expr_cols, labels, log1p, expr_dir)
+
+    print("\n  --- Differential expression between clusters ---")
+    _de_between_clusters(df, cl_col, expr_cols, log1p, expr_dir)
 
     return {
         "expr_dir":   str(expr_dir),

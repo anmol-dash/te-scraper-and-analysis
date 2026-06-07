@@ -4,6 +4,7 @@
 numpy>=1.24,<2.0
 pandas>=2.0,<3.0
 scipy>=1.10,<2.0
+statsmodels>=0.14,<1.0
 
 # Web requests / parsing
 requests>=2.31,<3.0
@@ -27,6 +28,9 @@ CIAlign>=1.0,<2.0
 
 # SSH client for HPC mode
 paramiko>=3.4
+
+# Declarative pipeline config (gameca_pipeline.py)
+PyYAML>=6.0
 
 # Build helpers
 setuptools>=68.0

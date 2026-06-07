@@ -66,6 +66,15 @@ _UPDATABLE_SCRIPTS = [
     "te_prep.py", "te_genome.py", "te_clustering.py",
     "te_primers.py", "te_alignment.py", "te_motif.py",
     "te_go.py", "te_expression.py", "te_enrichment.py",
+    "run_fold_prediction.py",
+    # ── standout analysis modules ──
+    "run_phylo_analysis.py", "run_grna_offtarget.py", "run_transduction.py",
+    "run_antisense_promoter.py", "run_ctcf_tad.py", "run_epigenetic_overlay.py",
+    "run_ortholog_insertion.py", "run_multiassembly_liftover.py",
+    "run_motif_gain.py", "te_motif_gain.py",
+    # ── shared libs + infra ──
+    "te_overlay.py", "te_scheduler.py", "te_provenance.py",
+    "gameca_pipeline.py", "gameca.yaml",
     "requirements.txt",
 ]
 

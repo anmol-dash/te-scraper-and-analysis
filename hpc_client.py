@@ -1403,16 +1403,19 @@ echo "  Input data: OK ({quoted})"'''
         family = self.params["FAMILY_NAME"].lower()
         self.remote_output_dir = _remote_path(self.remote_work_dir, self.params['BASE_OUT_DIR']) + f"/{family}"
 
+        # Pre-create remote output directory so logs land inside it
+        self.run_command(f"mkdir -p {self.remote_output_dir}", timeout=20)
+
         # Create bsub job script
         import datetime as _dt
         _ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
         job_name = f"te_analysis_{self.params['FAMILY_NAME']}"
         job_script    = f"{self.remote_work_dir}/te_analysis_job_{_ts}.sh"
-        job_out       = f"{self.remote_work_dir}/te_analysis_job_{_ts}.out"
-        job_err       = f"{self.remote_work_dir}/te_analysis_job_{_ts}.err"
         job_done      = f"{self.remote_work_dir}/te_analysis_job_{_ts}.done"
         job_info      = f"{self.remote_work_dir}/te_analysis_job_{_ts}.info"
-        job_error_log = f"{self.remote_work_dir}/te_analysis_job_{_ts}.error.log"
+        job_out       = f"{self.remote_output_dir}/pipeline.out"
+        job_err       = f"{self.remote_output_dir}/pipeline.err"
+        job_error_log = f"{self.remote_output_dir}/pipeline_error.log"
 
         # Build the scheduler-agnostic job script
         sched_header = self._job_script_header(job_name, job_out, job_err)
@@ -1633,12 +1636,28 @@ exit $EXIT_CODE
         return True
 
     def _submit_job_cmd_dep(self, job_script, dep_job_id=None):
-        """Return the scheduler command to submit a job, optionally after dep_job_id completes."""
+        """Return the scheduler command to submit a job, optionally after dep_job_id completes.
+
+        dep_job_id may be a single job-id string or a list/tuple of job-id strings for
+        multi-dependency (job runs after ALL listed jobs complete successfully).
+        """
+        if isinstance(dep_job_id, (list, tuple)):
+            dep_ids = [str(d) for d in dep_job_id if d]
+        elif dep_job_id:
+            dep_ids = [str(dep_job_id)]
+        else:
+            dep_ids = []
+
         if self.scheduler == "slurm":
-            dep = f" --dependency=afterok:{dep_job_id}" if dep_job_id else ""
+            dep = f" --dependency=afterok:{':'.join(dep_ids)}" if dep_ids else ""
             return f"sbatch{dep} {job_script}"
         if self.scheduler == "lsf":
-            dep = f" -w 'done({dep_job_id})'" if dep_job_id else ""
+            if len(dep_ids) == 1:
+                dep = f" -w 'done({dep_ids[0]})'"
+            elif dep_ids:
+                dep = " -w '" + " && ".join(f"done({d})" for d in dep_ids) + "'"
+            else:
+                dep = ""
             return f"bsub{dep} < {job_script}"
         raise RuntimeError("Scheduler was not detected.")
 
@@ -1765,6 +1784,30 @@ exit $EXIT_CODE
             if jid:
                 job_infos.append({"stage": "primers", "job_id": jid})
                 running += 1
+
+        # Job 5: Stage 11 standout analysis — depends on ALL parallel jobs completing.
+        # Collects job IDs from Jobs 2-4 (whichever were actually submitted).
+        parallel_jids = [ji["job_id"] for ji in job_infos if ji["stage"] != "clustering"]
+        if parallel_jids and running < max_jobs:
+            # If no parallel jobs were submitted (all skipped), depend on Job 1.
+            dep_ids = parallel_jids if parallel_jids else [jid1]
+            jid = self._submit_stage_job(
+                "stage5_standout",
+                ["--resume-from", "standout"],
+                dep_job_id=dep_ids,
+            )
+            if jid:
+                job_infos.append({"stage": "standout", "job_id": jid})
+                running += 1
+        elif running < max_jobs:
+            # All main stages skipped — run standout after clustering job
+            jid = self._submit_stage_job(
+                "stage5_standout",
+                ["--resume-from", "standout"],
+                dep_job_id=jid1,
+            )
+            if jid:
+                job_infos.append({"stage": "standout", "job_id": jid})
 
         print(f"\n[Parallel] {len(job_infos)} jobs submitted.", flush=True)
         return job_infos

@@ -72,10 +72,12 @@ _DEFAULT_RMSK = os.environ.get("TE_RMSK_DIR", str(Path(_DEFAULT_BASE) / "rmsk"))
 
 # Known genome FASTA paths (env-variable overridable)
 GENOME_FA = {
-    "hg38": os.environ.get("HG38_FA", ""),
-    "hg19": os.environ.get("HG19_FA", ""),
-    "mm10": os.environ.get("MM10_FA", ""),
-    "mm39": os.environ.get("MM39_FA", ""),
+    "hg38":  os.environ.get("HG38_FA",  ""),
+    "hg19":  os.environ.get("HG19_FA",  ""),
+    "mm10":  os.environ.get("MM10_FA",  ""),
+    "mm39":  os.environ.get("MM39_FA",  ""),
+    "hs1":   os.environ.get("HS1_FA",   ""),   # T2T-CHM13v2.0
+    "chm13": os.environ.get("HS1_FA",   ""),   # alias
 }
 
 # UCSC rmsk download URLs
@@ -84,6 +86,9 @@ RMSK_URLS = {
     "hg19": "https://hgdownload.soe.ucsc.edu/goldenPath/hg19/database/rmsk.txt.gz",
     "mm10": "https://hgdownload.soe.ucsc.edu/goldenPath/mm10/database/rmsk.txt.gz",
     "mm39": "https://hgdownload.soe.ucsc.edu/goldenPath/mm39/database/rmsk.txt.gz",
+    # T2T-CHM13v2.0 (hs1 UCSC identifier)
+    "hs1":   "https://hgdownload.soe.ucsc.edu/goldenPath/hs1/database/rmsk.txt.gz",
+    "chm13": "https://hgdownload.soe.ucsc.edu/goldenPath/hs1/database/rmsk.txt.gz",
 }
 
 # Dfam REST API base — per-family annotations, no bulk file download needed
@@ -91,8 +96,9 @@ DFAM_API_BASE = "https://www.dfam.org/api"
 
 # Assembly ID mapping for the Dfam API
 DFAM_ASSEMBLY_IDS = {
-    "hg38": "hg38", "hg19": "hg19",
-    "mm10": "mm10", "mm39": "mm39",
+    "hg38":  "hg38", "hg19": "hg19",
+    "mm10":  "mm10", "mm39": "mm39",
+    "hs1":   "hs1",  "chm13": "hs1",
 }
 
 # rmsk.txt.gz column indices (tab-separated, no header)
@@ -617,6 +623,7 @@ def fetch_sequences_ucsc(df, assembly="hg38", n_workers=10):
     _concurrency = min(n_workers, 3)
     sem = threading.Semaphore(_concurrency)
     _print_lock = threading.Lock()
+    _abort = threading.Event()
 
     def _log(msg):
         with _print_lock:
@@ -644,7 +651,7 @@ def fetch_sequences_ucsc(df, assembly="hg38", n_workers=10):
                 if "error" in res:
                     raise ValueError(res["error"])
                 dna = res.get("dna", "")
-                _log(f"    [{i}] OK  len={len(dna)}  seq={dna}")
+                _log(f"    [{i}] OK  len={len(dna)}")
                 return i, _orient_sequence(dna, row), url
             except Exception as exc:
                 _log(f"    [{i}] attempt {attempt+1}/5 FAILED: {type(exc).__name__}: {exc}")

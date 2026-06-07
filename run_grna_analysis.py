@@ -1,0 +1,789 @@
+#!/usr/bin/env python3
+"""
+run_grna_analysis.py --- GAMECA gRNA Design Analysis
+Expression-weighted CRISPR gRNA design for TE families.
+
+Implements PAM-aware candidate generation, exact and mismatch-tolerant coverage,
+expression-weighted coverage maximisation (EWMC), on-target quality scoring,
+and a full visualisation suite.
+
+Input CSV must have columns: Seq, Cluster, and one or more numeric expression columns.
+Default example: mt2_mm_ultracombo_countsv4.csv
+
+Usage:
+    python run_grna_analysis.py \
+        --input /path/to/mt2_mm_ultracombo_countsv4.csv \
+        --reports-dir /home/amodz/anmol/reports4 \
+        [--family MT2_Mm] \
+        [--grna-len 20] \
+        [--cas SpCas9]
+
+Output figures (saved as PDFs to --reports-dir):
+    fig_grna_coverage.pdf       4-panel: distribution / seq-vs-expr scatter /
+                                mismatch curve / per-cluster heatmap
+    fig_grna_positional.pdf     PAM-site position density in TE sequences
+    fig_grna_candidates.pdf     Top gRNA candidates ranked side-by-side
+
+Output text:
+    grna_measured_values.tex    LaTeX macros for the report
+    grna_report.txt             Human-readable numbers to paste
+    grna_candidates.csv         Full ranked candidate table
+"""
+
+import argparse
+import datetime
+import os
+import sys
+import warnings
+from collections import defaultdict
+from pathlib import Path
+
+warnings.filterwarnings("ignore")
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.patches as mpatches
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
+# ── constants ─────────────────────────────────────────────────────────────────
+
+BASES = "ACGT"
+
+_PAM_TYPES = {
+    "SpCas9":    ("NGG",  3),   # 3' PAM, 3 bp
+    "SaCas9":    ("NNGRRT", 6), # 3' PAM, 6 bp  (R=A/G, T=T)
+    "Cas12a":    ("TTTV",  4),  # 5' PAM, 4 bp  (V=A/C/G)
+    "SpRY":      ("NRN",  3),   # relaxed PAM
+}
+
+_NON_EXPR = {
+    "unnamed: 0","chromosome","start","stop","seq","te_id","te_name",
+    "cluster","pca_x","pca_y","umap_x","umap_y","tsne_x","tsne_y",
+    "chr","length","gc_content","_total_expr",
+}
+
+_PALETTE = [
+    "#4C9BE8","#E8604C","#2ECC71","#9B59B6","#F39C12",
+    "#1ABC9C","#E74C3C","#3498DB","#E67E22","#8E44AD",
+]
+
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+def _pp(msg):
+    ts = datetime.datetime.now().strftime("%H:%M:%S")
+    print(f"[{ts}] {msg}", flush=True)
+
+
+def _rc(seq):
+    comp = str.maketrans("ACGTacgt", "TGCAtgca")
+    return seq.translate(comp)[::-1]
+
+
+def _auto_expr_cols(df):
+    out = []
+    for c in df.columns:
+        if c.lower().strip() in _NON_EXPR:
+            continue
+        if pd.api.types.is_numeric_dtype(df[c]):
+            out.append(c)
+    return out
+
+
+# ── PAM matching ──────────────────────────────────────────────────────────────
+
+def _matches_pam(seq3, pam_pattern):
+    """Return True if seq3 matches the IUPAC PAM pattern."""
+    _IUPAC = {
+        "N": "ACGT", "R": "AG", "Y": "CT", "S": "GC", "W": "AT",
+        "K": "GT",   "M": "AC", "B": "CGT","D": "AGT","H": "ACT",
+        "V": "ACG",  "A": "A",  "C": "C",  "G": "G",  "T": "T",
+    }
+    if len(seq3) != len(pam_pattern):
+        return False
+    return all(s in _IUPAC.get(p, p) for s, p in zip(seq3, pam_pattern))
+
+
+def extract_pam_grnas(seq, grna_len=20, cas="SpCas9"):
+    """Extract all gRNA candidates adjacent to valid PAM sites on both strands.
+
+    Returns list of (grna_seq, strand, start_pos) tuples, where start_pos is
+    the position of the protospacer start in the original sequence.
+
+    SpCas9 (NGG, 3' PAM):
+        + strand: 5'-[protospacer]-[NGG]-3' → gRNA = protospacer
+        - strand: [CCN]-[protospacer_rc] on + strand → gRNA = RC(protospacer_rc)
+    """
+    seq = seq.upper()
+    L = len(seq)
+    pam_pattern, pam_len = _PAM_TYPES.get(cas, ("NGG", 3))
+    results = []
+
+    if cas in ("SpCas9", "SpRY"):
+        # 3' PAM: protospacer then PAM
+        # + strand
+        for i in range(L - grna_len - pam_len + 1):
+            pam = seq[i + grna_len : i + grna_len + pam_len]
+            if len(pam) == pam_len and _matches_pam(pam, pam_pattern):
+                g = seq[i : i + grna_len]
+                if "N" not in g:
+                    results.append((g, "+", i))
+        # - strand: [CCN] on + strand means NGG on - strand
+        # PAM complement = last pam_len bp before the protospacer rc on + strand
+        # fwd: 5'-...[RC-PAM-complement][protospacer_complement]...-3'
+        rc_pam = _rc(pam_pattern)   # complement (not full RC) for PAM on - strand
+        for i in range(pam_len, L - grna_len + 1):
+            pam_c = seq[i - pam_len : i]          # should equal RC of PAM pattern
+            # Direct check: is seq[i-pam_len:i] the reverse complement of any NGG?
+            # For NGG: RC is CCN, reversed = NCC. Actually: RC("NGG") = "CCN" reversed = "NCC"
+            # But the PAM on the - strand reads 5'→3' as NGG, which on + strand is CCN reversed
+            # On + strand (5'→3') the PAM complement is: seq[j:j+pam_len] = complement(pam reversed)
+            # For NGG: the reverse complement is CCN, so we look for seq[j:j+pam_len] ~ CCN
+            # i.e., seq[j]=='C' and seq[j+1]=='C' for NGG
+            if pam_len == 3 and seq[i-3] == "C" and seq[i-2] == "C":
+                proto_c = seq[i : i + grna_len]
+                if len(proto_c) == grna_len and "N" not in proto_c:
+                    results.append((_rc(proto_c), "-", i))
+
+    elif cas == "Cas12a":
+        # 5' PAM: [TTTV]-[protospacer] on + strand; gRNA=protospacer
+        # + strand
+        for i in range(pam_len, L - grna_len + 1):
+            pam = seq[i - pam_len : i]
+            if len(pam) == pam_len and _matches_pam(pam, pam_pattern):
+                g = seq[i : i + grna_len]
+                if "N" not in g:
+                    results.append((g, "+", i))
+        # - strand
+        for i in range(L - grna_len - pam_len + 1):
+            pam_c = seq[i + grna_len : i + grna_len + pam_len]
+            # TTTV on - strand = BAAA on + strand (reversed complement)
+            if _matches_pam(_rc(pam_c)[::-1], pam_pattern):
+                g = _rc(seq[i : i + grna_len])
+                if "N" not in g:
+                    results.append((g, "-", i))
+
+    return results
+
+
+# ── on-target quality scoring ─────────────────────────────────────────────────
+
+def on_target_score(grna: str) -> float:
+    """Quick on-target quality estimate (0–1) based on known gRNA features.
+
+    Based on published guidelines from Doench et al. 2016 and Moreno-Mateos 2015:
+      - GC content 40–70%: preferred
+      - No runs of 4+ same nucleotide (homopolymers)
+      - Seed region (last 12 bp before PAM): moderate GC preferred
+      - No T at the first position (transcriptional termination risk)
+      - G at position 20 (immediately 5' of PAM) slightly preferred
+    """
+    g = grna.upper()
+    n = len(g)
+    score = 1.0
+
+    # GC content
+    gc = (g.count("G") + g.count("C")) / n
+    if gc < 0.25 or gc > 0.80:
+        score *= 0.5
+    elif gc < 0.40 or gc > 0.70:
+        score *= 0.8
+
+    # Homopolymer runs
+    for base in "ACGT":
+        if base * 4 in g:
+            score *= 0.6
+            break
+
+    # No T at position 0 (U in gRNA → PolIII termination)
+    if g[0] == "T":
+        score *= 0.85
+
+    # Seed region GC (last 12 bp, positions 8–19 for 20-mer)
+    seed = g[8:] if n >= 20 else g
+    seed_gc = (seed.count("G") + seed.count("C")) / len(seed)
+    if seed_gc < 0.30 or seed_gc > 0.80:
+        score *= 0.75
+
+    return round(score, 4)
+
+
+# ── k-mer index ───────────────────────────────────────────────────────────────
+
+def build_kmer_index_20(df, grna_len=20):
+    """Build {kmer: set(row_indices)} for all 20-mers (both strands) in df['Seq'].
+
+    Used for mismatch-tolerant coverage look-ups.
+    """
+    kmer_to_rows = defaultdict(set)
+    seqs = df["Seq"].astype(str).str.upper()
+    n = len(seqs)
+    for idx, (ridx, seq) in enumerate(seqs.items()):
+        if (idx + 1) % 500 == 0:
+            _pp(f"    Indexing {idx+1}/{n}...")
+        L = len(seq)
+        seen = set()
+        for i in range(L - grna_len + 1):
+            km = seq[i : i + grna_len]
+            if "N" not in km and km not in seen:
+                kmer_to_rows[km].add(ridx)
+                seen.add(km)
+            # Also reverse complement
+            km_rc = _rc(km)
+            if "N" not in km_rc and km_rc not in seen:
+                kmer_to_rows[km_rc].add(ridx)
+                seen.add(km_rc)
+    return kmer_to_rows
+
+
+# ── mismatch-tolerant coverage ────────────────────────────────────────────────
+
+def _1mm_variants(grna: str) -> list:
+    """Return all single-mismatch (Hamming-1) variants of grna."""
+    out = []
+    for i, c in enumerate(grna):
+        for b in BASES:
+            if b != c:
+                out.append(grna[:i] + b + grna[i+1:])
+    return out
+
+
+def coverage_with_mismatches(grna: str, kmer_to_rows: dict,
+                              max_mm: int = 1) -> set:
+    """Return set of locus indices covered by grna within max_mm mismatches.
+
+    Uses variant enumeration:
+      d=0: O(1) dict look-up
+      d=1: 60 single-mismatch variants × O(1) = O(60)
+      d=2: 1710 two-mismatch variants × O(1) = O(1710)
+    Also enforces a seed-region constraint: the final 12 bp (seed region,
+    adjacent to PAM) must match exactly to avoid spurious off-target counting.
+    """
+    covered = set(kmer_to_rows.get(grna, set()))
+
+    if max_mm >= 1:
+        seed = grna[-12:]   # last 12 bp = seed region (closest to PAM)
+        for v in _1mm_variants(grna):
+            if v[-12:] == seed:   # seed must match exactly
+                covered |= kmer_to_rows.get(v, set())
+
+    if max_mm >= 2:
+        for v1 in _1mm_variants(grna):
+            if v1[-12:] != grna[-12:]:
+                continue  # skip seed-region mismatches
+            for v2 in _1mm_variants(v1):
+                if v2[-12:] == grna[-12:]:
+                    covered |= kmer_to_rows.get(v2, set())
+
+    return covered
+
+
+# ── candidate scoring ─────────────────────────────────────────────────────────
+
+def score_candidates(df, grna_len=20, cas="SpCas9", kmer_index=None,
+                     expr_col="_total_expr") -> pd.DataFrame:
+    """For each unique PAM-adjacent gRNA candidate, compute coverage metrics.
+
+    Returns DataFrame with columns:
+        grna, gc, on_target_score,
+        exact_cov, exact_expr_cov,
+        mm1_cov, mm1_expr_cov,
+        pct_seq_cov, pct_expr_cov,
+        rows_exact (frozenset of locus indices)
+    """
+    _pp(f"  Extracting PAM-adjacent gRNA candidates ({cas}, len={grna_len})...")
+    seqs = df["Seq"].astype(str).str.upper().tolist()
+    total_expr = df[expr_col].values
+
+    # Collect all unique candidates + their initial exact coverage from index
+    cand_to_exact_rows = defaultdict(set)  # grna → set of row indices (exact)
+    cand_to_positions = defaultdict(list)  # grna → list of (row_idx, strand, pos)
+
+    n = len(seqs)
+    for ridx, seq in enumerate(seqs):
+        if (ridx + 1) % 500 == 0:
+            _pp(f"    {ridx+1}/{n} sequences processed...")
+        for grna, strand, pos in extract_pam_grnas(seq, grna_len=grna_len, cas=cas):
+            cand_to_positions[grna].append((ridx, strand, pos))
+
+    _pp(f"  {len(cand_to_positions):,} unique PAM-adjacent gRNA candidates")
+
+    # Exact coverage from the per-candidate occurrence sets
+    for grna, hits in cand_to_positions.items():
+        cand_to_exact_rows[grna] = frozenset(ridx for ridx, _, _ in hits)
+
+    n_loci = len(df)
+    total_family_expr = float(total_expr.sum())
+
+    records = []
+    for grna, exact_rows in cand_to_exact_rows.items():
+        gc = (grna.count("G") + grna.count("C")) / len(grna)
+        ots = on_target_score(grna)
+        e_cov = int(len(exact_rows))
+        e_expr = float(sum(total_expr[r] for r in exact_rows))
+
+        # 1-mismatch coverage from global k-mer index
+        mm1_rows = set()
+        if kmer_index is not None:
+            mm1_rows = coverage_with_mismatches(grna, kmer_index, max_mm=1)
+        mm1_cov  = len(mm1_rows)
+        mm1_expr = float(sum(total_expr[r] for r in mm1_rows))
+
+        records.append({
+            "grna":           grna,
+            "gc":             round(gc, 3),
+            "on_target_score": ots,
+            "exact_cov":      e_cov,
+            "exact_expr_cov": round(e_expr, 2),
+            "mm1_cov":        mm1_cov,
+            "mm1_expr_cov":   round(mm1_expr, 2),
+            "pct_seq_cov":    round(100 * e_cov / max(n_loci, 1), 2),
+            "pct_expr_cov":   round(100 * e_expr / max(total_family_expr, 1e-9), 2),
+            "rows_exact":     exact_rows,
+        })
+
+    df_cands = pd.DataFrame(records)
+    if not df_cands.empty:
+        df_cands.sort_values("exact_expr_cov", ascending=False, inplace=True)
+        df_cands.reset_index(drop=True, inplace=True)
+
+    _pp(f"  Scoring done: {len(df_cands):,} candidates")
+    return df_cands
+
+
+# ── greedy multi-gRNA set cover ───────────────────────────────────────────────
+
+def greedy_grna_set(df_cands: pd.DataFrame, df: pd.DataFrame,
+                    n_guides: int = 5,
+                    mode: str = "expression") -> pd.DataFrame:
+    """Iterative greedy maximum-coverage gRNA selection.
+
+    Greedily adds gRNAs that maximise the marginal coverage of uncovered loci.
+    mode='expression' → maximise uncovered expression
+    mode='sequence'   → maximise uncovered locus count
+
+    Returns DataFrame of selected gRNAs with cumulative coverage stats.
+    """
+    expr_col = "_total_expr"
+    total_expr = df[expr_col].values if expr_col in df.columns else np.ones(len(df))
+
+    uncovered = set(range(len(df)))
+    selected = []
+    cumulative_loci = 0
+    cumulative_expr = 0.0
+
+    for _ in range(n_guides):
+        best_grna = None
+        best_score = -1.0
+        best_rows = set()
+
+        for _, row in df_cands.iterrows():
+            marginal = set(row["rows_exact"]) & uncovered
+            if not marginal:
+                continue
+            if mode == "expression":
+                score = sum(total_expr[r] for r in marginal)
+            else:
+                score = len(marginal)
+            if score > best_score:
+                best_score = score
+                best_grna = row["grna"]
+                best_rows = marginal
+
+        if best_grna is None:
+            break
+
+        marginal_loci = len(best_rows)
+        marginal_expr = float(sum(total_expr[r] for r in best_rows))
+        cumulative_loci += marginal_loci
+        cumulative_expr += marginal_expr
+        uncovered -= best_rows
+        selected.append({
+            "rank":            len(selected) + 1,
+            "grna":            best_grna,
+            "marginal_loci":   marginal_loci,
+            "marginal_expr":   round(marginal_expr, 2),
+            "cumulative_loci": cumulative_loci,
+            "cumulative_expr": round(cumulative_expr, 2),
+            "pct_loci":        round(100 * cumulative_loci / len(df), 2),
+            "pct_expr":        round(100 * cumulative_expr / max(total_expr.sum(), 1e-9), 2),
+        })
+
+    return pd.DataFrame(selected)
+
+
+# ── figures ───────────────────────────────────────────────────────────────────
+
+def fig_grna_coverage(df_cands: pd.DataFrame, df: pd.DataFrame,
+                      top_grna_seq: str, top_grna_expr: str,
+                      family: str, out_path: Path):
+    """4-panel main results figure."""
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle(f"{family} --- gRNA Coverage Analysis", fontsize=14, fontweight="bold")
+
+    # ── Panel a: seq coverage distribution ───────────────────────────────────
+    ax = axes[0, 0]
+    ax.hist(df_cands["pct_seq_cov"], bins=60, color="#4C9BE8",
+            edgecolor="white", linewidth=0.4, alpha=0.85)
+    top_val = df_cands["pct_seq_cov"].max()
+    ax.axvline(top_val, color="#E8604C", linestyle="--", linewidth=1.5,
+               label=f"Best: {top_val:.1f}%")
+    ax.set_xlabel("Sequence coverage (%)")
+    ax.set_ylabel("Number of gRNA candidates")
+    ax.set_title("(a) Sequence coverage distribution", fontweight="bold")
+    ax.legend(fontsize=9)
+    ax.spines[["top","right"]].set_visible(False)
+
+    # ── Panel b: seq coverage vs expression coverage scatter ─────────────────
+    ax = axes[0, 1]
+    x = df_cands["pct_seq_cov"].values
+    y = df_cands["pct_expr_cov"].values
+    ax.scatter(x, y, s=3, alpha=0.3, color="#9B59B6", rasterized=True)
+    # Highlight top by each metric
+    best_seq  = df_cands.loc[df_cands["pct_seq_cov"].idxmax()]
+    best_expr = df_cands.loc[df_cands["pct_expr_cov"].idxmax()]
+    ax.scatter(best_seq["pct_seq_cov"], best_seq["pct_expr_cov"],
+               s=80, color="#E8604C", zorder=5, label="Best by seq. cov.")
+    ax.scatter(best_expr["pct_seq_cov"], best_expr["pct_expr_cov"],
+               s=80, color="#2ECC71", zorder=5, label="Best by expr. cov.")
+    corr = np.corrcoef(x, y)[0, 1]
+    ax.set_xlabel("Sequence coverage (%)")
+    ax.set_ylabel("Expression coverage (%)")
+    ax.set_title(f"(b) Seq. vs expr. coverage  (r = {corr:.3f})", fontweight="bold")
+    ax.legend(fontsize=8)
+    ax.spines[["top","right"]].set_visible(False)
+
+    # ── Panel c: mismatch tolerance curve for top gRNA ────────────────────────
+    ax = axes[1, 0]
+    _pp("  Computing mismatch tolerance curve (may take ~30s)...")
+    kmer_idx = build_kmer_index_20(df.head(min(len(df), 1000)))  # subsample for speed
+    top_g = best_expr["grna"]
+    total_expr_sum = df["_total_expr"].sum()
+    mm_results = []
+    for mm in range(4):
+        rows = coverage_with_mismatches(top_g, kmer_idx, max_mm=mm)
+        cov_pct  = 100 * len(rows) / max(len(df), 1)
+        expr_sum = df["_total_expr"].iloc[list(rows)].sum() if rows else 0.0
+        expr_pct = 100 * expr_sum / max(total_expr_sum, 1e-9)
+        mm_results.append({"mm": mm, "cov_pct": cov_pct, "expr_pct": expr_pct})
+    mm_df = pd.DataFrame(mm_results)
+    ax.plot(mm_df["mm"], mm_df["cov_pct"], "o-", color="#4C9BE8",
+            linewidth=2, markersize=7, label="Seq. coverage")
+    ax.plot(mm_df["mm"], mm_df["expr_pct"], "s-", color="#E8604C",
+            linewidth=2, markersize=7, label="Expr. coverage")
+    ax.set_xlabel("Allowed mismatches (non-seed region)")
+    ax.set_ylabel("Coverage (%)")
+    ax.set_title("(c) Mismatch tolerance --- best EWC gRNA", fontweight="bold")
+    ax.legend(fontsize=9)
+    ax.set_xticks([0, 1, 2, 3])
+    ax.spines[["top","right"]].set_visible(False)
+    ax.yaxis.grid(True, linestyle="--", alpha=0.35)
+
+    # ── Panel d: per-cluster coverage heatmap ────────────────────────────────
+    ax = axes[1, 1]
+    cluster_col = "Cluster" if "Cluster" in df.columns else "cluster"
+    clusters = sorted(c for c in df[cluster_col].unique() if c >= 0)
+    top5_grnas = df_cands.head(5)["grna"].tolist()
+
+    heat = np.zeros((len(top5_grnas), len(clusters)))
+    for gi, g in enumerate(top5_grnas):
+        rows_g = set(df_cands.loc[df_cands["grna"] == g, "rows_exact"].values[0])
+        for ci, cl in enumerate(clusters):
+            cl_rows = set(df[df[cluster_col] == cl].index.tolist())
+            if cl_rows:
+                heat[gi, ci] = 100 * len(rows_g & cl_rows) / len(cl_rows)
+
+    im = ax.imshow(heat, aspect="auto", cmap="Blues", vmin=0, vmax=100)
+    ax.set_xticks(range(len(clusters)))
+    ax.set_xticklabels([f"C{c}" for c in clusters], fontsize=9)
+    ax.set_yticks(range(len(top5_grnas)))
+    ax.set_yticklabels([f"{g[:12]}…" for g in top5_grnas], fontsize=8,
+                       fontfamily="monospace")
+    plt.colorbar(im, ax=ax, label="% cluster loci covered", shrink=0.85)
+    ax.set_title("(d) Top-5 gRNAs × cluster coverage (%)", fontweight="bold")
+    for gi in range(len(top5_grnas)):
+        for ci in range(len(clusters)):
+            ax.text(ci, gi, f"{heat[gi,ci]:.0f}", ha="center", va="center",
+                    fontsize=7, color="black" if heat[gi,ci] < 60 else "white")
+
+    plt.tight_layout()
+    plt.savefig(out_path, bbox_inches="tight")
+    plt.close()
+    _pp(f"  Saved {out_path}")
+    return corr, mm_df
+
+
+def fig_grna_positional(df: pd.DataFrame, grna_len=20, cas="SpCas9",
+                        family="FAMILY", out_path: Path = None):
+    """PAM-site density across the sequence length of a TE family."""
+    seqs = df["Seq"].astype(str).str.upper().tolist()
+    # Normalise positions to [0, 1) relative to sequence length
+    positions_fwd, positions_rev = [], []
+    for seq in seqs:
+        L = len(seq)
+        if L < grna_len + 3:
+            continue
+        for grna, strand, pos in extract_pam_grnas(seq, grna_len=grna_len, cas=cas):
+            frac = pos / L
+            if strand == "+":
+                positions_fwd.append(frac)
+            else:
+                positions_rev.append(frac)
+
+    fig, axes = plt.subplots(2, 1, figsize=(12, 7), sharex=True)
+    fig.suptitle(f"{family} --- PAM Site Positional Density ({cas})",
+                 fontsize=13, fontweight="bold")
+
+    bins = np.linspace(0, 1, 51)
+    for ax, pos, label, color in [
+        (axes[0], positions_fwd, "+ strand gRNAs", "#4C9BE8"),
+        (axes[1], positions_rev, "- strand gRNAs", "#E8604C"),
+    ]:
+        if pos:
+            ax.hist(pos, bins=bins, color=color, edgecolor="white",
+                    linewidth=0.4, alpha=0.85, density=True)
+        ax.set_ylabel("PAM site density")
+        ax.set_title(label, fontweight="bold")
+        ax.spines[["top","right"]].set_visible(False)
+        ax.yaxis.grid(True, linestyle="--", alpha=0.35)
+        ax.set_axisbelow(True)
+
+    axes[1].set_xlabel("Relative position in sequence (0 = 5′, 1 = 3′)")
+    plt.tight_layout()
+    plt.savefig(out_path, bbox_inches="tight")
+    plt.close()
+    _pp(f"  Saved {out_path}")
+    return len(positions_fwd) + len(positions_rev)
+
+
+def fig_grna_candidates(df_cands: pd.DataFrame, family: str, out_path: Path):
+    """Dual-ranked barplot: top 10 by sequence coverage vs top 10 by expression coverage."""
+    top_seq  = df_cands.nlargest(10, "pct_seq_cov")
+    top_expr = df_cands.nlargest(10, "pct_expr_cov")
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    fig.suptitle(f"{family} --- Top gRNA Candidates", fontsize=14, fontweight="bold")
+
+    for ax, df_top, metric, color, title, col in [
+        (axes[0], top_seq,  "pct_seq_cov",  "#4C9BE8",
+         "(a) Ranked by sequence coverage", "Sequence coverage (%)"),
+        (axes[1], top_expr, "pct_expr_cov", "#E8604C",
+         "(b) Ranked by expression coverage", "Expression coverage (%)"),
+    ]:
+        seqs_short = [f"{g[:14]}…" for g in df_top["grna"]]
+        vals = df_top[metric].values
+        bars = ax.barh(seqs_short[::-1], vals[::-1], color=color, alpha=0.85,
+                       edgecolor="white")
+        for bar, ots in zip(bars, df_top["on_target_score"].values[::-1]):
+            ax.text(bar.get_width() + 0.2, bar.get_y() + bar.get_height()/2,
+                    f"OTS={ots:.2f}", va="center", fontsize=7.5)
+        ax.set_xlabel(col)
+        ax.set_title(title, fontweight="bold")
+        ax.set_xlim(0, max(vals.max() * 1.2, 5))
+        ax.spines[["top","right"]].set_visible(False)
+        ax.xaxis.grid(True, linestyle="--", alpha=0.35)
+        ax.set_axisbelow(True)
+        ax.tick_params(axis="y", labelsize=8)
+        ax.set_yticklabels([s for s in seqs_short[::-1]],
+                           fontfamily="monospace")
+
+    plt.tight_layout()
+    plt.savefig(out_path, bbox_inches="tight")
+    plt.close()
+    _pp(f"  Saved {out_path}")
+
+
+# ── measured values writer ────────────────────────────────────────────────────
+
+def write_grna_values(results: dict, reports_dir: Path):
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    tex = [
+        "% Auto-generated by run_grna_analysis.py",
+        f"% {ts}",
+        "",
+        rf"\providecommand{{\grnaNCandidates}}{{{results['n_candidates']:,}}}",
+        rf"\providecommand{{\grnaNPamSites}}{{{results['n_pam_sites']:,}}}",
+        rf"\providecommand{{\grnaTopSeqCovPct}}{{{results['top_seq_cov_pct']:.1f}}}",
+        rf"\providecommand{{\grnaTopExprCovPct}}{{{results['top_expr_cov_pct']:.1f}}}",
+        rf"\providecommand{{\grnaSeqExprCorr}}{{{results['seq_expr_corr']:.3f}}}",
+        rf"\providecommand{{\grnaBestSeqGuide}}{{\texttt{{{results['best_seq_grna']}}}}}",
+        rf"\providecommand{{\grnaBestExprGuide}}{{\texttt{{{results['best_expr_grna']}}}}}",
+        rf"\providecommand{{\grnaGreedy5Loci}}{{{results['greedy5_loci_pct']:.1f}}}",
+        rf"\providecommand{{\grnaGreedy5Expr}}{{{results['greedy5_expr_pct']:.1f}}}",
+        rf"\providecommand{{\grnaNLoci}}{{{results['n_loci']:,}}}",
+        "",
+    ]
+    (reports_dir / "grna_measured_values.tex").write_text("\n".join(tex))
+
+    txt = [
+        "=" * 60,
+        "GAMECA gRNA Design --- Measured Values",
+        f"Generated: {ts}",
+        "=" * 60,
+        f"  Family:                   {results['family']}",
+        f"  Total loci:               {results['n_loci']:,}",
+        f"  PAM-adjacent candidates:  {results['n_candidates']:,}",
+        f"  PAM sites total:          {results['n_pam_sites']:,}",
+        "",
+        "  ── Top gRNAs ─────────────────────────────",
+        f"  Best by seq. coverage:    {results['best_seq_grna']}",
+        f"    Seq. coverage:          {results['top_seq_cov_pct']:.1f}%",
+        f"  Best by expr. coverage:   {results['best_expr_grna']}",
+        f"    Expr. coverage:         {results['top_expr_cov_pct']:.1f}%",
+        f"  Seq/expr coverage corr.:  r = {results['seq_expr_corr']:.3f}",
+        "",
+        "  ── Greedy 5-guide set ────────────────────",
+        f"  Cumulative loci covered:  {results['greedy5_loci_pct']:.1f}%",
+        f"  Cumulative expr covered:  {results['greedy5_expr_pct']:.1f}%",
+    ]
+    (reports_dir / "grna_report.txt").write_text("\n".join(txt))
+    _pp(f"  Written grna_measured_values.tex and grna_report.txt")
+
+
+# ── argument parsing ──────────────────────────────────────────────────────────
+
+def parse_args():
+    p = argparse.ArgumentParser(
+        description="Expression-weighted gRNA design for TE families",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    p.add_argument("--input",       required=True,
+                   help="Path to input CSV (Seq + expression columns)")
+    p.add_argument("--reports-dir", default="/home/amodz/anmol/reports4",
+                   help="Output directory for figures and measured_values.tex")
+    p.add_argument("--family",      default="MT2_Mm",
+                   help="Family name for plot titles")
+    p.add_argument("--grna-len",    type=int, default=20,
+                   help="gRNA spacer length (default: 20)")
+    p.add_argument("--cas",         default="SpCas9",
+                   choices=list(_PAM_TYPES.keys()),
+                   help="Cas protein / PAM type (default: SpCas9)")
+    p.add_argument("--max-candidates", type=int, default=None,
+                   help="Cap number of candidates for speed (default: all)")
+    p.add_argument("--n-greedy",    type=int, default=5,
+                   help="Number of gRNAs in greedy set-cover solution")
+    return p.parse_args()
+
+
+# ── main ─────────────────────────────────────────────────────────────────────
+
+def main():
+    args = parse_args()
+
+    reports_dir = Path(args.reports_dir)
+    reports_dir.mkdir(parents=True, exist_ok=True)
+
+    _pp("=" * 60)
+    _pp(f"GAMECA gRNA Design --- {args.family}")
+    _pp(f"  Input:    {args.input}")
+    _pp(f"  Cas:      {args.cas}  PAM: {_PAM_TYPES[args.cas][0]}")
+    _pp(f"  gRNA len: {args.grna_len} bp")
+    _pp(f"  Reports:  {reports_dir}")
+    _pp("=" * 60)
+
+    # ── Load data ─────────────────────────────────────────────────────────────
+    _pp("Loading CSV...")
+    df = pd.read_csv(args.input)
+    _pp(f"  {len(df):,} rows, {len(df.columns)} columns")
+
+    expr_cols = _auto_expr_cols(df)
+    _pp(f"  Expression columns ({len(expr_cols)}): {expr_cols}")
+    df["_total_expr"] = df[expr_cols].sum(axis=1) if expr_cols else 0.0
+
+    # ── Build global 20-mer index ─────────────────────────────────────────────
+    _pp("Building 20-mer index (both strands)...")
+    kmer_index = build_kmer_index_20(df, grna_len=args.grna_len)
+    _pp(f"  {len(kmer_index):,} unique 20-mers indexed")
+
+    # ── Score PAM-adjacent candidates ─────────────────────────────────────────
+    _pp("Scoring gRNA candidates...")
+    df_cands = score_candidates(
+        df, grna_len=args.grna_len, cas=args.cas,
+        kmer_index=kmer_index, expr_col="_total_expr",
+    )
+
+    if df_cands.empty:
+        _pp("FATAL: no PAM-adjacent candidates found --- check sequences")
+        sys.exit(1)
+
+    n_pam_sites = int(df_cands["exact_cov"].sum())  # total PAM site occurrences
+
+    if args.max_candidates:
+        df_cands = df_cands.head(args.max_candidates)
+
+    # Save full candidate table
+    cand_out = df_cands.drop(columns=["rows_exact"]).copy()
+    cand_out.to_csv(reports_dir / "grna_candidates.csv", index=False)
+    _pp(f"  Saved grna_candidates.csv ({len(cand_out):,} candidates)")
+
+    # ── Top candidates ────────────────────────────────────────────────────────
+    best_seq  = df_cands.loc[df_cands["pct_seq_cov"].idxmax()]
+    best_expr = df_cands.loc[df_cands["pct_expr_cov"].idxmax()]
+    _pp(f"  Best by sequence coverage:   {best_seq['grna']}  ({best_seq['pct_seq_cov']:.1f}%)")
+    _pp(f"  Best by expression coverage: {best_expr['grna']}  ({best_expr['pct_expr_cov']:.1f}%)")
+
+    # ── Greedy set-cover ──────────────────────────────────────────────────────
+    _pp(f"Running greedy {args.n_greedy}-guide set-cover (expression mode)...")
+    greedy_df = greedy_grna_set(df_cands, df, n_guides=args.n_greedy, mode="expression")
+    greedy_df.to_csv(reports_dir / "grna_greedy_set.csv", index=False)
+    _pp(f"  Greedy {len(greedy_df)} guides:")
+    for _, row in greedy_df.iterrows():
+        _pp(f"    #{row['rank']} {row['grna']}  +{row['marginal_loci']} loci "
+            f"  cumulative: {row['pct_loci']:.1f}% loci / {row['pct_expr']:.1f}% expr")
+
+    greedy5_loci = greedy_df["pct_loci"].max() if len(greedy_df) > 0 else 0.0
+    greedy5_expr = greedy_df["pct_expr"].max() if len(greedy_df) > 0 else 0.0
+
+    # ── Figures ───────────────────────────────────────────────────────────────
+    _pp("Generating figures...")
+
+    corr, mm_df = fig_grna_coverage(
+        df_cands, df,
+        top_grna_seq=best_seq["grna"],
+        top_grna_expr=best_expr["grna"],
+        family=args.family,
+        out_path=reports_dir / "fig_grna_coverage.pdf",
+    )
+
+    n_pam = fig_grna_positional(
+        df, grna_len=args.grna_len, cas=args.cas,
+        family=args.family,
+        out_path=reports_dir / "fig_grna_positional.pdf",
+    )
+
+    fig_grna_candidates(df_cands, args.family,
+                        out_path=reports_dir / "fig_grna_candidates.pdf")
+
+    # ── Write measured values ─────────────────────────────────────────────────
+    results = {
+        "family":           args.family,
+        "n_loci":           len(df),
+        "n_candidates":     len(df_cands),
+        "n_pam_sites":      n_pam,
+        "top_seq_cov_pct":  float(best_seq["pct_seq_cov"]),
+        "top_expr_cov_pct": float(best_expr["pct_expr_cov"]),
+        "best_seq_grna":    best_seq["grna"],
+        "best_expr_grna":   best_expr["grna"],
+        "seq_expr_corr":    float(corr),
+        "greedy5_loci_pct": greedy5_loci,
+        "greedy5_expr_pct": greedy5_expr,
+    }
+    write_grna_values(results, reports_dir)
+
+    _pp("=" * 60)
+    _pp("DONE")
+    _pp(f"  Figures:    {reports_dir}")
+    _pp(f"  Candidates: {reports_dir / 'grna_candidates.csv'}")
+    _pp(f"  Report:     {reports_dir / 'grna_report.txt'}")
+    _pp("=" * 60)
+
+    print("\n" + "=" * 60)
+    print("MEASURED VALUES (paste into chat):")
+    print((reports_dir / "grna_report.txt").read_text())
+
+
+if __name__ == "__main__":
+    main()

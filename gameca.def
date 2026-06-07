@@ -1,0 +1,53 @@
+Bootstrap: docker
+From: python:3.11-slim-bookworm
+
+# GAMECA Apptainer/Singularity image (#9)
+# Build:  apptainer build gameca.sif gameca.def      (or: singularity build ...)
+# Run:    apptainer run gameca.sif --config gameca.yaml
+# The %runscript wraps gameca_pipeline.py so the whole DAG runs from one command
+# on any HPC cluster — no per-cluster install required.
+
+%files
+    requirements.txt /opt/gameca/requirements.txt
+
+%post
+    set -eu
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        bedtools build-essential ca-certificates gcc git \
+        libbz2-dev libcurl4-openssl-dev liblzma-dev libssl-dev \
+        mafft procps wget zlib1g-dev
+    # UCSC liftOver (single static binary) for ortholog / multi-assembly stages (#5 #7)
+    wget -q http://hgdownload.soe.ucsc.edu/admin/exe/linux.x86_64/liftOver \
+        -O /usr/local/bin/liftOver && chmod +x /usr/local/bin/liftOver || \
+        echo "WARNING: liftOver download failed; ortholog/multiassembly stages will degrade gracefully"
+    rm -rf /var/lib/apt/lists/*
+
+    python -m pip install --no-cache-dir --upgrade pip setuptools wheel
+    python -m pip install --no-cache-dir -r /opt/gameca/requirements.txt
+
+    mkdir -p /opt/gameca/code
+
+%environment
+    export MPLBACKEND=Agg
+    export MPLCONFIGDIR=/tmp/matplotlib
+    export NUMBA_CACHE_DIR=/tmp/numba-cache
+    export PYTHONUNBUFFERED=1
+    export GAMECA_HOME=/opt/gameca/code
+
+%runscript
+    # Default entrypoint = the YAML/DAG pipeline runner. Bind-mount your working
+    # directory:  apptainer run -B "$PWD":/work --pwd /work gameca.sif --config gameca.yaml
+    exec python "${GAMECA_HOME}/gameca_pipeline.py" "$@"
+
+%labels
+    Application GAMECA
+    Description TE analysis pipeline (phylogenetics, gRNA, fold, overlays)
+
+%help
+    GAMECA containerized pipeline. Mount your data and run a config:
+      apptainer run -B "$PWD":/work --pwd /work gameca.sif --config gameca.yaml
+    The code is expected at $GAMECA_HOME (/opt/gameca/code); bind-mount the repo:
+      apptainer run -B "$PWD":/opt/gameca/code -B /data:/data --pwd /opt/gameca/code \
+        gameca.sif --config gameca.yaml

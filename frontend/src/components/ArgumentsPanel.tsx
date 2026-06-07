@@ -139,6 +139,7 @@ function LocalPanel() {
 type StepId =
   | "rmsk-query" | "dfam-count" | "prep" | "clustering" | "alignment"
   | "motif" | "go" | "expression" | "enrichment"
+  | "fold"
   | "batch" | "job-status" | "job-watch" | "retrieve";
 
 interface StepDef {
@@ -170,6 +171,12 @@ const STEP_GROUPS: { group: string; steps: StepDef[] }[] = [
       { id: "go",         label: "GO annotation", files: ["te_go.py"] },
       { id: "expression", label: "Expression boxplots", files: ["te_expression.py"] },
       { id: "enrichment", label: "Full enrichment — motif + GO + expression", files: ["te_enrichment.py", "te_motif.py", "te_go.py", "te_expression.py"] },
+    ],
+  },
+  {
+    group: "Structure prediction",
+    steps: [
+      { id: "fold", label: "Fold Prediction — ORF → ColabFold → pLDDT", files: ["run_fold_prediction.py"] },
     ],
   },
   {
@@ -303,6 +310,21 @@ function buildCommand(step: StepId, f: FieldState, hpcHome: string, scheduler: s
       if (f.notifyEmail.trim()) parts.push(`--notify-email ${f.notifyEmail.trim()}`);
       return parts.join(" ");
     }
+    case "fold": {
+      const parts = [
+        `${cd} python run_fold_prediction.py`,
+        `--input ${resolvePath(f.inputCsv, "clustered.csv")}`,
+        `--reports-dir ${resolvePath(f.outDir, "results/fold")}`,
+        `--family ${f.family || "FAMILY"}`,
+        `--min-aa ${f.foldMinAa || "100"}`,
+        `--top-n ${f.foldTopN || "5"}`,
+        `--source-seqs ${f.foldSourceSeqs || "100"}`,
+        `--colabfold-cmd ${f.foldColabfoldCmd || "colabfold_batch"}`,
+        `--num-recycles ${f.foldNumRecycles || "3"}`,
+        `--num-models ${f.foldNumModels || "1"}`,
+      ];
+      return parts.join(" ");
+    }
     case "job-status":
       return isLsf ? "bjobs" : "squeue --me";
     case "job-watch":
@@ -361,6 +383,13 @@ interface FieldState {
   pThreshold: string;
   // Annotation source
   annotSource: "rmsk" | "dfam";
+  // Fold prediction
+  foldMinAa: string;
+  foldTopN: string;
+  foldSourceSeqs: string;
+  foldColabfoldCmd: string;
+  foldNumRecycles: string;
+  foldNumModels: string;
   // Job management
   jobId: string;
   localDir: string;
@@ -383,6 +412,8 @@ const defaultFields: FieldState = {
   randomState: "0", nNeighbors: "30", minDist: "0.0", minClusterSize: "", minSamples: "7",
   pThreshold: "0.05",
   annotSource: "rmsk",
+  foldMinAa: "100", foldTopN: "5", foldSourceSeqs: "100",
+  foldColabfoldCmd: "colabfold_batch", foldNumRecycles: "3", foldNumModels: "1",
   jobId: "", localDir: "./hpc_results", remoteDir: "",
   maxJobs: "10",
   parallelMode: false,
@@ -686,7 +717,7 @@ function HpcPanel() {
         {/* ── Step-specific fields ── */}
 
         {/* Shared: family */}
-        {(["rmsk-query","dfam-count","prep","clustering","alignment","expression","enrichment","batch"] as StepId[]).includes(step) && (
+        {(["rmsk-query","dfam-count","prep","clustering","alignment","expression","enrichment","fold","batch"] as StepId[]).includes(step) && (
           <Field label="TE Family *" hint="e.g. HERVK, THE1D-int">
             <input className={input} value={fields.family}
               onChange={(e) => set("family", e.target.value)}
@@ -749,7 +780,7 @@ function HpcPanel() {
         )}
 
         {/* Input CSV — hidden for clustering when fetching from UCSC */}
-        {(["alignment","motif","expression","enrichment"] as StepId[]).includes(step) && (
+        {(["alignment","motif","expression","enrichment","fold"] as StepId[]).includes(step) && (
           <Field label="Input sequences CSV" hint="Remote path on cluster">
             <input className={input} value={fields.inputCsv}
               onChange={(e) => set("inputCsv", e.target.value)}
@@ -886,8 +917,47 @@ function HpcPanel() {
           </div>
         )}
 
+        {/* Fold prediction parameters */}
+        {step === "fold" && (
+          <div className="space-y-2">
+            <div className="flex gap-2">
+              <Field label="Min ORF length (aa)" hint="Minimum amino acids to consider an ORF">
+                <input className={input} type="number" min={30} value={fields.foldMinAa}
+                  onChange={(e) => set("foldMinAa", e.target.value)} disabled={busy} />
+              </Field>
+              <Field label="Top-N ORFs to fold" hint="Longest unique ORFs submitted to ColabFold">
+                <input className={input} type="number" min={1} max={20} value={fields.foldTopN}
+                  onChange={(e) => set("foldTopN", e.target.value)} disabled={busy} />
+              </Field>
+            </div>
+            <Field label="Source loci to scan" hint="Top loci (by expression or length) searched for ORFs">
+              <input className={input} type="number" min={10} value={fields.foldSourceSeqs}
+                onChange={(e) => set("foldSourceSeqs", e.target.value)} disabled={busy} />
+            </Field>
+            <Field label="colabfold_batch command" hint="Executable name or full path on the cluster">
+              <input className={input} value={fields.foldColabfoldCmd}
+                onChange={(e) => set("foldColabfoldCmd", e.target.value)}
+                placeholder="colabfold_batch" disabled={busy} />
+            </Field>
+            <div className="flex gap-2">
+              <Field label="Recycles" hint="ColabFold --num-recycle (3–6 for accuracy)">
+                <input className={input} type="number" min={1} max={12} value={fields.foldNumRecycles}
+                  onChange={(e) => set("foldNumRecycles", e.target.value)} disabled={busy} />
+              </Field>
+              <Field label="Models" hint="ColabFold --num-models (1 = fast, 5 = best)">
+                <input className={input} type="number" min={1} max={5} value={fields.foldNumModels}
+                  onChange={(e) => set("foldNumModels", e.target.value)} disabled={busy} />
+              </Field>
+            </div>
+            <p className="text-[10px] text-gray-400 leading-tight">
+              Outputs: fig_fold_orf_map.pdf · fig_fold_plddt.pdf · fig_fold_summary.pdf ·
+              fold_measured_values.tex · colabfold_output/
+            </p>
+          </div>
+        )}
+
         {/* Shared: out dir */}
-        {(["prep","clustering","alignment","motif","go","expression","enrichment"] as StepId[]).includes(step) && (
+        {(["prep","clustering","alignment","motif","go","expression","enrichment","fold"] as StepId[]).includes(step) && (
           <Field label="Output directory" hint="Absolute path used as-is; relative path resolved from work dir">
             <input className={input} value={fields.outDir}
               onChange={(e) => set("outDir", e.target.value)}
