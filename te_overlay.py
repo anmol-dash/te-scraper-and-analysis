@@ -9,6 +9,8 @@ returns an empty/honest result rather than raising, so the analysis still emits 
 valid (and truthful) report noting that the annotation was unavailable.
 """
 
+from __future__ import annotations
+
 import datetime
 import gzip
 import json
