@@ -708,10 +708,8 @@ def _fetch_sequences_parallel(df, assembly="hg38", n_workers=10):
             try:
                 with sem:
                     time.sleep(0.4)  # ≤2.5 req/sec across all workers
-                    _log(f"  [{i}] GET {url}")
                     res = _curl_json(url)
                 http_code = res.get("statusCode", 200)
-                _log(f"  [{i}] HTTP {http_code}")
                 if http_code == 429:
                     wait = min(120, 30 * 2 ** attempt)
                     _log(f"  [{i}] rate-limited — sleeping {wait}s before retry {attempt+1}")
@@ -720,7 +718,6 @@ def _fetch_sequences_parallel(df, assembly="hg38", n_workers=10):
                 if "error" in res:
                     raise ValueError(res["error"])
                 dna = res.get("dna", "")
-                _log(f"  [{i}] OK  len={len(dna)}  seq={dna}")
                 return i, _orient_sequence(dna, df.iloc[i])
             except Exception as exc:
                 _log(f"  [{i}] attempt {attempt+1}/5 FAILED: {type(exc).__name__}: {exc}")

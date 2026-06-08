@@ -616,12 +616,12 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    p.add_argument("--l1mdt-expr",  required=True,
-                   help="Path to L1Md_T_ultracombo.csv on cluster")
-    p.add_argument("--b1mus2-expr", required=True,
-                   help="Path to B1_Mus2_ultracombo.csv on cluster")
-    p.add_argument("--iapltr1-expr",required=True,
-                   help="Path to IAPLTR1_Mm_ultracombo.csv on cluster")
+    p.add_argument("--l1mdt-expr",  default="",
+                   help="Path to L1Md_T_ultracombo.csv on cluster (optional --- skips DE/expression plots if absent)")
+    p.add_argument("--b1mus2-expr", default="",
+                   help="Path to B1_Mus2_ultracombo.csv on cluster (optional --- skips DE/expression plots if absent)")
+    p.add_argument("--iapltr1-expr",default="",
+                   help="Path to IAPLTR1_Mm_ultracombo.csv on cluster (optional --- skips DE/expression plots if absent)")
     p.add_argument("--reports-dir", default="/home/amodz/anmol/reports4",
                    help="Directory to save figures and measured_values.tex")
     p.add_argument("--genome-fa",   default="",
