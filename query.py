@@ -145,6 +145,57 @@ def parse_args(argv=None):
                    help="Parallel UCSC fetch workers (default: 3; concurrency capped at 3 regardless)")
     p.add_argument("--parallel-primers", action="store_true",
                    help="Parallelize primer genome search across chromosomes")
+    # ── Stage 11 / standout analysis module options ────────────────────────────
+    p.add_argument("--target-assemblies", type=str, nargs="*", default=None,
+                   help="Multi-assembly liftover targets for run_multiassembly_liftover.py "
+                        "(e.g. --target-assemblies t2t hg19; enables T2T-CHM13 comparison)")
+    p.add_argument("--ortholog-species", type=str, nargs="*", default=None,
+                   help="Species (UCSC assembly codes) for cross-species ortholog-insertion "
+                        "calling, e.g. --ortholog-species panTro6 rheMac10 mm39")
+    p.add_argument("--liftover-cmd", type=str, default=None,
+                   help="Path/command for the UCSC liftOver binary "
+                        "(used by ortholog + multi-assembly modules; default: liftOver on PATH)")
+    p.add_argument("--epigenetic-preset", type=str, default=None,
+                   choices=["K562", "GM12878", "HeLa-S3", "IMR-90", "H1-hESC"],
+                   help="ENCODE cell-type preset for the epigenetic regulatory overlay module")
+    p.add_argument("--ctcf-preset", type=str, default=None,
+                   choices=["K562", "GM12878", "HeLa-S3"],
+                   help="ENCODE cell-type preset for CTCF site overlay (CTCF/TAD-boundary TEs)")
+    p.add_argument("--tads-preset", type=str, default=None,
+                   choices=["K562", "GM12878", "IMR90"],
+                   help="ENCODE cell-type preset for TAD-boundary overlay (CTCF/TAD-boundary TEs)")
+    p.add_argument("--grna-cas", type=str, default=None,
+                   choices=["SpCas9", "SaCas9", "Cas12a", "SpRY"],
+                   help="Cas/PAM variant for gRNA design + off-target scoring (default: SpCas9)")
+    p.add_argument("--grna-max-mm", type=int, default=None, choices=[0, 1, 2],
+                   help="Max mismatches tolerated when scoring gRNA off-targets (default: 2)")
+    p.add_argument("--grna-background", type=str, default=None,
+                   help="Path to a background genome FASTA for allele-aware gRNA off-target scoring")
+    p.add_argument("--colabfold-cmd", type=str, default=None,
+                   help="Path/command for colabfold_batch, enabling consensus protein "
+                        "structure predictions (default: not run if unavailable)")
+    p.add_argument("--subst-rate", type=float, default=None,
+                   help="Neutral substitution rate (subs/site/yr) for divergence-based age "
+                        "estimates, e.g. 2.2e-9 for human (default: 2.2e-9)")
+    p.add_argument("--clock-divisor", type=float, default=None,
+                   help="Molecular-clock divisor applied to substitution rate "
+                        "(e.g. 2 for a generation-time correction; default: 2)")
+    p.add_argument("--intact-orf-aa", type=int, default=None,
+                   help="Minimum intact ORF length (aa) to call a copy a putative "
+                        "master/source element (default: 100)")
+    p.add_argument("--min-ltr-identity", type=float, default=None,
+                   help="Minimum 5'/3' LTR identity fraction for LTR structural annotation "
+                        "(default: 0.65)")
+    p.add_argument("--tail-bp", type=int, default=None,
+                   help="3' flank window (bp) scanned for transduction detection (default: 150)")
+    p.add_argument("--promoter-bp", type=int, default=None,
+                   help="Window (bp) scanned for antisense/bidirectional promoter activity (default: 200)")
+    p.add_argument("--cpg-omega", type=float, default=None,
+                   help="CpG correction factor for Kimura divergence estimates, used by the "
+                        "divergence-landscape and subfamily-resolution modules (default: 10.0)")
+    p.add_argument("--mafft-cmd", type=str, default=None,
+                   help="Path/command for mafft, used for consensus phylogenetics alignments "
+                        "(default: mafft on PATH)")
     # ── Misc ───────────────────────────────────────────────────────────────────
     p.add_argument("--test",          action="store_true", help="Run with mock test data")
     p.add_argument("--debug",         action="store_true")
@@ -2001,31 +2052,70 @@ def _run_standout_analysis(args, out_dir, dirs, family_name, stage_times):
     cons_fa = out_dir / "cluster_alignments" / "all_cluster_consensuses.fa"
 
     _assembly_arg = getattr(args, "assembly", "hg38") or "hg38"
+
+    # Stage 11 module knobs — fall back to each module's own default whenever the
+    # user hasn't set the corresponding query.py flag (kept None by argparse).
+    _g = lambda name, default=None: getattr(args, name, None) if getattr(args, name, None) is not None else default
+    _opt = lambda flag, val: [flag, str(val)] if val is not None else []
+    _opt_list = lambda flag, vals: ([flag] + [str(v) for v in vals]) if vals else []
+
+    _subst_rate     = _g("subst_rate", "2.2e-9")
+    _clock_divisor  = _g("clock_divisor", "2")
+    _intact_orf_aa  = _g("intact_orf_aa", "100")
+    _mafft_cmd      = getattr(args, "mafft_cmd", None)
+    _grna_cas       = _g("grna_cas", "SpCas9")
+    _grna_max_mm    = _g("grna_max_mm", "2")
+    _grna_background = getattr(args, "grna_background", None)
+    _tail_bp        = _g("tail_bp", "150")
+    _promoter_bp    = _g("promoter_bp", "200")
+    _ctcf_preset    = getattr(args, "ctcf_preset", None)
+    _tads_preset    = getattr(args, "tads_preset", None)
+    _epigenetic_preset = getattr(args, "epigenetic_preset", None)
+    _ortholog_species  = getattr(args, "ortholog_species", None)
+    _liftover_cmd      = getattr(args, "liftover_cmd", None)
+    _target_assemblies = getattr(args, "target_assemblies", None)
+    _colabfold_cmd  = getattr(args, "colabfold_cmd", None)
+    _min_ltr_identity = getattr(args, "min_ltr_identity", None)
+    _cpg_omega      = getattr(args, "cpg_omega", None)
+
     _MODULES = [
         ("phylo",         "run_phylo_analysis.py",
-         ["--subst-rate", "2.2e-9", "--clock-divisor", "2",
-          "--intact-orf-aa", "100"]),
+         ["--subst-rate", str(_subst_rate), "--clock-divisor", str(_clock_divisor),
+          "--intact-orf-aa", str(_intact_orf_aa)]
+         + _opt("--mafft-cmd", _mafft_cmd)),
         ("grna",          "run_grna_offtarget.py",
-         ["--cas", "SpCas9", "--max-mm", "2"]),
+         ["--cas", str(_grna_cas), "--max-mm", str(_grna_max_mm)]
+         + _opt("--background", _grna_background)),
         ("transduction",  "run_transduction.py",
-         ["--tail-bp", "150", "--min-shared", "3"]),
+         ["--tail-bp", str(_tail_bp), "--min-shared", "3"]),
         ("antisense",     "run_antisense_promoter.py",
-         ["--promoter-bp", "200"]),
+         ["--promoter-bp", str(_promoter_bp)]),
         ("ctcf_tad",      "run_ctcf_tad.py",
-         ["--motif-mismatch", "3"]),
-        ("epigenetic",    "run_epigenetic_overlay.py",   []),
-        ("ortholog",      "run_ortholog_insertion.py",   []),
+         ["--motif-mismatch", "3"]
+         + _opt("--ctcf-preset", _ctcf_preset)
+         + _opt("--tads-preset", _tads_preset)),
+        ("epigenetic",    "run_epigenetic_overlay.py",
+         _opt("--preset", _epigenetic_preset)),
+        ("ortholog",      "run_ortholog_insertion.py",
+         _opt_list("--species", _ortholog_species)
+         + _opt("--liftover-cmd", _liftover_cmd)),
         ("multiassembly", "run_multiassembly_liftover.py",
-         ["--source-assembly", _assembly_arg]),
+         ["--source-assembly", _assembly_arg]
+         + _opt_list("--target-assemblies", _target_assemblies)
+         + _opt("--liftover-cmd", _liftover_cmd)),
         ("fold",          "run_fold_prediction.py",
          ["--per-cluster", "--min-aa", "100", "--top-n", "5"]
+         + _opt("--colabfold-cmd", _colabfold_cmd)
          + (["--consensus-fasta", str(cons_fa)] if cons_fa.exists() else [])),
         ("divergence",    "run_divergence.py",
          ["--assembly", _assembly_arg]
+         + _opt("--cpg-omega", _cpg_omega)
          + (["--consensus-fasta", str(cons_fa)] if cons_fa.exists() else [])),
-        ("ltr_struct",    "run_ltr_struct.py",  []),
+        ("ltr_struct",    "run_ltr_struct.py",
+         _opt("--min-ltr-identity", _min_ltr_identity)),
         ("subfamily",     "run_subfamily.py",
          ["--assembly", _assembly_arg]
+         + _opt("--cpg-omega", _cpg_omega)
          + (["--consensus-fasta", str(cons_fa)] if cons_fa.exists() else [])),
         ("benchmark",     "run_benchmark.py",
          ["--assembly", _assembly_arg]),

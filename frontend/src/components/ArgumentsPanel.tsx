@@ -396,6 +396,25 @@ interface FieldState {
   remoteDir: string;
   maxJobs: string;
   parallelMode: boolean;
+  // Stage 11 / standout analysis module options (batch submission)
+  s11TargetAssemblies: string;
+  s11OrthologSpecies: string;
+  s11LiftoverCmd: string;
+  s11EpigeneticPreset: string;
+  s11CtcfPreset: string;
+  s11TadsPreset: string;
+  s11GrnaCas: string;
+  s11GrnaMaxMm: string;
+  s11GrnaBackground: string;
+  s11ColabfoldCmd: string;
+  s11SubstRate: string;
+  s11ClockDivisor: string;
+  s11IntactOrfAa: string;
+  s11MinLtrIdentity: string;
+  s11TailBp: string;
+  s11PromoterBp: string;
+  s11CpgOmega: string;
+  s11MafftCmd: string;
 }
 
 const defaultFields: FieldState = {
@@ -417,6 +436,12 @@ const defaultFields: FieldState = {
   jobId: "", localDir: "./hpc_results", remoteDir: "",
   maxJobs: "10",
   parallelMode: false,
+  s11TargetAssemblies: "", s11OrthologSpecies: "", s11LiftoverCmd: "",
+  s11EpigeneticPreset: "", s11CtcfPreset: "", s11TadsPreset: "",
+  s11GrnaCas: "", s11GrnaMaxMm: "", s11GrnaBackground: "",
+  s11ColabfoldCmd: "", s11SubstRate: "", s11ClockDivisor: "",
+  s11IntactOrfAa: "", s11MinLtrIdentity: "", s11TailBp: "",
+  s11PromoterBp: "", s11CpgOmega: "", s11MafftCmd: "",
 };
 
 function HpcPanel() {
@@ -424,6 +449,7 @@ function HpcPanel() {
   const [port, setPort] = useState("22");
   const [user, setUser] = useState("");
   const [password, setPassword] = useState("");
+  const [keyPath, setKeyPath] = useState("");
   const [scheduler, setScheduler] = useState<"auto" | "lsf" | "slurm">("auto");
   const [workDir, setWorkDir] = useState("");
   const [step, setStep] = useState<StepId>("rmsk-query");
@@ -467,14 +493,25 @@ function HpcPanel() {
     }
   }, [hpcJobId, fields.jobId]);
 
+  const pickKeyFile = useCallback(async () => {
+    try {
+      const path = await open({ multiple: false, directory: false });
+      if (typeof path === "string") setKeyPath(path);
+    } catch (e) {
+      pushToast(e instanceof Error ? e.message : String(e));
+    }
+  }, [pushToast]);
+
   const connect = useCallback(async () => {
     if (!host.trim() || !user.trim()) { pushToast("Host and username are required."); return; }
+    if (!password.trim() && !keyPath.trim()) { pushToast("Provide a password or an SSH private key file."); return; }
     try {
       beginRun(globalThis.crypto.randomUUID());
       const raw = await pyRunFull(["hpc-connect",
         "--host", host.trim(),
         "--user", user.trim(),
         "--password", password,
+        "--key", keyPath.trim(),
         "--port", port,
         "--scheduler", scheduler,
         "--work-dir", workDir.trim(),
@@ -495,7 +532,7 @@ function HpcPanel() {
       pushToast(e instanceof Error ? e.message : String(e));
       finishRun("errored");
     }
-  }, [host, port, user, password, scheduler, workDir, beginRun, finishRun, pushToast, setHpcConnection]);
+  }, [host, port, user, password, keyPath, scheduler, workDir, beginRun, finishRun, pushToast, setHpcConnection]);
 
   const disconnect = useCallback(async () => {
     try { await pyRunFull(["hpc-disconnect"]); } catch (_) {}
@@ -580,6 +617,25 @@ function HpcPanel() {
       skip_tsne: fields.skipTsne ? 1 : 0,
       annot_source: fields.annotSource,
       max_jobs: parseInt(fields.maxJobs) || 10,
+      // Stage 11 / standout analysis module options
+      target_assemblies: fields.s11TargetAssemblies.trim().split(/\s+/).filter(Boolean),
+      ortholog_species: fields.s11OrthologSpecies.trim().split(/\s+/).filter(Boolean),
+      liftover_cmd: fields.s11LiftoverCmd.trim(),
+      epigenetic_preset: fields.s11EpigeneticPreset,
+      ctcf_preset: fields.s11CtcfPreset,
+      tads_preset: fields.s11TadsPreset,
+      grna_cas: fields.s11GrnaCas,
+      grna_max_mm: fields.s11GrnaMaxMm ? parseInt(fields.s11GrnaMaxMm) : null,
+      grna_background: fields.s11GrnaBackground.trim(),
+      colabfold_cmd: fields.s11ColabfoldCmd.trim(),
+      subst_rate: fields.s11SubstRate.trim(),
+      clock_divisor: fields.s11ClockDivisor.trim(),
+      intact_orf_aa: fields.s11IntactOrfAa ? parseInt(fields.s11IntactOrfAa) : null,
+      min_ltr_identity: fields.s11MinLtrIdentity.trim(),
+      tail_bp: fields.s11TailBp ? parseInt(fields.s11TailBp) : null,
+      promoter_bp: fields.s11PromoterBp ? parseInt(fields.s11PromoterBp) : null,
+      cpg_omega: fields.s11CpgOmega.trim(),
+      mafft_cmd: fields.s11MafftCmd.trim(),
     };
     try {
       beginRun(globalThis.crypto.randomUUID());
@@ -639,8 +695,16 @@ function HpcPanel() {
           <Field label="Username">
             <input className={input} value={user} onChange={(e) => setUser(e.target.value)} disabled={busy} />
           </Field>
-          <Field label="Password">
+          <Field label="Password" hint="Leave blank if using an SSH private key below">
             <input className={input} type="password" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !busy) void connect(); }} disabled={busy} />
+          </Field>
+          <Field label="SSH private key" hint="e.g. a downloaded .key/.pem or ~/.ssh/id_ed25519 — used instead of a password">
+            <div className="flex gap-2">
+              <input className={input} value={keyPath} onChange={(e) => setKeyPath(e.target.value)} placeholder="(none)" disabled={busy} />
+              <button type="button" className="shrink-0 rounded-md border border-[var(--app-border)] px-2 py-1.5 text-xs font-medium transition hover:bg-[var(--app-bg)] disabled:opacity-50" onClick={() => void pickKeyFile()} disabled={busy}>
+                Browse…
+              </button>
+            </div>
           </Field>
           <Field label="Scheduler" hint="Use Auto unless the cluster hides bsub/sbatch from non-interactive SSH">
             <select className={input} value={scheduler} onChange={(e) => setScheduler(e.target.value as "auto" | "lsf" | "slurm")} disabled={busy}>
@@ -1152,6 +1216,148 @@ function HpcPanel() {
                 onChange={(e) => set("teCounts", e.target.value)}
                 placeholder="(auto)" disabled={busy} />
             </Field>
+
+            <div className="rounded-md border border-[var(--app-border)] p-2 space-y-2">
+              <p className="text-xs font-medium text-[var(--app-muted)]">
+                Stage 11 — standout analysis modules
+              </p>
+              <p className="text-[11px] text-[var(--app-muted)]">
+                These configure the downstream phylo / gRNA / overlay / liftover modules
+                that auto-run after clustering. Leave blank to use each module&rsquo;s default.
+              </p>
+
+              <Field label="Multi-assembly liftover targets" hint="Space-separated UCSC codes, e.g. t2t hg19 — enables T2T-CHM13 comparison">
+                <input className={input} value={fields.s11TargetAssemblies}
+                  onChange={(e) => set("s11TargetAssemblies", e.target.value)}
+                  placeholder="(none)" disabled={busy} />
+              </Field>
+              <Field label="Ortholog species" hint="Space-separated UCSC assembly codes for cross-species ortholog calling, e.g. panTro6 rheMac10 mm39">
+                <input className={input} value={fields.s11OrthologSpecies}
+                  onChange={(e) => set("s11OrthologSpecies", e.target.value)}
+                  placeholder="(none)" disabled={busy} />
+              </Field>
+              <Field label="liftOver command" hint="Path/command for the UCSC liftOver binary (ortholog + multi-assembly modules)">
+                <input className={input} value={fields.s11LiftoverCmd}
+                  onChange={(e) => set("s11LiftoverCmd", e.target.value)}
+                  placeholder="liftOver" disabled={busy} />
+              </Field>
+
+              <div className="flex gap-2">
+                <Field label="Epigenetic overlay preset" hint="ENCODE cell type for regulatory-context overlay">
+                  <select className={input} value={fields.s11EpigeneticPreset}
+                    onChange={(e) => set("s11EpigeneticPreset", e.target.value)} disabled={busy}>
+                    <option value="">(none)</option>
+                    <option value="K562">K562</option>
+                    <option value="GM12878">GM12878</option>
+                    <option value="HeLa-S3">HeLa-S3</option>
+                    <option value="IMR-90">IMR-90</option>
+                    <option value="H1-hESC">H1-hESC</option>
+                  </select>
+                </Field>
+              </div>
+              <div className="flex gap-2">
+                <Field label="CTCF site preset" hint="CTCF/TAD-boundary TE overlay">
+                  <select className={input} value={fields.s11CtcfPreset}
+                    onChange={(e) => set("s11CtcfPreset", e.target.value)} disabled={busy}>
+                    <option value="">(none)</option>
+                    <option value="K562">K562</option>
+                    <option value="GM12878">GM12878</option>
+                    <option value="HeLa-S3">HeLa-S3</option>
+                  </select>
+                </Field>
+                <Field label="TAD boundary preset">
+                  <select className={input} value={fields.s11TadsPreset}
+                    onChange={(e) => set("s11TadsPreset", e.target.value)} disabled={busy}>
+                    <option value="">(none)</option>
+                    <option value="K562">K562</option>
+                    <option value="GM12878">GM12878</option>
+                    <option value="IMR90">IMR90</option>
+                  </select>
+                </Field>
+              </div>
+
+              <div className="flex gap-2">
+                <Field label="gRNA Cas/PAM" hint="Allele-aware off-target gRNA design + scoring">
+                  <select className={input} value={fields.s11GrnaCas}
+                    onChange={(e) => set("s11GrnaCas", e.target.value)} disabled={busy}>
+                    <option value="">(default: SpCas9)</option>
+                    <option value="SpCas9">SpCas9 (NGG)</option>
+                    <option value="SaCas9">SaCas9 (NNGRRT)</option>
+                    <option value="Cas12a">Cas12a (TTTV)</option>
+                    <option value="SpRY">SpRY (NRN)</option>
+                  </select>
+                </Field>
+                <Field label="gRNA max mismatches">
+                  <select className={input} value={fields.s11GrnaMaxMm}
+                    onChange={(e) => set("s11GrnaMaxMm", e.target.value)} disabled={busy}>
+                    <option value="">(default: 2)</option>
+                    <option value="0">0</option>
+                    <option value="1">1</option>
+                    <option value="2">2</option>
+                  </select>
+                </Field>
+              </div>
+              <Field label="gRNA background genome" hint="Optional FASTA for off-target scoring against a background/allele genome">
+                <input className={input} value={fields.s11GrnaBackground}
+                  onChange={(e) => set("s11GrnaBackground", e.target.value)}
+                  placeholder="(none)" disabled={busy} />
+              </Field>
+
+              <Field label="ColabFold command" hint="Path to colabfold_batch — enables consensus protein structure predictions">
+                <input className={input} value={fields.s11ColabfoldCmd}
+                  onChange={(e) => set("s11ColabfoldCmd", e.target.value)}
+                  placeholder="(disabled if not found)" disabled={busy} />
+              </Field>
+
+              <div className="flex gap-2">
+                <Field label="Substitution rate" hint="subs/site/yr for divergence-based age estimates, e.g. 2.2e-9">
+                  <input className={input} value={fields.s11SubstRate}
+                    onChange={(e) => set("s11SubstRate", e.target.value)}
+                    placeholder="2.2e-9" disabled={busy} />
+                </Field>
+                <Field label="Clock divisor" hint="Generation-time correction">
+                  <input className={input} value={fields.s11ClockDivisor}
+                    onChange={(e) => set("s11ClockDivisor", e.target.value)}
+                    placeholder="2" disabled={busy} />
+                </Field>
+              </div>
+              <Field label="Intact ORF length (aa)" hint="Threshold for calling a copy a putative master/source element">
+                <input className={input} type="number" min={1} value={fields.s11IntactOrfAa}
+                  onChange={(e) => set("s11IntactOrfAa", e.target.value)}
+                  placeholder="100" disabled={busy} />
+              </Field>
+
+              <Field label="Min LTR identity" hint="5'/3' LTR identity fraction for LTR structural annotation (0–1)">
+                <input className={input} type="number" min={0} max={1} step={0.01} value={fields.s11MinLtrIdentity}
+                  onChange={(e) => set("s11MinLtrIdentity", e.target.value)}
+                  placeholder="0.65" disabled={busy} />
+              </Field>
+
+              <div className="flex gap-2">
+                <Field label="Transduction tail (bp)" hint="3' flank window scanned for transduction detection">
+                  <input className={input} type="number" min={0} value={fields.s11TailBp}
+                    onChange={(e) => set("s11TailBp", e.target.value)}
+                    placeholder="150" disabled={busy} />
+                </Field>
+                <Field label="Promoter window (bp)" hint="Antisense/bidirectional promoter activity scan window">
+                  <input className={input} type="number" min={0} value={fields.s11PromoterBp}
+                    onChange={(e) => set("s11PromoterBp", e.target.value)}
+                    placeholder="200" disabled={busy} />
+                </Field>
+              </div>
+
+              <Field label="CpG omega" hint="CpG correction factor for Kimura divergence (landscape + subfamily resolution)">
+                <input className={input} value={fields.s11CpgOmega}
+                  onChange={(e) => set("s11CpgOmega", e.target.value)}
+                  placeholder="10.0" disabled={busy} />
+              </Field>
+
+              <Field label="MAFFT command" hint="Path/command for mafft, used for consensus phylogenetics alignments">
+                <input className={input} value={fields.s11MafftCmd}
+                  onChange={(e) => set("s11MafftCmd", e.target.value)}
+                  placeholder="mafft" disabled={busy} />
+              </Field>
+            </div>
           </div>
         )}
 

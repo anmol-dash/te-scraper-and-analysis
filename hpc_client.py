@@ -240,7 +240,7 @@ class HPCClient:
             if self.scheduler:
                 print(f"Scheduler detected: {self.scheduler.upper()}")
             else:
-                print("Scheduler detected: NONE (bsub/sbatch not visible in login shell)")
+                print("Scheduler detected: NONE — jobs will run inside tmux sessions on this host")
 
             # Check whether the scheduler daemon is actually reachable
             self._scheduler_live = self._check_scheduler_live()
@@ -607,7 +607,9 @@ fi
                             walltime=None, queue=None):
         """Return scheduler-specific directives for the job script."""
         if self.scheduler not in {"lsf", "slurm"}:
-            raise RuntimeError("Scheduler was not detected. Ensure bsub/sbatch is available after login or set scheduler explicitly.")
+            # No scheduler — job runs inside a detached tmux session (see submit_batch_job
+            # / submit_command_as_batch_job). The header is just an informational comment.
+            return f"# (no job scheduler detected — {job_name} runs inside a tmux session)\n"
         mem_mb   = mem_mb   or self.params["MEM_MB"]
         cpus     = cpus     or self.params["CPUS"]
         walltime = walltime or self.params["WALLTIME"]
@@ -740,6 +742,23 @@ fi
             return f"bsub < {job_script}"
         raise RuntimeError("Scheduler was not detected. Ensure bsub/sbatch is available after login or set scheduler explicitly.")
 
+    def _tmux_launch_cmd(self, session_name, job_script, job_out, job_err):
+        """Return the command to launch a job script inside a detached tmux session.
+
+        Used as the no-scheduler execution mode (e.g. plain SSH cloud VMs without
+        LSF/Slurm) — the session keeps the job running across SSH disconnects and
+        can be inspected live via `tmux capture-pane` / `tmux attach`.
+        """
+        return (
+            f"tmux new-session -d -s {shlex.quote(session_name)} "
+            f"{shlex.quote(f'bash {job_script} >{job_out} 2>{job_err}')}"
+        )
+
+    def _has_tmux(self) -> bool:
+        """Return True if the `tmux` binary is available on the remote host."""
+        _, _, code = self.run_command("command -v tmux >/dev/null 2>&1", timeout=10)
+        return code == 0
+
     def _parse_job_id(self, submit_output):
         """Extract job ID from scheduler submission output."""
         if self.scheduler == "slurm":
@@ -753,13 +772,17 @@ fi
         """Return command to check if job is still running."""
         if self.scheduler == "slurm":
             return f"squeue -j {job_id} --noheader 2>&1"
-        return f"bjobs {job_id} 2>&1"
+        if self.scheduler == "lsf":
+            return f"bjobs {job_id} 2>&1"
+        return f"tmux has-session -t {shlex.quote(str(job_id))} 2>&1 && echo RUNNING || echo GONE"
 
     def _cancel_job_cmd(self, job_id):
         """Return command to cancel a job."""
         if self.scheduler == "slurm":
             return f"scancel {job_id}"
-        return f"bkill {job_id}"
+        if self.scheduler == "lsf":
+            return f"bkill {job_id}"
+        return f"tmux kill-session -t {shlex.quote(str(job_id))} 2>&1"
 
     def _check_scheduler_live(self) -> bool:
         """Return True only if the scheduler daemon is actually reachable."""
@@ -1222,6 +1245,92 @@ fi
         p_thresh = self.params.get("P_THRESHOLD", 0.05)
         args += ["--p-threshold", str(p_thresh)]
 
+        # ── Stage 11 / standout analysis module options ────────────────────
+        def _listval(key):
+            v = self.params.get(key)
+            if v is None:
+                return []
+            if isinstance(v, (list, tuple)):
+                return [str(x).strip() for x in v if str(x).strip()]
+            return [tok for tok in str(v).replace(",", " ").split() if tok]
+
+        def _strval(key):
+            v = self.params.get(key)
+            v = "" if v is None else str(v).strip()
+            return v
+
+        target_assemblies = _listval("TARGET_ASSEMBLIES")
+        if target_assemblies:
+            args += ["--target-assemblies"] + target_assemblies
+
+        ortholog_species = _listval("ORTHOLOG_SPECIES")
+        if ortholog_species:
+            args += ["--ortholog-species"] + ortholog_species
+
+        liftover_cmd = _strval("LIFTOVER_CMD")
+        if liftover_cmd:
+            args += ["--liftover-cmd", liftover_cmd]
+
+        epigenetic_preset = _strval("EPIGENETIC_PRESET")
+        if epigenetic_preset:
+            args += ["--epigenetic-preset", epigenetic_preset]
+
+        ctcf_preset = _strval("CTCF_PRESET")
+        if ctcf_preset:
+            args += ["--ctcf-preset", ctcf_preset]
+
+        tads_preset = _strval("TADS_PRESET")
+        if tads_preset:
+            args += ["--tads-preset", tads_preset]
+
+        grna_cas = _strval("GRNA_CAS")
+        if grna_cas:
+            args += ["--grna-cas", grna_cas]
+
+        grna_max_mm = self.params.get("GRNA_MAX_MM")
+        if grna_max_mm is not None and str(grna_max_mm).strip() != "":
+            args += ["--grna-max-mm", str(grna_max_mm)]
+
+        grna_background = _strval("GRNA_BACKGROUND")
+        if grna_background:
+            args += ["--grna-background", grna_background]
+
+        colabfold_cmd = _strval("COLABFOLD_CMD")
+        if colabfold_cmd:
+            args += ["--colabfold-cmd", colabfold_cmd]
+
+        subst_rate = _strval("SUBST_RATE")
+        if subst_rate:
+            args += ["--subst-rate", subst_rate]
+
+        clock_divisor = _strval("CLOCK_DIVISOR")
+        if clock_divisor:
+            args += ["--clock-divisor", clock_divisor]
+
+        intact_orf_aa = self.params.get("INTACT_ORF_AA")
+        if intact_orf_aa is not None and str(intact_orf_aa).strip() != "":
+            args += ["--intact-orf-aa", str(intact_orf_aa)]
+
+        min_ltr_identity = _strval("MIN_LTR_IDENTITY")
+        if min_ltr_identity:
+            args += ["--min-ltr-identity", min_ltr_identity]
+
+        tail_bp = self.params.get("TAIL_BP")
+        if tail_bp is not None and str(tail_bp).strip() != "":
+            args += ["--tail-bp", str(tail_bp)]
+
+        promoter_bp = self.params.get("PROMOTER_BP")
+        if promoter_bp is not None and str(promoter_bp).strip() != "":
+            args += ["--promoter-bp", str(promoter_bp)]
+
+        cpg_omega = _strval("CPG_OMEGA")
+        if cpg_omega:
+            args += ["--cpg-omega", cpg_omega]
+
+        mafft_cmd = _strval("MAFFT_CMD")
+        if mafft_cmd:
+            args += ["--mafft-cmd", mafft_cmd]
+
         args += ["--force"]  # always re-run cached stages in batch mode
 
         cli = " ".join(shlex.quote(str(arg)) for arg in args)
@@ -1552,43 +1661,76 @@ exit $EXIT_CODE
         self.run_command(f"rm -f {job_out} {job_err} {job_done} {job_info}", timeout=10)
 
         # Submit the job
-        submit_cmd = self._submit_job_cmd(job_script)
-        sched_label = (getattr(self, "scheduler", None) or "unknown").upper()
-        print(f"\nSubmitting job via {sched_label}...")
-        _log(f"Submitting scheduler command: {submit_cmd}")
-        out, err, code = self.run_command(submit_cmd, timeout=30)
-        print("\n[HPC DIAG] Submit command completed")
-        print(f"[HPC DIAG] command: {submit_cmd}")
-        print(f"[HPC DIAG] exit={code} stdout={len(out)}B stderr={len(err)}B")
-        if out.strip():
-            print("[HPC DIAG] submit stdout:")
-            for line in out.rstrip().splitlines():
-                print(f"[HPC DIAG]   {line}")
-        if err.strip():
-            print("[HPC DIAG] submit stderr:")
-            for line in err.rstrip().splitlines():
-                print(f"[HPC DIAG]   {line}")
+        if self.scheduler in ("lsf", "slurm"):
+            submit_cmd = self._submit_job_cmd(job_script)
+            sched_label = self.scheduler.upper()
+            print(f"\nSubmitting job via {sched_label}...")
+            _log(f"Submitting scheduler command: {submit_cmd}")
+            out, err, code = self.run_command(submit_cmd, timeout=30)
+            print("\n[HPC DIAG] Submit command completed")
+            print(f"[HPC DIAG] command: {submit_cmd}")
+            print(f"[HPC DIAG] exit={code} stdout={len(out)}B stderr={len(err)}B")
+            if out.strip():
+                print("[HPC DIAG] submit stdout:")
+                for line in out.rstrip().splitlines():
+                    print(f"[HPC DIAG]   {line}")
+            if err.strip():
+                print("[HPC DIAG] submit stderr:")
+                for line in err.rstrip().splitlines():
+                    print(f"[HPC DIAG]   {line}")
 
-        if code != 0:
-            print(f"Error submitting job: {err}")
-            self._diagnostic_command("Scheduler availability", "command -v bsub; command -v sbatch; echo PATH=$PATH", timeout=15)
-            self._diagnostic_command("Job script listing", f"ls -l {shlex.quote(job_script)} {shlex.quote(self.remote_work_dir)}/requirements.txt 2>&1", timeout=15)
-            return False
+            if code != 0:
+                print(f"Error submitting job: {err}")
+                self._diagnostic_command("Scheduler availability", "command -v bsub; command -v sbatch; echo PATH=$PATH", timeout=15)
+                self._diagnostic_command("Job script listing", f"ls -l {shlex.quote(job_script)} {shlex.quote(self.remote_work_dir)}/requirements.txt 2>&1", timeout=15)
+                return False
 
-        # Parse job ID
-        job_id = self._parse_job_id(out)
-        if job_id:
-            self.current_job_id = job_id
-            print(f"Job submitted successfully! Job ID: {job_id}")
-            if self.scheduler == "lsf":
-                self._diagnostic_command("LSF job immediately after submit", f"bjobs -l {shlex.quote(job_id)} 2>&1", timeout=20)
-                self._diagnostic_command("LSF queue summary", f"bjobs {shlex.quote(job_id)} 2>&1", timeout=20)
-            elif self.scheduler == "slurm":
-                self._diagnostic_command("Slurm job immediately after submit", f"squeue -j {shlex.quote(job_id)} -o '%i %T %R' 2>&1", timeout=20)
+            # Parse job ID
+            job_id = self._parse_job_id(out)
+            if job_id:
+                self.current_job_id = job_id
+                print(f"Job submitted successfully! Job ID: {job_id}")
+                if self.scheduler == "lsf":
+                    self._diagnostic_command("LSF job immediately after submit", f"bjobs -l {shlex.quote(job_id)} 2>&1", timeout=20)
+                    self._diagnostic_command("LSF queue summary", f"bjobs {shlex.quote(job_id)} 2>&1", timeout=20)
+                elif self.scheduler == "slurm":
+                    self._diagnostic_command("Slurm job immediately after submit", f"squeue -j {shlex.quote(job_id)} -o '%i %T %R' 2>&1", timeout=20)
+            else:
+                print(f"Job submitted but could not parse job ID from: {out}")
+                job_id = "unknown"
+                self.current_job_id = None
         else:
-            print(f"Job submitted but could not parse job ID from: {out}")
-            job_id = "unknown"
-            self.current_job_id = None
+            # No scheduler — launch inside a detached tmux session so the job
+            # survives SSH disconnects and can be monitored live.
+            session_name = f"gameca_{family}_{_ts}"
+            print("\nNo scheduler detected — launching via tmux...")
+            if not self._has_tmux():
+                print("Error submitting job: tmux is not available on this host.")
+                self._diagnostic_command("tmux availability", "command -v tmux; echo PATH=$PATH", timeout=15)
+                return False
+
+            launch_cmd = self._tmux_launch_cmd(session_name, job_script, job_out, job_err)
+            _log(f"Submitting tmux command: {launch_cmd}")
+            out, err, code = self.run_command(launch_cmd, timeout=30)
+            print("\n[HPC DIAG] tmux launch completed")
+            print(f"[HPC DIAG] command: {launch_cmd}")
+            print(f"[HPC DIAG] exit={code} stdout={len(out)}B stderr={len(err)}B")
+            if err.strip():
+                print("[HPC DIAG] tmux stderr:")
+                for line in err.rstrip().splitlines():
+                    print(f"[HPC DIAG]   {line}")
+
+            verify_out, _, verify_code = self.run_command(
+                f"tmux has-session -t {shlex.quote(session_name)} 2>&1", timeout=15)
+            if code != 0 or verify_code != 0:
+                print(f"Error submitting job: tmux session did not start ({err.strip() or verify_out.strip()})")
+                self._diagnostic_command("tmux sessions", "tmux list-sessions 2>&1", timeout=15)
+                return False
+
+            job_id = session_name
+            self.current_job_id = job_id
+            print(f"Job submitted successfully! tmux session: {job_id}")
+            self._diagnostic_command("tmux session immediately after submit", "tmux list-sessions 2>&1", timeout=15)
 
         # Save job info for later retrieval (paths embedded so finder can reconstruct them)
         job_info_content = (
@@ -1621,16 +1763,20 @@ exit $EXIT_CODE
         print("\nThe job is now running on the HPC cluster.")
         print("Use 'Check job status' to monitor progress.")
         print("Use 'Retrieve results' to download when complete.")
-        sched = getattr(self, "scheduler", "lsf")
+        sched = getattr(self, "scheduler", None)
         print("\nUseful HPC commands:")
         if sched == "slurm":
             print(f"  squeue -j {job_id}     # Check job status")
             print(f"  tail -f {job_out}       # View live output")
             print(f"  scancel {job_id}        # Cancel job")
-        else:
+        elif sched == "lsf":
             print(f"  bjobs {job_id}          # Check job status")
             print(f"  bpeek {job_id}          # View live output")
             print(f"  bkill {job_id}          # Cancel job")
+        else:
+            print(f"  tmux capture-pane -p -t {job_id}   # View live output")
+            print(f"  tmux attach -t {job_id}            # Attach to the session")
+            print(f"  tmux kill-session -t {job_id}      # Cancel job")
         print("=" * 60)
 
         return True
@@ -2120,7 +2266,7 @@ exit $EXIT_CODE
                 return "FAILED"
             return "DONE"  # gone from squeue, assume finished
 
-        else:  # LSF
+        elif self.scheduler == "lsf":
             out, err, code = self.run_command(f"bjobs {job_id} 2>&1", timeout=15)
             print(f"[HPC DIAG] scheduler state probe: scheduler=lsf job={job_id} exit={code} out={out.strip()!r} err={err.strip()!r}")
             low = out.lower()
@@ -2141,6 +2287,12 @@ exit $EXIT_CODE
                         return "FAILED"
                     return "RUNNING"  # unknown LSF state — still in queue
             return "UNKNOWN"
+
+        else:  # No scheduler — job runs inside a tmux session
+            out, err, code = self.run_command(
+                f"tmux has-session -t {shlex.quote(str(job_id))} 2>&1", timeout=15)
+            print(f"[HPC DIAG] scheduler state probe: scheduler=none(tmux) job={job_id} exit={code} out={out.strip()!r} err={err.strip()!r}")
+            return "RUNNING" if code == 0 else "DONE"
 
     def check_job_status(self):
         """Check the status of the most recently submitted batch job."""
@@ -2195,6 +2347,13 @@ exit $EXIT_CODE
             bj_out, bj_err, bj_rc = self.run_command("bjobs 2>&1", timeout=15)
             print(f"  bjobs  (exit {bj_rc}):")
             for ln in (bj_out or bj_err or "(no output)").rstrip().splitlines():
+                print(f"    {ln}")
+        else:
+            tx_out, tx_err, tx_rc = self.run_command(
+                "tmux list-sessions 2>&1 | grep gameca_ || echo '(no active tmux sessions)'",
+                timeout=15)
+            print(f"  tmux list-sessions  (exit {tx_rc}):")
+            for ln in (tx_out or tx_err or "(no output)").rstrip().splitlines():
                 print(f"    {ln}")
 
         py_out, _, _ = self.run_command(
@@ -2402,6 +2561,12 @@ exit $EXIT_CODE
                 "running python pipeline processes",
                 "ps aux 2>/dev/null | grep -E '[p]ython.*te_|[p]ython.*query' | head -10 || echo '(none)'",
                 timeout=10)
+        else:
+            self._diagnostic_command("tmux sessions", "tmux list-sessions 2>&1", timeout=15)
+            self._diagnostic_command(
+                "running python pipeline processes",
+                "ps aux 2>/dev/null | grep -E '[p]ython.*te_|[p]ython.*query' | head -10 || echo '(none)'",
+                timeout=10)
 
         if self.scheduler == "lsf":
             self._diagnostic_command("bjobs summary", f"bjobs {shlex.quote(job_id)} 2>&1", timeout=20)
@@ -2410,6 +2575,9 @@ exit $EXIT_CODE
         elif self.scheduler == "slurm":
             self._diagnostic_command("squeue summary", f"squeue -j {shlex.quote(job_id)} -o '%i %T %R' 2>&1", timeout=20)
             self._diagnostic_command("sacct", f"sacct -j {shlex.quote(job_id)} --format=JobID,State,ExitCode,Elapsed,NodeList,Reason 2>&1", timeout=30)
+        else:
+            self._diagnostic_command("tmux session state", f"tmux has-session -t {shlex.quote(job_id)} 2>&1 && echo RUNNING || echo GONE", timeout=15)
+            self._diagnostic_command("tmux pane tail", f"tmux capture-pane -p -t {shlex.quote(job_id)} 2>&1 | tail -120", timeout=20)
 
         for label, path in [
             ("job stdout", job_out),
@@ -2848,12 +3016,31 @@ exit $EXIT_CODE
             else:
                 print(f"[SUBMIT] Scheduler submission FAILED (exit={sub_code})")
         else:
-            print("[SUBMIT] Scheduler daemon not live — skipping scheduler, using nohup")
+            print("[SUBMIT] Scheduler daemon not live — skipping scheduler, using tmux")
 
-        # ── Step 3: nohup fallback ────────────────────────────────────────────
+        # ── Step 3: tmux fallback (keeps the job alive across SSH disconnects) ─
         if not job_id:
             if combined:
-                print(f"[SUBMIT] Scheduler gave no valid job ID — trying nohup fallback")
+                print(f"[SUBMIT] Scheduler gave no valid job ID — trying tmux fallback")
+
+            if self._has_tmux():
+                session_name = f"{job_name}_{_ts}"
+                tmux_cmd = self._tmux_launch_cmd(session_name, job_script, job_out, job_err)
+                print(f"[SUBMIT] tmux command: {tmux_cmd}")
+                tx_out, tx_err, tx_code = self.run_command(tmux_cmd, timeout=20)
+                verify_out, _, verify_code = self.run_command(
+                    f"tmux has-session -t {shlex.quote(session_name)} 2>&1", timeout=15)
+                print(f"[SUBMIT] tmux exit={tx_code}  session={session_name!r}  verify_exit={verify_code}  stderr={tx_err.strip()!r}")
+                if tx_code == 0 and verify_code == 0:
+                    self._write_job_info(job_info, session_name, job_out, job_err, job_done, label)
+                    print(f"\n  Job running in tmux session  ({session_name})")
+                    print(f"  Output: tmux capture-pane -p -t {session_name}")
+                    print(f"  Attach: tmux attach -t {session_name}")
+                    return session_name
+                print(f"[SUBMIT] tmux launch failed — falling back to nohup")
+            else:
+                print(f"[SUBMIT] tmux not available on remote host — falling back to nohup")
+
             nohup_cmd = (
                 f"nohup bash {shlex.quote(job_script)} "
                 f">{shlex.quote(job_out)} 2>{shlex.quote(job_err)} </dev/null & "

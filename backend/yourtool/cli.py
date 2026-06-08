@@ -55,7 +55,8 @@ def main(argv: Sequence[str] | None = None, cancel_event: Event | None = None) -
     p_hpc_connect = sub.add_parser("hpc-connect", help="Connect to an SSH/HPC host.")
     p_hpc_connect.add_argument("--host", required=True)
     p_hpc_connect.add_argument("--user", required=True)
-    p_hpc_connect.add_argument("--password", required=True)
+    p_hpc_connect.add_argument("--password", default="", help="Leave blank when using --key for key-file authentication.")
+    p_hpc_connect.add_argument("--key", default="", help="Path to an SSH private key file (e.g. ~/.ssh/id_ed25519 or a downloaded .key/.pem).")
     p_hpc_connect.add_argument("--port", type=int, default=22)
     p_hpc_connect.add_argument("--scheduler", choices=["auto", "lsf", "slurm"], default="auto")
     p_hpc_connect.add_argument("--work-dir", default="", help="Shared writable remote directory for uploads/jobs.")
@@ -226,7 +227,8 @@ def _cmd_hpc_connect(args: argparse.Namespace, _cancel_event: Event | None) -> d
     if _HPC_CLIENT is not None and getattr(_HPC_CLIENT, "connected", False):
         _HPC_CLIENT.disconnect()
     client = HPCClient()
-    ok = client.connect(args.host, args.user, args.password, args.port, work_dir=args.work_dir)
+    ok = client.connect(args.host, args.user, args.password, args.port,
+                        work_dir=args.work_dir, key_path=args.key)
     if not ok:
         return {"ok": False, "error": "connection failed", "exit_code": 1}
     if args.scheduler != "auto":
@@ -350,6 +352,25 @@ def _apply_hpc_params(client: Any, params: dict[str, Any]) -> None:
         "skip_go": "SKIP_GO",
         "skip_tsne": "SKIP_TSNE",
         "annot_source": "ANNOTATION_SOURCE",
+        # Stage 11 / standout analysis module options
+        "target_assemblies": "TARGET_ASSEMBLIES",
+        "ortholog_species": "ORTHOLOG_SPECIES",
+        "liftover_cmd": "LIFTOVER_CMD",
+        "epigenetic_preset": "EPIGENETIC_PRESET",
+        "ctcf_preset": "CTCF_PRESET",
+        "tads_preset": "TADS_PRESET",
+        "grna_cas": "GRNA_CAS",
+        "grna_max_mm": "GRNA_MAX_MM",
+        "grna_background": "GRNA_BACKGROUND",
+        "colabfold_cmd": "COLABFOLD_CMD",
+        "subst_rate": "SUBST_RATE",
+        "clock_divisor": "CLOCK_DIVISOR",
+        "intact_orf_aa": "INTACT_ORF_AA",
+        "min_ltr_identity": "MIN_LTR_IDENTITY",
+        "tail_bp": "TAIL_BP",
+        "promoter_bp": "PROMOTER_BP",
+        "cpg_omega": "CPG_OMEGA",
+        "mafft_cmd": "MAFFT_CMD",
     }
     for source, dest in mapping.items():
         if source in params and params[source] not in (None, ""):
