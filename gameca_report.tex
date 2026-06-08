@@ -96,6 +96,11 @@
 \inputIfAny{multiassembly_measured_values.tex}
 \inputIfAny{fold_measured_values.tex}
 \inputIfAny{provenance_measured_values.tex}
+\inputIfAny{repeat_landscape_values.tex}
+\inputIfAny{ltr_struct_values.tex}
+\inputIfAny{subfamily_values.tex}
+\inputIfAny{de_values.tex}
+\inputIfAny{benchmark_values.tex}
 
 % Phylogenetics / divergence-age / master element (#1 #2 #14)
 \providecommand{\phyloFamily}{(pending run)}\providecommand{\phyloNCopies}{(pending run)}
@@ -144,6 +149,24 @@
 \providecommand{\provPython}{(pending run)}\providecommand{\provNStages}{(pending run)}
 \providecommand{\provMafftVer}{(pending run)}\providecommand{\provBedtoolsVer}{(pending run)}
 \providecommand{\provCreated}{(pending run)}
+% Repeat landscape / CpG-corrected divergence (run_divergence.py)
+\providecommand{\divNloci}{(pending run)}\providecommand{\divNClusters}{(pending run)}
+\providecommand{\divMedianAll}{(pending run)}\providecommand{\divMeanAll}{(pending run)}
+\providecommand{\divCpgOmega}{(pending run)}
+% LTR structural annotation (run_ltr_struct.py)
+\providecommand{\ltrNloci}{(pending run)}\providecommand{\ltrNfull}{(pending run)}
+\providecommand{\ltrNsolo}{(pending run)}\providecommand{\ltrNpbs}{(pending run)}
+\providecommand{\ltrNppt}{(pending run)}\providecommand{\ltrPctFull}{(pending run)}
+% Automatic subfamily resolution (run_subfamily.py)
+\providecommand{\subfamNClusters}{(pending run)}\providecommand{\subfamNSubfamilies}{(pending run)}
+\providecommand{\subfamMinDiv}{(pending run)}\providecommand{\subfamMaxDiv}{(pending run)}
+% Differential expression between clusters (te_expression.py)
+\providecommand{\deNClusters}{(pending run)}\providecommand{\deNTests}{(pending run)}
+\providecommand{\deNColumns}{(pending run)}\providecommand{\deNSignificant}{(pending run)}
+% Benchmarking against manual workflow (run_benchmark.py)
+\providecommand{\benchGAMECAsteps}{(pending run)}\providecommand{\benchManualSteps}{(pending run)}
+\providecommand{\benchNStages}{(pending run)}\providecommand{\benchTotalSec}{(pending run)}
+\providecommand{\benchTotalMin}{(pending run)}
 
 \captionsetup{font=small,labelfont=bf}
 \setlength{\parskip}{2pt}
@@ -594,6 +617,42 @@ with ColabFold; per-residue pLDDT and PAE are summarised. For \texttt{\foldFamil
 \foldNFolded{} of \foldNOrfs{} ORFs folded, best mean pLDDT \foldBestMeanPlddt{}
 (\foldBestName).
 
+\paragraph{Repeat landscape and CpG-corrected divergence (\texttt{run\_divergence.py}).}
+Per-locus Kimura two-parameter divergence from the cluster consensus sequence is computed
+with CpG-site down-weighting and rendered as a repeat-landscape histogram faceted by
+cluster --- the evolutionary-age figure expected in essentially every TE methods paper.
+This run measured \divNloci{} loci across \divNClusters{} clusters, median divergence
+\divMedianAll{} (mean \divMeanAll, CpG $\omega=$\divCpgOmega)
+(Fig.~\ref{fig:repeat_landscape}).
+
+\paragraph{LTR structural annotation (\texttt{run\_ltr\_struct.py}).}
+Each locus is classified as full-length, solo-LTR, internal-only or truncated from a
+pure-Python scan for 5'/3' terminal-repeat identity, the primer-binding site (PBS),
+polypurine tract (PPT) and target-site duplication (TSD) --- requiring no external tools.
+This run found \ltrNfull{} of \ltrNloci{} loci (\ltrPctFull) full-length, \ltrNpbs{} with a
+detected PBS and \ltrNppt{} with a PPT (Fig.~\ref{fig:ltr_struct}).
+
+\paragraph{Automatic subfamily resolution (\texttt{run\_subfamily.py}).}
+Cluster consensus sequences are compared pairwise by CpG-corrected K2P distance, related to
+the Dfam canonical when reachable, and organised into an UPGMA dendrogram --- turning
+GAMECA's implicit HDBSCAN clusters into named, data-driven subfamilies (a step most users
+otherwise perform by hand in MEGA~\citep{tamura2021mega}). This run identified
+\subfamNSubfamilies{} provisional subfamilies across \subfamNClusters{} clusters, spanning
+\subfamMinDiv--\subfamMaxDiv divergence from the canonical (Fig.~\ref{fig:subfamily_tree}).
+
+\paragraph{Differential expression between clusters (\texttt{te\_expression.py}).}
+A pairwise Mann--Whitney $U$ test with Benjamini--Hochberg correction promotes the
+expression module from descriptive boxplots to inferential, publishable DE tables. This run
+found \deNSignificant{} of \deNTests{} pairwise tests across \deNClusters{} clusters
+significant at $p_\mathrm{adj}<0.05$ (Figs.~\ref{fig:de_heatmap}--\ref{fig:de_volcano}).
+
+\paragraph{Benchmarking against a manual workflow (\texttt{run\_benchmark.py}).}
+Per-stage wall-clock time is recorded automatically and set against the step count of the
+equivalent manual workflow (UCSC download, \texttt{awk}/\texttt{bedtools}, MAFFT, R
+clustering, \dots). This run timed \benchNStages{} stages totalling \benchTotalMin{} min,
+versus \benchGAMECAsteps{} GAMECA commands to \benchManualSteps{} manual-workflow steps
+(Figs.~\ref{fig:benchmark}--\ref{fig:benchmark_steps}).
+
 \paragraph{Reproducibility (\texttt{te\_provenance.py}).}
 Every run emits a machine-readable provenance manifest---git SHA \provGitSha,
 \provPlatform, Python \provPython, tool versions (MAFFT \provMafftVer; bedtools
@@ -628,6 +687,27 @@ Apptainer/Singularity image for install-free HPC execution.
 \begin{figure}[h]\centering\resizebox{0.8\textwidth}{!}{\figorbox{fig_ctcf_overlap}}
   \caption{\texttt{\ctcfFamily}: CTCF-site provision (core motif $\pm$ ChIP
     overlap).}\label{fig:ctcf}\end{figure}
+\begin{figure}[h]\centering\resizebox{1.0\textwidth}{!}{\figorbox{fig_repeat_landscape}}
+  \caption{Repeat landscape: CpG-corrected Kimura divergence-from-consensus histogram,
+    faceted by cluster.}\label{fig:repeat_landscape}\end{figure}
+\begin{figure}[h]\centering\resizebox{0.8\textwidth}{!}{\figorbox{fig_ltr_struct}}
+  \caption{LTR structural classification (full-length / solo-LTR / internal-only /
+    truncated) by cluster.}\label{fig:ltr_struct}\end{figure}
+\begin{figure}[h]\centering\resizebox{0.8\textwidth}{!}{\figorbox{fig_subfamily_tree}}
+  \caption{UPGMA dendrogram of cluster consensus sequences with provisional subfamily
+    labels.}\label{fig:subfamily_tree}\end{figure}
+\begin{figure}[h]\centering\resizebox{0.8\textwidth}{!}{\figorbox{de_heatmap}}
+  \caption{Pairwise differential expression between clusters: $-\log_{10}(p_\mathrm{adj})$
+    heatmap (Mann--Whitney $U$, BH-corrected).}\label{fig:de_heatmap}\end{figure}
+\begin{figure}[h]\centering\resizebox{0.8\textwidth}{!}{\figorbox{de_volcano}}
+  \caption{Differential-expression volcano plot: $\log_2$ fold-change vs.\
+    $-\log_{10}(p_\mathrm{adj})$ across all cluster pairs and expression
+    columns.}\label{fig:de_volcano}\end{figure}
+\begin{figure}[h]\centering\resizebox{0.9\textwidth}{!}{\figorbox{fig_benchmark}}
+  \caption{Per-stage wall-clock time for the GAMECA pipeline.}\label{fig:benchmark}\end{figure}
+\begin{figure}[h]\centering\resizebox{0.7\textwidth}{!}{\figorbox{fig_benchmark_steps}}
+  \caption{User-facing step count: GAMECA vs.\ the equivalent manual
+    workflow.}\label{fig:benchmark_steps}\end{figure}
 
 % ===========================================================================
 \section{Discussion}
@@ -662,30 +742,6 @@ because it communicates the evolutionary age distribution of loci at a glance.  
 HDBSCAN cluster can be interrogated independently for its divergence profile, enabling
 detection of age-stratified subpopulations within a family.
 
-\paragraph{T2T-CHM13 support.}
-A non-trivial fraction of full-length LTR retrotransposons and other TE loci reside in
-previously unresolved pericentromeric and subtelomeric regions absent from hg38.  Supporting
-the T2T-CHM13v2 assembly~\citep{nurk2022chm13} would be a concrete novelty claim for the
-tool, as those regions are actively being annotated and the TE content is substantially
-richer.  The architecture already supports adding new assemblies via a one-line entry in
-the \texttt{DFAM\_ASSEMBLY\_IDS} dictionary; integrating a CHM13-specific RMSK track is
-planned for the next release.
-
-\paragraph{Automatic subfamily resolution.}
-GAMECA's HDBSCAN clusters are implicit subfamilies: they partition a named family into
-sequence-coherent groups without requiring a pre-existing subfamily hierarchy.  Future work
-will formalise this by building a per-cluster consensus sequence, computing divergence from
-the Dfam canonical model, and constructing a neighbour-joining tree across clusters, yielding
-a data-driven subfamily assignment.  This fills a genuine gap---most users perform this step
-manually in MEGA after the fact~\citep{tamura2021mega}.
-
-\paragraph{Differential expression across clusters.}
-The Wilcoxon rank-sum test with Benjamini--Hochberg FDR correction introduced in this version
-(Section~\ref{sec:pipeline}) promotes the expression module from descriptive (boxplots) to
-inferential (publishable DE tables).  Extending to edgeR~\citep{robinson2010edger} or
-DESeq2~\citep{love2014deseq2} negative-binomial models would accommodate count overdispersion
-more rigorously; this is straightforward given the tabular checkpoint structure.
-
 \paragraph{LTR structural annotation.}
 For LTR families (HERVK, IAPLTR1\_Mm, THE1D, etc.), GAMECA now annotates each locus
 with structural features using a pure-Python implementation (\texttt{te\_ltr\_struct.py})
@@ -697,7 +753,9 @@ tRNA-Leu); (iii)~the polypurine tract (PPT; $\geq 70\%$ purines in a 15-bp slidi
 window near the 3$'$ end); and (iv)~target-site duplications (TSD; 4--6-bp direct
 repeats) when flanking genomic sequence is supplied.  Each locus is classified as
 \emph{full-length}, \emph{solo-LTR}, \emph{internal-only}, or \emph{truncated}
-(Table~S-LTR).  Results are written to \texttt{reports/ltr\_struct\_annotated.csv}
+(Table~S-LTR, Figure~\ref{fig:ltr_struct}): \ltrNfull{} of \ltrNloci{} loci
+(\ltrPctFull) are full-length, with a PBS detected in \ltrNpbs{} and a PPT in
+\ltrNppt.  Results are written to \texttt{reports/ltr\_struct\_annotated.csv}
 and \texttt{reports/fig\_ltr\_struct.png}.
 
 \paragraph{Repeat landscape and CpG-corrected divergence.}
@@ -710,8 +768,9 @@ the corrected transition and transversion fractions respectively~\citep{kimura19
 Pairwise alignment uses BioPython's \texttt{PairwiseAligner} (global mode, DNA
 substitution matrix) with a majority-vote fallback when \texttt{BioPython} is absent.
 The resulting repeat-landscape histogram is faceted by cluster and saved to
-\texttt{reports/fig\_repeat\_landscape.png} (.pdf also); per-locus values are in
-\texttt{reports/divergence\_per\_locus.csv}.
+\texttt{reports/fig\_repeat\_landscape.png} (.pdf also; Figure~\ref{fig:repeat_landscape}):
+\divNloci{} loci across \divNClusters{} clusters, median divergence \divMedianAll{}
+(mean \divMeanAll).  Per-locus values are in \texttt{reports/divergence\_per\_locus.csv}.
 
 \paragraph{Automatic subfamily resolution.}
 GAMECA builds a provisional subfamily table (\texttt{reports/subfamily\_table.csv})
@@ -720,7 +779,10 @@ sequences, then constructing an UPGMA dendrogram (\texttt{reports/fig\_subfamily
 using \texttt{scipy.cluster.hierarchy}.  When the Dfam REST API is reachable, the
 canonical consensus for the queried family is retrieved and each cluster is labelled
 canonical-type (divergence $\leq 3\%$) or assigned a provisional sub-family label
-(\texttt{fig\_subfamily\_divergence.png}).  The dendrogram is also exported in Newick
+(\texttt{fig\_subfamily\_divergence.png}).  This run identified \subfamNSubfamilies{}
+provisional subfamilies across \subfamNClusters{} clusters, spanning
+\subfamMinDiv--\subfamMaxDiv{} divergence from the canonical
+(Figure~\ref{fig:subfamily_tree}).  The dendrogram is also exported in Newick
 format (\texttt{reports/subfamily\_tree.nwk}).
 
 \paragraph{Differential expression between clusters.}
@@ -731,7 +793,11 @@ and each ordered cluster pair, a two-sided Mann--Whitney $U$ test is applied
 genome-wide using the Benjamini--Hochberg procedure.  Results are saved to
 \texttt{expression\_plots/de\_pairwise.csv} (all tests) and
 \texttt{expression\_plots/de\_significant.csv} ($p_\mathrm{adj} < 0.05$), with a
-$-\log_{10}(p_\mathrm{adj})$ heatmap and a volcano plot for visual summary.
+$-\log_{10}(p_\mathrm{adj})$ heatmap and a volcano plot for visual summary
+(Figs.~\ref{fig:de_heatmap}--\ref{fig:de_volcano}): \deNSignificant{} of
+\deNTests{} pairwise tests across \deNClusters{} clusters pass the threshold.
+A natural extension is negative-binomial modelling via edgeR~\citep{robinson2010edger}
+or DESeq2~\citep{love2014deseq2} to accommodate count overdispersion.
 
 \paragraph{T2T-CHM13 support.}
 GAMECA now accepts \texttt{--assembly hs1} (T2T-CHM13v2.0) in addition to
@@ -752,8 +818,9 @@ scripting, motif analysis, LTR annotation, expression overlay, and report
 generation), versus \benchGAMECAsteps{} for GAMECA.  Wall-clock timings are recorded
 per-stage in \texttt{pipeline\_diagnostic.log} and summarised in
 \texttt{reports/benchmark\_table.csv}; the stage-timing bar chart is
-\texttt{reports/fig\_benchmark.png}.  No runtime is claimed for the manual path
-(hardware- and experience-dependent).
+\texttt{reports/fig\_benchmark.png} (Figs.~\ref{fig:benchmark}--\ref{fig:benchmark_steps}):
+\benchNStages{} stages timed, \benchTotalMin{} min total wall-clock.  No runtime is claimed
+for the manual path (hardware- and experience-dependent).
 
 \paragraph{Epigenomics integration.}
 The question of \emph{which} TEs are currently active is most powerfully answered by

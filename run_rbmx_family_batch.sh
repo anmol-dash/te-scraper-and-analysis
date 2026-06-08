@@ -26,8 +26,11 @@ ASSEMBLY="hg38"
 OUT_DIR="results_rbmx_families"
 MAX_LOCI=3000        # cap loci per family for speed/reliability — raise this
                      # (or comment out the --max-loci line below) for a full run
+MAX_PARALLEL=4       # families to run concurrently; tune to available RAM
+                     # (each family needs ~12 GB → 4 fits on a 64-GB node)
 LOG_DIR="$OUT_DIR/_logs"
-mkdir -p "$LOG_DIR"
+STATUS_DIR="$OUT_DIR/_status"   # one-file-per-family exit status (parallel-safe)
+mkdir -p "$LOG_DIR" "$STATUS_DIR"
 
 # ── Stage 11 options — chosen for *this* family list ───────────────────────
 # All families are human/hg38, so the human defaults for --subst-rate,
@@ -110,13 +113,16 @@ FAMILIES=(
 
 SUMMARY="$OUT_DIR/_summary.tsv"
 mkdir -p "$OUT_DIR"
-echo -e "family\tstatus\tlog" > "$SUMMARY"
 
-for FAM in "${FAMILIES[@]}"; do
-  LOG="$LOG_DIR/${FAM}.log"
-  echo "============================================================"
-  echo " $FAM  ->  $LOG"
-  echo "============================================================"
+# ── Per-family worker (runs in a subshell) ──────────────────────────────────
+# Writes all query.py output to its log file; writes OK/FAILED to a per-family
+# status file so the summary step can assemble the tsv after all jobs finish.
+run_family() {
+  local FAM="$1"
+  local LOG="$LOG_DIR/${FAM}.log"
+  local STATUS_FILE="$STATUS_DIR/${FAM}.status"
+
+  echo "[$(date +%H:%M:%S)] $FAM  starting → $LOG" >&2
 
   if python3 query.py --local --family "$FAM" --assembly "$ASSEMBLY" \
         --max-loci "$MAX_LOCI" \
@@ -129,12 +135,48 @@ for FAM in "${FAMILIES[@]}"; do
         --output "$OUT_DIR" \
         > "$LOG" 2>&1
   then
-    echo -e "${FAM}\tOK\t${LOG}"     >> "$SUMMARY"
-    echo "  OK"
+    echo "OK" > "$STATUS_FILE"
+    echo "[$(date +%H:%M:%S)] $FAM  OK" >&2
   else
-    echo -e "${FAM}\tFAILED\t${LOG}" >> "$SUMMARY"
-    echo "  FAILED -- see $LOG"
+    echo "FAILED" > "$STATUS_FILE"
+    echo "[$(date +%H:%M:%S)] $FAM  FAILED — see $LOG" >&2
   fi
+}
+export -f run_family
+export ASSEMBLY OUT_DIR MAX_LOCI LOG_DIR STATUS_DIR
+export TARGET_ASSEMBLIES ORTHOLOG_SPECIES EPIGENETIC_PRESET CTCF_PRESET TADS_PRESET
+
+# ── FIFO semaphore: bounded parallelism without busy-polling ────────────────
+# Pre-load MAX_PARALLEL tokens; each worker reads one before starting and
+# writes one back when done.  Requires bash ≥ 4.1 ({fd} syntax).
+_SEM=$(mktemp -u)
+mkfifo "$_SEM"
+exec {_sem_fd}<>"$_SEM"
+rm -f "$_SEM"
+for ((i = 0; i < MAX_PARALLEL; i++)); do echo >&${_sem_fd}; done
+
+for FAM in "${FAMILIES[@]}"; do
+  read -u ${_sem_fd}          # block until a slot is free
+  (
+    run_family "$FAM"
+    echo >&${_sem_fd}         # release slot when done
+  ) &
+done
+
+wait                          # wait for all background workers
+exec {_sem_fd}>&-             # close semaphore fd
+
+# ── Assemble summary from per-family status files ───────────────────────────
+echo -e "family\tstatus\tlog" > "$SUMMARY"
+for FAM in "${FAMILIES[@]}"; do
+  STATUS_FILE="$STATUS_DIR/${FAM}.status"
+  LOG="$LOG_DIR/${FAM}.log"
+  if [[ -f "$STATUS_FILE" ]]; then
+    STATUS=$(< "$STATUS_FILE")
+  else
+    STATUS="MISSING"
+  fi
+  echo -e "${FAM}\t${STATUS}\t${LOG}" >> "$SUMMARY"
 done
 
 echo
