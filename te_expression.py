@@ -82,6 +82,8 @@ def parse_args():
     )
     p.add_argument("--input",        required=True, help="Clustered CSV (from te_clustering.py)")
     p.add_argument("--out-dir",      default=".",  help="Output directory")
+    p.add_argument("--reports-dir",  default=None, help=argparse.SUPPRESS)
+    p.add_argument("--family",       default=None, help=argparse.SUPPRESS)
     p.add_argument("--stage-cols",   nargs="+",    default=None,
                    help="Explicit expression column names")
     p.add_argument("--stage-labels", nargs="+",    default=None,

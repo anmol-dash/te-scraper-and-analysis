@@ -36,6 +36,8 @@ Standalone:
         --family LTR5_Hs --assembly hg38
 """
 
+from __future__ import annotations
+
 import argparse
 import datetime
 import json
