@@ -688,6 +688,16 @@ def _check_jaspar_env(args):
     """
     import subprocess, shutil
 
+    # Auto-detect any proxy/route the node uses (e.g. configured only in
+    # ~/.curlrc or ~/.condarc) and export it so pip/requests use it too.
+    try:
+        from te_motif import _apply_network_env
+        _proxy = _apply_network_env()
+        if _proxy:
+            print(f"  Network: proxy auto-detected → {_proxy}")
+    except Exception:
+        pass
+
     skip_motif = getattr(args, "skip_motif", False)
     jaspar_bed = getattr(args, "jaspar_bed", None) or ""
 

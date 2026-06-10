@@ -61,6 +61,118 @@ from scipy import stats
 log = logging.getLogger("te_motif")
 
 
+# ── Network self-detection ────────────────────────────────────────────────────
+# HPC compute nodes frequently reach the internet only through a proxy that is
+# configured in a curl-specific place (~/.curlrc, ~/.condarc) and NOT exported
+# as the standard *_proxy environment variables that Python/pip honour. The
+# helpers below discover whatever route works and apply it to the process
+# environment so requests, pip and curl all use the same path — no user setup.
+
+_NETWORK_ENV_APPLIED = False
+
+
+def _detect_proxy():
+    """Return an https proxy URL discovered from the environment/config, or None.
+
+    Checks, in order: standard env vars (any case), ~/.curlrc, ~/.condarc,
+    ~/.wgetrc and /etc/wgetrc. Returns the first proxy found.
+    """
+    # 1. Standard environment variables (any capitalisation, http or https)
+    for var in ("https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY",
+                "all_proxy", "ALL_PROXY"):
+        val = os.environ.get(var)
+        if val:
+            return val.strip()
+
+    home = Path.home()
+
+    # 2. ~/.curlrc  —  `proxy = http://host:port`  or  `--proxy http://host:port`
+    curlrc = home / ".curlrc"
+    if curlrc.exists():
+        try:
+            for raw in curlrc.read_text(errors="ignore").splitlines():
+                line = raw.strip()
+                if line.startswith("#") or not line:
+                    continue
+                low = line.lower()
+                if low.startswith(("proxy", "-x", "--proxy")):
+                    # forms: "proxy = url", "proxy=url", "-x url", "--proxy url"
+                    for sep in ("=", " "):
+                        if sep in line:
+                            cand = line.split(sep, 1)[1].strip().strip('"').strip("'")
+                            if cand:
+                                return cand
+        except Exception:
+            pass
+
+    # 3. ~/.condarc  —  proxy_servers: { https: url, http: url }
+    condarc = home / ".condarc"
+    if condarc.exists():
+        try:
+            txt = condarc.read_text(errors="ignore")
+            for key in ("https:", "http:"):
+                if key in txt:
+                    seg = txt.split(key, 1)[1].splitlines()[0].strip()
+                    seg = seg.strip('"').strip("'")
+                    if seg.startswith(("http://", "https://")):
+                        return seg
+        except Exception:
+            pass
+
+    # 4. wgetrc files
+    for wgetrc in (home / ".wgetrc", Path("/etc/wgetrc")):
+        if wgetrc.exists():
+            try:
+                for raw in wgetrc.read_text(errors="ignore").splitlines():
+                    line = raw.strip()
+                    low = line.lower()
+                    if low.startswith(("https_proxy", "http_proxy")) and "=" in line:
+                        cand = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        if cand:
+                            return cand if "://" in cand else "http://" + cand
+            except Exception:
+                pass
+
+    return None
+
+
+def _apply_network_env():
+    """Normalise any discovered proxy into the standard *_proxy env vars so that
+    Python (requests/urllib), pip and curl all use the same route. Idempotent."""
+    global _NETWORK_ENV_APPLIED
+    if _NETWORK_ENV_APPLIED:
+        return os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+    _NETWORK_ENV_APPLIED = True
+    proxy = _detect_proxy()
+    if proxy:
+        for var in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+            os.environ.setdefault(var, proxy)
+        log.info("Network: using proxy %s (auto-detected)", proxy)
+    return proxy
+
+
+def _curl_download(url, dest, timeout=120):
+    """Download `url` to `dest` using curl (which works on HPC nodes where the
+    Python socket stack is blocked). curl natively reads ~/.curlrc; we also pass
+    any detected proxy explicitly. Returns True on success."""
+    import subprocess
+    proxy = _apply_network_env()
+    cmd = ["curl", "-fsSL", "--connect-timeout", "10",
+           "--max-time", str(timeout), "-o", str(dest)]
+    if proxy:
+        cmd += ["--proxy", proxy]
+    cmd.append(url)
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 30)
+        if r.returncode == 0 and Path(dest).exists() and Path(dest).stat().st_size > 0:
+            return True
+        log.warning("curl download failed (%s): rc=%s %s",
+                    url, r.returncode, (r.stderr or "")[:200])
+    except Exception as exc:
+        log.warning("curl download errored (%s): %s", url, exc)
+    return False
+
+
 class _GlibcIncompatibleError(RuntimeError):
     """Raised when bigBedToBed fails due to GLIBC mismatch and pybigtools is absent."""
 
@@ -259,8 +371,15 @@ def _get_bigbed_to_bed(jaspar_dir):
 
     url = f"https://hgdownload.soe.ucsc.edu/admin/exe/{ucsc_platform}/bigBedToBed"
     log.info("bigBedToBed not found — downloading UCSC utility: %s", url)
+    # Prefer curl (works on HPC nodes where Python sockets are blocked); fall
+    # back to requests if curl is unavailable.
+    if _curl_download(url, exe, timeout=120):
+        exe.chmod(exe.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        log.info("bigBedToBed downloaded (curl) → %s", exe)
+        return str(exe)
     try:
         import requests
+        _apply_network_env()
         with requests.get(url, stream=True, timeout=60) as r:
             r.raise_for_status()
             with open(exe, "wb") as fh:
@@ -322,31 +441,124 @@ def _ensure_pybigtools():
     import sys
 
     log.info("pybigtools not installed — attempting automatic pip install ...")
+    proxy = _apply_network_env()  # normalise proxy into env for pip + requests
+    proxy_args = ["--proxy", proxy] if proxy else []
+
+    def _retry_import():
+        importlib.invalidate_caches()
+        import pybigtools  # noqa: F401, PLC0415
+        return True
+
     # Try a normal install first, then a --user install (works without write
     # access to the conda/site-packages dir, common on shared HPC nodes).
+    base = [sys.executable, "-m", "pip", "install", "--quiet",
+            "--disable-pip-version-check"]
     attempts = (
-        [sys.executable, "-m", "pip", "install", "--quiet",
-         "--disable-pip-version-check", "pybigtools"],
-        [sys.executable, "-m", "pip", "install", "--quiet",
-         "--disable-pip-version-check", "--user", "pybigtools"],
+        base + proxy_args + ["pybigtools"],
+        base + proxy_args + ["--user", "pybigtools"],
     )
     for cmd in attempts:
         try:
             res = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
             if res.returncode != 0:
-                log.warning("  pip install failed (%s): %s",
-                            " ".join(cmd[-2:]), (res.stderr or res.stdout)[-300:])
+                log.warning("  pip install failed: %s",
+                            (res.stderr or res.stdout)[-300:])
                 continue
-            importlib.invalidate_caches()
-            import pybigtools  # noqa: F401, PLC0415
-            log.info("  pybigtools installed successfully via: %s", " ".join(cmd[3:]))
-            return True
+            log.info("  pybigtools installed via pip%s", " (proxy)" if proxy else "")
+            return _retry_import()
         except subprocess.TimeoutExpired:
-            log.warning("  pip install timed out (>600s): %s", " ".join(cmd[3:]))
+            log.warning("  pip install timed out (>600s)")
         except Exception as exc:
-            log.warning("  pip install attempt errored (%s): %s",
-                        " ".join(cmd[3:]), exc)
+            log.warning("  pip install attempt errored: %s", exc)
+
+    # Last resort: pip's Python socket stack is blocked but curl has a route.
+    # Fetch a compatible wheel from PyPI via curl and install it offline.
+    if _install_wheel_via_curl("pybigtools"):
+        try:
+            return _retry_import()
+        except Exception:
+            pass
+
     log.error("  Could not auto-install pybigtools (no network / no pip / restricted env).")
+    return False
+
+
+def _install_wheel_via_curl(pkg):
+    """Fetch a platform-compatible wheel for `pkg` from PyPI using curl, then
+    pip-install it from the local file. Works when only curl can reach the net.
+    Returns True if a wheel was downloaded and installed."""
+    import json
+    import subprocess
+    import sys
+    import sysconfig
+
+    log.info("  Falling back to curl wheel fetch for %s ...", pkg)
+    meta = Path(tempfile.gettempdir()) / f"{pkg}_pypi.json"
+    if not _curl_download(f"https://pypi.org/pypi/{pkg}/json", meta, timeout=60):
+        return False
+    try:
+        data = json.loads(meta.read_text())
+    except Exception as exc:
+        log.warning("  Could not parse PyPI metadata: %s", exc)
+        return False
+
+    pyver = f"cp{sys.version_info.major}{sys.version_info.minor}"
+    plat = (sysconfig.get_platform() or "").lower()  # e.g. linux-x86_64
+    arch = "x86_64" if "x86_64" in plat or "amd64" in plat else (
+        "aarch64" if "aarch64" in plat or "arm64" in plat else "")
+
+    def _score(fname):
+        f = fname.lower()
+        if not f.endswith(".whl"):
+            return -1
+        if pyver not in f and "py3" not in f and "abi3" not in f:
+            return -1
+        if "linux" in plat:
+            if "manylinux" not in f and "linux" not in f:
+                return -1
+            if arch and arch not in f:
+                return -1
+        s = 0
+        if pyver in f: s += 4           # exact cpython match
+        if "abi3" in f: s += 2          # stable-ABI wheel, broadly compatible
+        if arch and arch in f: s += 1
+        if "manylinux2014" in f or "manylinux_2_17" in f: s += 1
+        return s
+
+    best, best_score = None, -1
+    for rel in data.get("urls", []):
+        sc = _score(rel.get("filename", ""))
+        if sc > best_score:
+            best, best_score = rel, sc
+    if not best or best_score < 0:
+        # fall back to scanning all historical releases (newest first)
+        for ver in sorted(data.get("releases", {}), reverse=True):
+            for rel in data["releases"][ver]:
+                sc = _score(rel.get("filename", ""))
+                if sc > best_score:
+                    best, best_score = rel, sc
+            if best and best_score >= 0:
+                break
+    if not best or best_score < 0:
+        log.warning("  No compatible %s wheel found on PyPI for %s/%s", pkg, pyver, plat)
+        return False
+
+    wheel = Path(tempfile.gettempdir()) / best["filename"]
+    if not _curl_download(best["url"], wheel, timeout=300):
+        return False
+    log.info("  Downloaded wheel: %s", best["filename"])
+    cmd = [sys.executable, "-m", "pip", "install", "--quiet",
+           "--disable-pip-version-check", "--no-index", str(wheel)]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if res.returncode != 0:
+            res = subprocess.run(cmd + ["--user"], capture_output=True, text=True, timeout=300)
+        if res.returncode == 0:
+            log.info("  Installed %s from local wheel.", pkg)
+            return True
+        log.warning("  Offline wheel install failed: %s", (res.stderr or res.stdout)[-300:])
+    except Exception as exc:
+        log.warning("  Offline wheel install errored: %s", exc)
     return False
 
 
