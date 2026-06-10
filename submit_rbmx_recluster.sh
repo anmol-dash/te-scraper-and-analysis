@@ -24,13 +24,18 @@ set -euo pipefail
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RESULTS_DIR="${1:-/home/amodz/anmol/results_rbmx_families}"
-GENOME_DIR="${SCRIPT_DIR}"            # where hg38.fa will be stored if downloaded
+SOURCE_DIR="${1:-/home/amodz/anmol/results_rbmx_families}"   # source: existing family dirs
+TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+OUT_DIR="${SCRIPT_DIR}/rbmx_reclustered_${TIMESTAMP}"         # fresh output each run
+GENOME_DIR="${SCRIPT_DIR}"
 JASPAR_DIR="${SCRIPT_DIR}/jaspar_cache"
-LOG_DIR="${SCRIPT_DIR}/logs_recluster"
+LOG_DIR="${OUT_DIR}/logs"
 PYTHON="${PYTHON:-python3}"
 
-mkdir -p "$JASPAR_DIR" "$LOG_DIR"
+mkdir -p "$OUT_DIR" "$JASPAR_DIR" "$LOG_DIR"
+
+# Keep RESULTS_DIR pointing at the source for family enumeration
+RESULTS_DIR="$SOURCE_DIR"
 
 # ── 0. Pre-flight: verify bedtools is available and functional ───────────────
 echo "  [preflight] Checking bedtools..."
@@ -67,7 +72,8 @@ echo ""
 
 echo "============================================================"
 echo " RBMX re-clustering + motif submission"
-echo "  Results dir : $RESULTS_DIR"
+echo "  Source dir  : $SOURCE_DIR"
+echo "  Output dir  : $OUT_DIR"
 echo "  Project dir : $SCRIPT_DIR"
 echo "  JASPAR cache: $JASPAR_DIR"
 echo "  Logs        : $LOG_DIR"
@@ -200,7 +206,8 @@ echo "=== Job \$IDX / \$FAMILY ==="
 cd "${SCRIPT_DIR}"
 
 ${PYTHON} recluster_rbmx.py \\
-    --results-dir "${RESULTS_DIR}" \\
+    --results-dir "${SOURCE_DIR}" \\
+    --out-dir     "${OUT_DIR}/\${FAMILY}" \\
     --family       "\$FAMILY" \\
     --genome       "${HG38_FA}" \\
     --jaspar-bed   "${JASPAR_BED}" \\
@@ -246,9 +253,10 @@ echo "   bjobs -J rbmx_recluster"
 echo "   bpeek  <jobid>[<idx>]"
 echo ""
 echo " Per-family output:"
-echo "   Sequences : \${RESULTS_DIR}/<family>/01_data/<family>_with_sequences.csv"
-echo "   Clustered : \${RESULTS_DIR}/<family>/01_data/<family>_clustered.csv"
-echo "   UMAP HTML : \${RESULTS_DIR}/<family>/03_clustering/clustering_visualization.html"
-echo "   Motifs    : \${RESULTS_DIR}/<family>/motif_analysis/"
+echo "   Root      : ${OUT_DIR}/<family>/"
+echo "   Sequences : ${OUT_DIR}/<family>/01_data/<family>_with_sequences.csv"
+echo "   Clustered : ${OUT_DIR}/<family>/01_data/<family>_clustered.csv"
+echo "   UMAP HTML : ${OUT_DIR}/<family>/03_clustering/clustering_visualization.html"
+echo "   Motifs    : ${OUT_DIR}/<family>/motif_analysis/"
 echo "   Logs      : ${LOG_DIR}/<jobid>_<idx>.out"
 echo "============================================================"

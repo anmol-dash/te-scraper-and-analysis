@@ -56,11 +56,11 @@ def _ts(msg):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def extract_sequences(df, genome_cache):
-    """Fill the Seq column from the local genome.  Handles strand orientation.
+    """Extract sequences from local genome.
 
-    Uses a thread pool to dispatch extractions concurrently.  GenomeCache reads
-    are GIL-safe (no writes during extraction) so threads provide real overlap
-    when the underlying cache uses numpy/mmap buffers.
+    Aborts the job immediately if ANY locus cannot be fetched — Ns are never
+    written to the output CSV.  Prints the first few fetched sequences so the
+    caller can verify the genome is being read correctly.
     """
     import os, concurrent.futures as _cf
 
@@ -68,41 +68,52 @@ def extract_sequences(df, genome_cache):
     n    = len(rows)
     _ts(f"  Extracting {n} sequences from local genome...")
 
+    # Print these indices as spot-checks
+    _spot = set([0, 1, 2]) | set(range(0, n, max(1, n // 10))) | {n - 1}
+
     results = [None] * n
-    failed  = [0]   # mutable counter shared across threads
 
     def _extract(i, row):
         chrom  = str(row.chr)
         start  = int(row.start)
         stop   = int(row.stop)
         strand = str(getattr(row, "strand", "+")).strip()
-        try:
-            seq = genome_cache.extract_sequence(chrom, start, stop)
-            if seq is None or not seq.strip("N"):
-                raise ValueError(f"empty extraction for {chrom}:{start}-{stop}")
-            if strand == "-":
-                seq = reverse_complement(seq)
-            return i, seq.upper(), None
-        except Exception as exc:
-            return i, "N" * 100, exc
+        seq = genome_cache.extract_sequence(chrom, start, stop)
+        if seq is None:
+            raise ValueError(f"genome returned None for {chrom}:{start}-{stop}")
+        seq = seq.upper()
+        if not seq.strip("N"):
+            raise ValueError(
+                f"only Ns returned for {chrom}:{start}-{stop} "
+                f"(len={len(seq)}) — is --genome pointing at the right assembly?"
+            )
+        if strand == "-":
+            seq = reverse_complement(seq)
+        return i, seq.upper()
 
     n_workers = min(8, os.cpu_count() or 4)
     with _cf.ThreadPoolExecutor(max_workers=n_workers) as ex:
         futures = {ex.submit(_extract, i, row): i for i, row in enumerate(rows)}
         done = 0
         for fut in _cf.as_completed(futures):
-            i, seq, exc = fut.result()
+            try:
+                i, seq = fut.result()
+            except Exception as exc:
+                _ts(f"")
+                _ts(f"  *** ABORT: sequence extraction failed ***")
+                _ts(f"  Error: {exc}")
+                _ts(f"  No output CSV will be written.")
+                _ts(f"  Check: (1) --genome path is correct, (2) genome covers hg38 chroms.")
+                sys.exit(1)
             results[i] = seq
-            if exc is not None:
-                failed[0] += 1
-                if failed[0] <= 5:
-                    _ts(f"    WARNING: row {i} → {exc}")
+            if i in _spot:
+                _ts(f"    [{i:>5}] {rows[i].chr}:{rows[i].start}-{rows[i].stop}"
+                    f"  strand={getattr(rows[i], 'strand', '+')}"
+                    f"  seq={seq[:60]}...")
             done += 1
-            if done % 500 == 0 or done == n:
+            if done % 1000 == 0 or done == n:
                 _ts(f"    {done}/{n} sequences extracted")
 
-    if failed[0]:
-        _ts(f"  WARNING: {failed[0]} sequences failed extraction (filled with Ns)")
     return results
 
 
@@ -345,26 +356,39 @@ def main():
     ap.add_argument("--n-epochs",    type=int, default=200)
     ap.add_argument("--min-samples", type=int, default=7)
     ap.add_argument("--p-threshold", type=float, default=0.05)
+    ap.add_argument("--out-dir",      default=None,
+                    help="Fresh output directory for this family (created if absent). "
+                         "Defaults to --results-dir/<family> if omitted.")
     ap.add_argument("--force",       action="store_true",
                     help="Re-run motif analysis even if outputs already exist")
     args = ap.parse_args()
 
     results_dir  = Path(args.results_dir).resolve()
     family_lower = args.family.lower()
-    family_dir   = results_dir / family_lower
+    src_family_dir = results_dir / family_lower
 
-    if not family_dir.is_dir():
-        sys.exit(f"ERROR: family directory not found: {family_dir}")
+    if not src_family_dir.is_dir():
+        sys.exit(f"ERROR: family directory not found: {src_family_dir}")
+
+    # Output goes to --out-dir if given (fresh run), else same as source
+    family_dir = Path(args.out_dir).resolve() if args.out_dir else src_family_dir
 
     data_dir       = family_dir / "01_data"
     clustering_dir = family_dir / "03_clustering"
     data_dir.mkdir(parents=True, exist_ok=True)
 
+    # Source CSV (loci + possibly stale Ns from prior run)
+    src_csv      = src_family_dir / "01_data" / f"{family_lower}_with_sequences.csv"
     seq_csv      = data_dir / f"{family_lower}_with_sequences.csv"
     clustered_csv= data_dir / f"{family_lower}_clustered.csv"
+    # If writing to a different dir, use the source CSV as input
+    if family_dir != src_family_dir and not seq_csv.exists():
+        import shutil as _sh
+        _sh.copy2(src_csv, seq_csv)
 
-    if not seq_csv.exists():
-        sys.exit(f"ERROR: sequence CSV not found: {seq_csv}")
+    input_csv = seq_csv if seq_csv.exists() else src_csv
+    if not input_csv.exists():
+        sys.exit(f"ERROR: sequence CSV not found: {src_csv}")
 
     t_start = time.time()
     _ts(f"{'='*60}")
@@ -374,8 +398,18 @@ def main():
 
     # ── 1. Load existing loci + fill sequences ────────────────────────────
     _ts("STAGE 1: Loading loci CSV...")
-    df = pd.read_csv(seq_csv)
-    _ts(f"  {len(df)} loci loaded, columns: {list(df.columns)}")
+    df = pd.read_csv(input_csv)
+    _ts(f"  {len(df)} loci loaded from {input_csv}")
+    _ts(f"  columns: {list(df.columns)}")
+
+    # Upfront check: if every Seq value is all-Ns, we know extraction failed previously
+    if "Seq" in df.columns:
+        n_ns = (df["Seq"].astype(str).str.fullmatch(r"N+")).sum()
+        if n_ns == len(df):
+            _ts(f"  NOTE: all {len(df)} sequences are Ns from a prior failed fetch — "
+                f"will re-extract from local genome now.")
+        elif n_ns > 0:
+            _ts(f"  NOTE: {n_ns}/{len(df)} sequences are Ns — will re-extract all.")
 
     for col in ("chr", "start", "stop"):
         if col not in df.columns:
@@ -398,12 +432,19 @@ def main():
     _ts(f"  Genome loaded ({len(gc._genome) if hasattr(gc, '_genome') else '?'} chromosomes)")
 
     _ts("STAGE 3: Extracting sequences...")
-    df["Seq"] = extract_sequences(df, gc)
-    n_real = (df["Seq"].str.len() > 10) & (~df["Seq"].str.fullmatch("N+"))
-    _ts(f"  {n_real.sum()}/{len(df)} sequences with real content")
+    seqs = extract_sequences(df, gc)  # aborts on any failure
 
+    # Final sanity check before writing anything
+    n_ns = sum(1 for s in seqs if not s or not s.strip("N"))
+    if n_ns > 0:
+        sys.exit(
+            f"ERROR: {n_ns}/{len(seqs)} sequences are all-Ns after extraction — "
+            f"aborting before writing CSV."
+        )
+
+    df["Seq"] = seqs
     df.to_csv(seq_csv, index=False)
-    _ts(f"  Saved: {seq_csv}")
+    _ts(f"  All {len(df)} sequences real — saved: {seq_csv}")
 
     # ── 2. Adaptive clustering ────────────────────────────────────────────
     _ts("STAGE 4: Adaptive clustering...")
