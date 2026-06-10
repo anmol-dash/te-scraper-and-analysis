@@ -770,16 +770,37 @@ def _check_jaspar_env(args):
         print(f"  JASPAR:  OK — bigBedToBed compatible ({tool})")
         return
 
-    # No working path to JASPAR — abort the whole job immediately.
+    # Fast binary paths (pybigtools / bigBedToBed) are unavailable on this node.
+    # But the motif stage also has NO-BINARY fallbacks — a bulk JASPAR BED
+    # download and a per-motif CMMT stream — that need only network. If a JASPAR
+    # source is reachable, the run CAN succeed (just slower), so proceed.
+    build = getattr(args, "assembly", None) or "hg38"
+    try:
+        from te_motif import jaspar_source_reachable
+        reachable = jaspar_source_reachable(build)
+    except Exception as _exc:
+        print(f"  JASPAR:  reachability check errored: {_exc}")
+        reachable = False
+
+    if reachable:
+        print(
+            "  JASPAR:  OK — no bigBedToBed/pybigtools, but JASPAR source is reachable.\n"
+            "           Motif stage will use the no-binary download fallback\n"
+            "           (bulk BED / per-motif CMMT). This is slower but works."
+        )
+        return
+
+    # Truly no path to JASPAR (no binary, no pybigtools, no network, no
+    # --jaspar-bed) — abort immediately instead of wasting ~9 stages of compute.
     print(
         "\n  JASPAR:  FATAL — no usable JASPAR backend on this node.\n"
-        "           pybigtools is not installed and could not be auto-installed,\n"
-        "           and bigBedToBed is missing or GLIBC-incompatible.\n"
+        "           pybigtools won't install (no glibc-compatible wheel),\n"
+        "           bigBedToBed is GLIBC-incompatible, AND the JASPAR download\n"
+        "           source is not reachable from this node.\n"
         "           The motif stage WOULD fail, so the job is aborting now.\n"
         "           Fix one of:\n"
-        "             • pip install pybigtools   (on a node with network)\n"
-        "             • --jaspar-bed /path/to/JASPAR2024_hg38.bed.gz\n"
-        "             • --skip-motif             (drop motif analysis)\n"
+        "             • --jaspar-bed /path/to/JASPAR2024_hg38.bed.gz  (pre-staged file)\n"
+        "             • --skip-motif                                  (drop motif analysis)\n"
     )
     sys.exit(1)
 

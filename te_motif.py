@@ -216,6 +216,42 @@ JASPAR_BIGBED_URLS = {
 # Hard cap (seconds) on the per-motif CMMT download.  Override via env var.
 _CMMT_MAX_TIME_S = int(os.environ.get("TE_CMMT_MAX_TIME", "1800"))
 
+
+def jaspar_source_reachable(build):
+    """Return True if a no-binary JASPAR source (CMMT host) is reachable.
+
+    The bulk-BED and per-motif download fallbacks need only network — no
+    bigBedToBed and no pybigtools. This lets the preflight decide whether the
+    motif stage can succeed via those paths before committing to a run.
+    Tries curl (works where Python sockets are blocked), then urllib.
+    """
+    import subprocess
+    _apply_network_env()
+    url = JASPAR_BIGBED_URLS.get(build) or (CMMT_BASE_URL + "/")
+    proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+    # 1. curl HEAD
+    cmd = ["curl", "-sI", "--connect-timeout", "8", "--max-time", "15"]
+    if proxy:
+        cmd += ["--proxy", proxy]
+    cmd.append(url)
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
+        first = (r.stdout or "").splitlines()[:1]
+        if r.returncode == 0 and first and any(c in first[0] for c in ("200", "206", "301", "302", "403")):
+            return True
+    except Exception:
+        pass
+    # 2. urllib fallback (some nodes block curl but not Python, or vice-versa)
+    try:
+        import urllib.request
+        req = urllib.request.Request(url, method="HEAD",
+                                     headers={"User-Agent": "te_motif/1.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return 200 <= resp.status < 400
+    except Exception as exc:
+        log.info("JASPAR source not reachable via urllib either: %s", exc)
+    return False
+
 _DEFAULT_BASE = os.environ.get("TE_BASE_DIR",   str(Path.home() / "te_analysis"))
 _DEFAULT_JASP = os.environ.get("TE_JASPAR_DIR", str(Path(_DEFAULT_BASE) / "jaspar"))
 
@@ -454,8 +490,10 @@ def _ensure_pybigtools():
 
     # Try a normal install first, then a --user install (works without write
     # access to the conda/site-packages dir, common on shared HPC nodes).
+    # --only-binary=:all: prevents pip from falling back to a (slow, usually
+    # failing) Rust source build when no compatible wheel exists.
     base = [sys.executable, "-m", "pip", "install", "--quiet",
-            "--disable-pip-version-check"]
+            "--disable-pip-version-check", "--only-binary=:all:"]
     attempts = (
         base + proxy_args + ["pybigtools"],
         base + proxy_args + ["--user", "pybigtools"],
@@ -507,43 +545,65 @@ def _install_wheel_via_curl(pkg):
 
     pyver = f"cp{sys.version_info.major}{sys.version_info.minor}"
     plat = (sysconfig.get_platform() or "").lower()  # e.g. linux-x86_64
-    arch = "x86_64" if "x86_64" in plat or "amd64" in plat else (
-        "aarch64" if "aarch64" in plat or "arm64" in plat else "")
 
-    def _score(fname):
-        f = fname.lower()
-        if not f.endswith(".whl"):
-            return -1
-        if pyver not in f and "py3" not in f and "abi3" not in f:
-            return -1
-        if "linux" in plat:
-            if "manylinux" not in f and "linux" not in f:
-                return -1
-            if arch and arch not in f:
-                return -1
-        s = 0
-        if pyver in f: s += 4           # exact cpython match
-        if "abi3" in f: s += 2          # stable-ABI wheel, broadly compatible
-        if arch and arch in f: s += 1
-        if "manylinux2014" in f or "manylinux_2_17" in f: s += 1
-        return s
+    # Use pip/packaging's own tag logic so we only accept a wheel this
+    # interpreter+glibc can actually install (e.g. a manylinux_2_28 wheel is
+    # rejected on a glibc<2.28 node instead of being downloaded and failing).
+    try:
+        from packaging.tags import sys_tags
+        from packaging.utils import parse_wheel_filename
+        _compat = {str(t) for t in sys_tags()}
 
-    best, best_score = None, -1
-    for rel in data.get("urls", []):
-        sc = _score(rel.get("filename", ""))
-        if sc > best_score:
-            best, best_score = rel, sc
-    if not best or best_score < 0:
-        # fall back to scanning all historical releases (newest first)
-        for ver in sorted(data.get("releases", {}), reverse=True):
-            for rel in data["releases"][ver]:
-                sc = _score(rel.get("filename", ""))
-                if sc > best_score:
-                    best, best_score = rel, sc
-            if best and best_score >= 0:
+        def _wheel_compatible(fname):
+            if not fname.endswith(".whl"):
+                return False
+            try:
+                _, _, _, tagset = parse_wheel_filename(fname)
+            except Exception:
+                return False
+            return any(str(t) in _compat for t in tagset)
+    except Exception:
+        # packaging unavailable — fall back to a conservative string heuristic.
+        arch = "x86_64" if "x86_64" in plat or "amd64" in plat else (
+            "aarch64" if "aarch64" in plat or "arm64" in plat else "")
+
+        def _wheel_compatible(fname):
+            f = fname.lower()
+            if not f.endswith(".whl"):
+                return False
+            if pyver not in f and "abi3" not in f and "py3" not in f:
+                return False
+            if "linux" in plat and arch and arch not in f:
+                return False
+            return True
+
+    # Pick the newest release version that has an installable wheel.
+    best = None
+    versions = sorted(data.get("releases", {}), reverse=True)
+    # Prefer PEP 440 ordering when packaging is available.
+    try:
+        from packaging.version import Version, InvalidVersion
+
+        def _vkey(v):
+            try:
+                return Version(v)
+            except InvalidVersion:
+                return Version("0")
+        versions = sorted(data.get("releases", {}), key=_vkey, reverse=True)
+    except Exception:
+        pass
+    for ver in versions:
+        for rel in data["releases"].get(ver, []):
+            if _wheel_compatible(rel.get("filename", "")):
+                best = rel
                 break
-    if not best or best_score < 0:
-        log.warning("  No compatible %s wheel found on PyPI for %s/%s", pkg, pyver, plat)
+        if best:
+            break
+
+    if not best:
+        log.warning("  No installable %s wheel exists for this node "
+                    "(python=%s, platform=%s). Prebuilt wheels are incompatible "
+                    "with this glibc — skipping pybigtools.", pkg, pyver, plat)
         return False
 
     wheel = Path(tempfile.gettempdir()) / best["filename"]
@@ -1018,12 +1078,12 @@ def resolve_jaspar_bed(build, jaspar_bed_arg, jaspar_dir, loci_bed=None):
     try:
         locus_bed = _build_locus_jaspar_bed_from_bigbed(build, jaspar_dir, loci_bed)
     except _GlibcIncompatibleError as exc:
-        log.error("FATAL: %s", exc)
-        log.error("")
-        log.error("The JASPAR bigBed cannot be queried on this node.")
-        log.error("Rerun with:  --jaspar-bed /path/to/JASPAR2024_%s.bed.gz", build)
-        log.error("  or:        --skip-motif  (to skip JASPAR analysis entirely)")
-        sys.exit(1)
+        # bigBed needs glibc>=2.29 / pybigtools, neither available here. Do NOT
+        # abort — fall through to the no-binary bulk / per-motif downloads below,
+        # which only need network (and produce identical JASPAR BED output).
+        log.warning("bigBed path unavailable (%s)", exc)
+        log.warning("Falling back to no-binary JASPAR download (bulk / per-motif) ...")
+        locus_bed = None
     if locus_bed:
         return locus_bed
 
