@@ -213,10 +213,6 @@ JASPAR_BIGBED_URLS = {
     "mm39":     f"{CMMT_BASE_URL}/JASPAR2022_mm39.bb",
 }
 
-# Hard cap (seconds) on the per-motif CMMT download.  Override via env var.
-_CMMT_MAX_TIME_S = int(os.environ.get("TE_CMMT_MAX_TIME", "1800"))
-
-
 def jaspar_source_reachable(build):
     """Return True if a no-binary JASPAR source (CMMT host) is reachable.
 
@@ -816,19 +812,17 @@ def _overlaps_any(chr_, start, end, loci_lookup):
     return False
 
 
-def _download_cmmt_per_motif(build, jaspar_dir, loci_bed=None, max_time_s=None):
+def _download_cmmt_per_motif(build, jaspar_dir, loci_bed=None):
     """Stream-download JASPAR 2022 per-motif TSV.gz files from CMMT.
 
     Each file is decompressed on the fly.  When loci_bed is provided only rows
     that overlap the TE loci are kept, avoiding multi-GB local storage.  The
     merged result is sorted and cached as JASPAR2022_{build}.sorted.bed.gz.
 
-    max_time_s caps the total download time (default: _CMMT_MAX_TIME_S / 1800 s).
-    Returns the path to the cached BED.gz, or None on failure.
+    Runs to completion (no overall time cap); returns the path to the cached
+    BED.gz, or None on failure.
     """
     import re, urllib.request
-    if max_time_s is None:
-        max_time_s = _CMMT_MAX_TIME_S
 
     if build not in CMMT_ASSEMBLIES:
         log.warning("Build '%s' not in CMMT assemblies; skipping per-motif download.", build)
@@ -864,47 +858,58 @@ def _download_cmmt_per_motif(build, jaspar_dir, loci_bed=None, max_time_s=None):
     t0 = time.time()
     total_written = 0
 
+    # Modest parallelism: each motif file is an independent HTTP GET. Kept low
+    # (default 4) to stay polite to the CMMT server; override TE_CMMT_WORKERS.
+    # Download+parse happen in worker threads; gzip writing stays single-threaded.
+    import concurrent.futures as _cf
+    n_workers = max(1, int(os.environ.get("TE_CMMT_WORKERS", "4")))
+    n_total = len(file_list)
+
+    def _fetch_one(item):
+        fname, url = item
+        rows = []
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "te_motif/1.0"})
+            with urllib.request.urlopen(req, timeout=180) as resp:
+                with gzip.open(resp, "rt", encoding="utf-8", errors="replace") as gz:
+                    for line in gz:
+                        parts = line.rstrip("\n").split("\t")
+                        if len(parts) < 7:
+                            continue
+                        try:
+                            start, end = int(parts[1]), int(parts[2])
+                        except ValueError:
+                            continue
+                        chr_ = parts[0]
+                        if loci_lookup is not None and not _overlaps_any(
+                                chr_, start, end, loci_lookup):
+                            continue
+                        # 6-col BED: chr start end motif_name score strand
+                        rows.append(
+                            f"{chr_}\t{start}\t{end}\t{parts[3]}\t{parts[4]}\t{parts[6]}\n")
+            return fname, rows, None
+        except Exception as exc:
+            return fname, None, exc
+
     try:
+        done = errors = 0
+        log.info("  Downloading %d files with %d parallel workers ...", n_total, n_workers)
         with gzip.open(str(tmp_path), "wt") as out_fh:
-            for i, (fname, url) in enumerate(file_list, 1):
-                if time.time() - t0 > max_time_s:
-                    log.error(
-                        "CMMT per-motif download aborted: exceeded %.0f-min budget "
-                        "after %d/%d files (%d rows). Pass --jaspar-bed or set "
-                        "TE_CMMT_MAX_TIME env var to extend.",
-                        max_time_s / 60, i - 1, len(file_list), total_written,
-                    )
-                    break
-                if i == 1 or i % 50 == 0 or i == len(file_list):
-                    log.info("  [%d/%d] %s", i, len(file_list), fname)
-                rows_written = 0
-                try:
-                    req = urllib.request.Request(
-                        url, headers={"User-Agent": "te_motif/1.0"})
-                    with urllib.request.urlopen(req, timeout=180) as resp:
-                        with gzip.open(resp, "rt", encoding="utf-8", errors="replace") as gz:
-                            for line in gz:
-                                parts = line.rstrip("\n").split("\t")
-                                if len(parts) < 7:
-                                    continue
-                                try:
-                                    start, end = int(parts[1]), int(parts[2])
-                                except ValueError:
-                                    continue
-                                chr_ = parts[0]
-                                if loci_lookup is not None:
-                                    if not _overlaps_any(chr_, start, end, loci_lookup):
-                                        continue
-                                # Write 6-col BED: chr start end motif_name score strand
-                                out_fh.write(
-                                    f"{chr_}\t{start}\t{end}\t{parts[3]}\t{parts[4]}\t{parts[6]}\n"
-                                )
-                                rows_written += 1
-                    total_written += rows_written
-                except Exception as exc:
-                    log.warning("  Failed to download/parse %s: %s", fname, exc)
-                    log.debug(traceback.format_exc())
-                    continue
+            with _cf.ThreadPoolExecutor(max_workers=n_workers) as ex:
+                futures = [ex.submit(_fetch_one, item) for item in file_list]
+                for fut in _cf.as_completed(futures):
+                    fname, rows, exc = fut.result()
+                    done += 1
+                    if exc is not None:
+                        errors += 1
+                        log.warning("  Failed to download/parse %s: %s", fname, exc)
+                        continue
+                    for r in rows:
+                        out_fh.write(r)
+                    total_written += len(rows)
+                    if done == 1 or done % 50 == 0 or done == n_total:
+                        log.info("  [%d/%d] %d rows so far (%d workers, %d errors)",
+                                 done, n_total, total_written, n_workers, errors)
 
         if total_written == 0:
             tmp_path.unlink(missing_ok=True)
