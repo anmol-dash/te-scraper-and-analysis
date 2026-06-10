@@ -60,6 +60,11 @@ from scipy import stats
 # module-level logger — configured per-run by _setup_logger()
 log = logging.getLogger("te_motif")
 
+
+class _GlibcIncompatibleError(RuntimeError):
+    """Raised when bigBedToBed fails due to GLIBC mismatch and pybigtools is absent."""
+
+
 # ── JASPAR download URLs ──────────────────────────────────────────────────────
 
 # CMMT (UBC) hosts per-assembly JASPAR 2022 UCSC tracks.  These are the
@@ -333,9 +338,11 @@ def _build_locus_jaspar_bed_from_bigbed(build, jaspar_dir, loci_bed):
     t0 = time.time()
 
     # ── Path 1: pybigtools (Rust-based, works on any glibc / macOS / Windows) ──
+    _pbt_available = False
     try:
         import pybigtools as _pbt  # noqa: F401, PLC0415
         import concurrent.futures as _cf
+        _pbt_available = True
         log.info("  Using pybigtools for bigBed query (timeout=300s)")
         with open(tmp_path, "w") as out:
             _ex = _cf.ThreadPoolExecutor(max_workers=1)
@@ -389,12 +396,18 @@ def _build_locus_jaspar_bed_from_bigbed(build, jaspar_dir, loci_bed):
                             chrom, start, end, result.stderr[:200])
                 if "GLIBC" in result.stderr or "version `" in result.stderr or \
                         "version not found" in result.stderr:
-                    log.error("bigBedToBed is incompatible with this system's glibc — "
-                              "install pybigtools to avoid this: pip install pybigtools")
                     try:
                         Path(tool).unlink(missing_ok=True)
                     except Exception:
                         pass
+                    if not _pbt_available:
+                        raise _GlibcIncompatibleError(
+                            "bigBedToBed requires GLIBC_2.29+ (not available on this node) "
+                            "and pybigtools is not installed — cannot auto-fetch JASPAR. "
+                            "Fix: pip install pybigtools  OR  pass --jaspar-bed /path/to/JASPAR.bed.gz"
+                        )
+                    log.error("bigBedToBed is incompatible with this system's glibc — "
+                              "pybigtools was also unavailable")
                     break
                 continue
             lines = [ln for ln in result.stdout.splitlines()
@@ -739,7 +752,15 @@ def resolve_jaspar_bed(build, jaspar_bed_arg, jaspar_dir, loci_bed=None):
     # ── 3. CMMT BigBed remote query (efficient; needs bigBedToBed) ────────────
     log.info("No cached JASPAR BED found — auto-downloading from CMMT (JASPAR 2022) ...")
     log.info("Tip: set TE_JASPAR_%s=/path/to/file to skip future downloads", build.upper())
-    locus_bed = _build_locus_jaspar_bed_from_bigbed(build, jaspar_dir, loci_bed)
+    try:
+        locus_bed = _build_locus_jaspar_bed_from_bigbed(build, jaspar_dir, loci_bed)
+    except _GlibcIncompatibleError as exc:
+        log.error("FATAL: %s", exc)
+        log.error("")
+        log.error("The JASPAR bigBed cannot be queried on this node.")
+        log.error("Rerun with:  --jaspar-bed /path/to/JASPAR2024_%s.bed.gz", build)
+        log.error("  or:        --skip-motif  (to skip JASPAR analysis entirely)")
+        sys.exit(1)
     if locus_bed:
         return locus_bed
 
