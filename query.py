@@ -2569,6 +2569,7 @@ def run_pipeline(args):
         log_error("CLUSTERING", e)
         df_family["Cluster"] = 0
         n_clusters = 0
+        df_family.to_csv(DIRS["data"] / f"{FAMILY_NAME.lower()}_clustered.csv", index=False)
     stage_times["Clustering"] = time.time() - t0
     _checkpoint(OUT_DIR, "stage5_clustering", f"n_clusters={n_clusters}")
     if getattr(args, "stop_after", None) == "clustering":
