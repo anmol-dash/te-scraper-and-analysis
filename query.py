@@ -676,6 +676,69 @@ def _add_ucsc_urls(df, assembly, fetched_from_ucsc=True):
         df["ucsc_url"] = ""
 
 
+def _check_jaspar_env(args):
+    """Print a one-line JASPAR preflight result at pipeline startup.
+
+    Checks (in order):
+      1. --skip-motif passed → JASPAR skipped intentionally, no problem.
+      2. --jaspar-bed supplied → user-provided file, no binary needed.
+      3. pybigtools importable → pure-Python fallback works.
+      4. bigBedToBed binary is present AND GLIBC-compatible.
+    Prints a clear OK or WARNING line so the user knows before Stage 7.
+    """
+    import subprocess, shutil
+
+    skip_motif = getattr(args, "skip_motif", False)
+    jaspar_bed = getattr(args, "jaspar_bed", None) or ""
+
+    if skip_motif:
+        print("  JASPAR:  SKIPPED (--skip-motif)")
+        return
+
+    if jaspar_bed:
+        print(f"  JASPAR:  OK — pre-built BED supplied ({jaspar_bed})")
+        return
+
+    # Check pybigtools
+    try:
+        import pybigtools  # noqa: F401
+        print("  JASPAR:  OK — pybigtools available (no bigBedToBed needed)")
+        return
+    except ImportError:
+        pass
+
+    # Check bigBedToBed binary GLIBC compatibility
+    tool = shutil.which("bigBedToBed")
+    if not tool:
+        # Check common cached locations
+        from pathlib import Path
+        jaspar_dir = getattr(args, "jaspar_dir", None) or str(Path.home() / "te_analysis" / "jaspar")
+        tool_path = Path(jaspar_dir) / "bin" / "bigBedToBed"
+        tool = str(tool_path) if tool_path.exists() else None
+
+    if tool:
+        r = subprocess.run([tool, "--version"], capture_output=True, text=True)
+        stderr = r.stderr + r.stdout
+        if "GLIBC" in stderr or "version `" in stderr or "version not found" in stderr:
+            print(
+                "  JASPAR:  WARNING — bigBedToBed binary is GLIBC-incompatible on this node "
+                "and pybigtools is not installed.\n"
+                "           Motif stage WILL FAIL. Fix before running:\n"
+                "             pip install pybigtools\n"
+                "           OR pass --jaspar-bed /path/to/JASPAR2024_hg38.bed.gz\n"
+                "           OR pass --skip-motif"
+            )
+        else:
+            print(f"  JASPAR:  OK — bigBedToBed compatible ({tool})")
+    else:
+        print(
+            "  JASPAR:  WARNING — bigBedToBed not found and pybigtools not installed.\n"
+            "           Motif stage will attempt to download the binary at runtime.\n"
+            "           If that binary is also GLIBC-incompatible, motif will fail.\n"
+            "           Recommended: pip install pybigtools  OR  --jaspar-bed /path/to/file"
+        )
+
+
 def _check_ucsc_connectivity():
     """Return (ok, error_msg). Uses curl — more reliable than Python socket on HPC nodes
     where nsswitch/libc DNS may differ from the system curl resolver."""
@@ -2298,6 +2361,7 @@ def run_pipeline(args):
           f"NUMBA={os.environ.get('NUMBA_NUM_THREADS', '(unset)')}")
     print(f"  Cache:   NUMBA_CACHE_DIR={os.environ.get('NUMBA_CACHE_DIR', '(unset)')}")
     print(f"  Date:    {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    _check_jaspar_env(args)
     print("=" * 60)
 
     # ── 1. Load genome ──────────────────────────────────────────────────────
