@@ -769,7 +769,9 @@ def _fetch_sequences_parallel(df, assembly="hg38", n_workers=10):
                 if "error" in res:
                     raise ValueError(res["error"])
                 dna = res.get("dna", "")
-                return i, _orient_sequence(dna, df.iloc[i])
+                seq = _orient_sequence(dna, df.iloc[i])
+                _log(f"  [{i}] {chrom}:{start}-{stop}  {len(seq)}bp  {seq[:40]}...")
+                return i, seq
             except Exception as exc:
                 _log(f"  [{i}] attempt {attempt+1}/5 FAILED: {type(exc).__name__}: {exc}")
                 if attempt == 4:
