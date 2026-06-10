@@ -806,7 +806,12 @@ def _fill_missing_sequences_parallel(df, assembly="hg38", n_workers=10):
         return _fetch_sequences_parallel(df, assembly=assembly, n_workers=n_workers)
 
     existing = df["Seq"].copy()
-    valid = existing.notna() & existing.astype(str).str.len().gt(0)
+    strs = existing.astype(str)
+    valid = (
+        existing.notna()
+        & strs.str.len().gt(0)
+        & ~strs.apply(lambda s: set(s.upper()) <= {"N"})
+    )
     missing_idx = df.index[~valid].tolist()
     if not missing_idx:
         progress_print("All sequences already present — skipping fetch")
@@ -2373,7 +2378,14 @@ def run_pipeline(args):
     print("\n=== FETCHING SEQUENCES ===")
     try:
         _diag(f"  has_seq={'Seq' in df_family.columns}  genome_loaded={genome_cache.is_loaded}")
-        if "Seq" in df_family.columns and df_family["Seq"].notna().all():
+        def _seqs_are_valid(col):
+            """True only if the Seq column has real (non-all-N) sequences for every row."""
+            if col.isna().any():
+                return False
+            strs = col.astype(str)
+            return not strs.apply(lambda s: len(s) == 0 or set(s.upper()) <= {"N"}).any()
+
+        if "Seq" in df_family.columns and _seqs_are_valid(df_family["Seq"]):
             progress_print("Sequences already present — normalizing strand orientation")
             df_family["Seq"] = [
                 _orient_sequence(seq, row)
@@ -2412,6 +2424,14 @@ def run_pipeline(args):
                 assembly = getattr(args, "assembly", "hg38") or "hg38"
                 n_workers = getattr(args, "fetch_workers", 3)
                 progress_print(f"UCSC fetch settings: assembly={assembly}, workers={n_workers}")
+                ok, err_msg = _check_ucsc_connectivity()
+                if not ok:
+                    raise RuntimeError(
+                        f"Cannot reach api.genome.ucsc.edu from this node ({err_msg}).\n"
+                        "HPC compute nodes typically block outbound internet.\n"
+                        "Fix: pass --genome /path/to/hg38.fa to use local FASTA instead of the UCSC API.\n"
+                        "  e.g.  --genome /ref/hg38.fa"
+                    )
                 seqlist = _fill_missing_sequences_parallel(
                     df_family,
                     assembly=assembly,
@@ -2419,6 +2439,17 @@ def run_pipeline(args):
                 )
                 df_family["Seq"] = seqlist
                 _add_ucsc_urls(df_family, assembly, fetched_from_ucsc=True)
+                # Validate — if the compute node lost internet mid-run, most seqs will be all-N
+                _n_seqs_total = len(df_family)
+                _n_all_n = df_family["Seq"].astype(str).apply(
+                    lambda s: set(s.upper()) <= {"N"}
+                ).sum()
+                if _n_all_n > _n_seqs_total * 0.5:
+                    raise RuntimeError(
+                        f"{_n_all_n}/{_n_seqs_total} fetched sequences are all-N — "
+                        "the UCSC API is reachable but returning no data (possible rate-limit or assembly mismatch).\n"
+                        "Fix: pass --genome /path/to/hg38.fa to use a local FASTA instead."
+                    )
 
         _seq_ok = df_family["Seq"].notna().sum() if "Seq" in df_family.columns else 0
         _diag(f"  Sequences filled: {_seq_ok}/{len(df_family)}")
