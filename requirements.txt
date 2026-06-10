@@ -25,6 +25,8 @@ numba>=0.58,<0.62
 biopython>=1.81,<2.0
 pysam>=0.22,<0.24
 CIAlign>=1.0,<2.0
+colabfold[alphafold-minus-data]>=1.5.5
+pybigtools>=0.3
 
 # SSH client for HPC mode
 paramiko>=3.4

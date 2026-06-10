@@ -299,10 +299,11 @@ def _cmd_hpc_upload(args: argparse.Namespace, _cancel_event: Event | None) -> di
     return {"ok": True, "uploaded": uploaded}
 
 
-def _cmd_hpc_run(args: argparse.Namespace, _cancel_event: Event | None) -> dict[str, Any]:
+def _cmd_hpc_run(args: argparse.Namespace, cancel_event: Event | None) -> dict[str, Any]:
     client = _client_required()
     print(f"[HPC-RUN] user={client._username}  cmd={args.cmd[:300]}", flush=True)
-    out, err, code = client.run_command(args.cmd, timeout=args.timeout, stream_output="summary")
+    out, err, code = client.run_command(args.cmd, timeout=args.timeout,
+                                        stream_output="summary", cancel_event=cancel_event)
     if code != 0:
         print(f"[HPC DIAG] hpc-run command failed: {args.cmd}", flush=True)
         print(f"[HPC DIAG] exit_code={code}", flush=True)
@@ -377,7 +378,7 @@ def _apply_hpc_params(client: Any, params: dict[str, Any]) -> None:
             client.params[dest] = params[source]
 
 
-def _cmd_hpc_batch_submit(args: argparse.Namespace, _cancel_event: Event | None) -> dict[str, Any]:
+def _cmd_hpc_batch_submit(args: argparse.Namespace, cancel_event: Event | None) -> dict[str, Any]:
     params = json.loads(args.params)
     family = params.get("family", "?")
     print(f"[Submit] Building job script for {family}…", flush=True)
@@ -389,7 +390,7 @@ def _cmd_hpc_batch_submit(args: argparse.Namespace, _cancel_event: Event | None)
     old_input = builtins.input
     try:
         builtins.input = lambda _prompt="": "y"
-        ok = bool(client.submit_batch_job())
+        ok = bool(client.submit_batch_job(cancel_event=cancel_event))
     finally:
         builtins.input = old_input
 
@@ -426,8 +427,27 @@ def _cmd_hpc_batch_parallel(args: argparse.Namespace, cancel_event: Event | None
     terminal = {"DONE", "FAILED", "UNKNOWN"}
     states = {ji["job_id"]: "PENDING" for ji in job_infos}
 
-    while not (cancel_event and cancel_event.is_set()):
-        time.sleep(30)
+    while True:
+        # Wake immediately if cancelled, otherwise wait 30 s between polls.
+        if cancel_event is not None:
+            cancelled = cancel_event.wait(timeout=30)
+        else:
+            time.sleep(30)
+            cancelled = False
+
+        if cancelled:
+            print("[Parallel] Cancelled — killing submitted cluster jobs…", flush=True)
+            for ji in job_infos:
+                jid = ji["job_id"]
+                if states[jid] in terminal:
+                    continue
+                try:
+                    client.run_command(client._cancel_job_cmd(jid), timeout=15)
+                    print(f"[Parallel] Killed job {jid} ({ji['stage']})", flush=True)
+                except Exception as exc:
+                    print(f"[Parallel] Warning: could not kill job {jid}: {exc}", flush=True)
+            return {"ok": False, "cancelled": True, "jobs": job_infos, "exit_code": 130}
+
         all_done = True
         for ji in job_infos:
             jid = ji["job_id"]

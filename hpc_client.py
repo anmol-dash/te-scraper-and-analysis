@@ -812,7 +812,7 @@ fi
             )
         return f"bsub -M {mem_mb} -n {cpus} -q {queue} -Is bash {runner_script}"
 
-    def run_command(self, command: str, timeout: int = 300, stream_output: bool = False) -> tuple:
+    def run_command(self, command: str, timeout: int = 300, stream_output: bool = False, cancel_event=None) -> tuple:
         """Execute a command on the remote server.
 
         Args:
@@ -922,6 +922,10 @@ fi
 
             # Small sleep to prevent busy waiting
             time.sleep(0.1)
+
+            if cancel_event is not None and cancel_event.is_set():
+                channel.close()
+                raise InterruptedError("run_command cancelled by user")
 
             # Print a heartbeat if no output for a while (only in stream mode)
             if stream_output and (time.time() - last_output_time) > 30:
@@ -1475,9 +1479,11 @@ echo "  Input data: OK ({quoted})"'''
             f"queue={self.params['QUEUE']}"
         )
 
-    def submit_batch_job(self):
+    def submit_batch_job(self, cancel_event=None):
         """Submit the analysis as a batch job on HPC. Returns immediately after submission."""
         self._log_run_configuration("Batch")
+        if cancel_event is not None and cancel_event.is_set():
+            return False
         if not self._ensure_batch_shared_work_dir():
             print(
                 "Error: could not find a shared writable remote work directory for batch submission. "
@@ -1505,6 +1511,8 @@ echo "  Input data: OK ({quoted})"'''
             return False
 
         # Upload script
+        if cancel_event is not None and cancel_event.is_set():
+            return False
         if not self.upload_script():
             return False
 
@@ -1661,6 +1669,8 @@ exit $EXIT_CODE
         self.run_command(f"rm -f {job_out} {job_err} {job_done} {job_info}", timeout=10)
 
         # Submit the job
+        if cancel_event is not None and cancel_event.is_set():
+            return False
         if self.scheduler in ("lsf", "slurm"):
             submit_cmd = self._submit_job_cmd(job_script)
             sched_label = self.scheduler.upper()

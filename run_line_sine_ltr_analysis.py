@@ -11,7 +11,7 @@ Usage:
         --l1mdt-expr  /path/L1Md_T_ultracombo.csv \
         --b1mus2-expr /path/B1_Mus2_ultracombo.csv \
         --iapltr1-expr /path/IAPLTR1_Mm_ultracombo.csv \
-        --reports-dir /home/amodz/anmol/reports4 \
+        --reports-dir ./reports_line_sine_ltr \
         [--genome-fa /path/mm10.fa] \
         [--rmsk-dir ~/te_analysis/rmsk] \
         [--source rmsk|dfam] \
@@ -23,7 +23,9 @@ import argparse
 import datetime
 import json
 import os
+import re
 import shutil
+import subprocess
 import sys
 import time
 import warnings
@@ -60,6 +62,83 @@ _NON_EXPR = {
     "te_id","repclass","repfamily","swscore","millidiv","ucsc_url",
     "name","score","locus","te_chromosome","te_start","te_end",
     "te_length","te_strand","unnamed: 0","_total_expr",
+}
+
+# ─── Stage 11 module registry ─────────────────────────────────────────────────
+# Mirrors query.py's _MODULES list exactly so the two code paths stay in sync.
+# primary_output: the first file the module writes; used for skip-if-exists.
+# needs_consensus: pass --consensus-fasta if all_cluster_consensuses.fa exists.
+_STAGE11_MODULES = [
+    dict(key="phylo",          runner="run_phylo_analysis.py",
+         extra=["--subst-rate", "2.2e-9", "--clock-divisor", "2",
+                "--intact-orf-aa", "100"],
+         primary_output="fig_phylo_tree.png",          needs_consensus=True),
+    dict(key="grna_offtarget", runner="run_grna_offtarget.py",
+         extra=["--cas", "SpCas9", "--max-mm", "2"],
+         primary_output="fig_grna_offtarget_pareto.png", needs_consensus=False),
+    dict(key="transduction",   runner="run_transduction.py",
+         extra=["--tail-bp", "150", "--min-shared", "3"],
+         primary_output="fig_transduction_groups.png",  needs_consensus=False),
+    dict(key="antisense",      runner="run_antisense_promoter.py",
+         extra=["--promoter-bp", "200"],
+         primary_output="fig_antisense_motifs.png",     needs_consensus=False),
+    dict(key="ctcf_tad",       runner="run_ctcf_tad.py",
+         extra=["--motif-mismatch", "3"],
+         primary_output="fig_ctcf_overlap.png",         needs_consensus=False),
+    dict(key="epigenetic",     runner="run_epigenetic_overlay.py",
+         extra=[],          # --preset injected at runtime from --epigenetic-preset
+         primary_output="epigenetic_measured_values.tex", needs_consensus=False),
+    dict(key="ortholog",       runner="run_ortholog_insertion.py",
+         extra=[],          # --species injected at runtime from --ortholog-species
+         primary_output="ortholog_measured_values.tex", needs_consensus=False),
+    dict(key="multiassembly",  runner="run_multiassembly_liftover.py",
+         extra=[],          # --source-assembly + --target-assemblies injected at runtime
+         primary_output="multiassembly_measured_values.tex", needs_consensus=False),
+    dict(key="fold",           runner="run_fold_prediction.py",
+         extra=["--per-cluster", "--min-aa", "100", "--top-n", "5"],
+         primary_output="fold_measured_values.tex",     needs_consensus=True),
+    dict(key="divergence",     runner="run_divergence.py",
+         extra=[],          # --assembly injected at runtime
+         primary_output="fig_repeat_landscape.png",     needs_consensus=True),
+    dict(key="ltr_struct",     runner="run_ltr_struct.py",
+         extra=[],
+         primary_output="fig_ltr_struct.png",           needs_consensus=False),
+    dict(key="subfamily",      runner="run_subfamily.py",
+         extra=[],          # --assembly injected at runtime
+         primary_output="fig_subfamily_tree.png",       needs_consensus=True),
+    dict(key="benchmark",      runner="run_benchmark.py",
+         extra=[],          # --assembly injected at runtime
+         primary_output="fig_benchmark.png",            needs_consensus=False),
+    dict(key="motif_gain",     runner="run_motif_gain.py",
+         extra=[],          # --assembly injected at runtime
+         primary_output="motif_gain_measured_values.tex", needs_consensus=True),
+]
+
+# Macro names to extract from each module's *_values.tex for report_numbers.txt.
+# Only headline numbers; full detail stays in the raw tex files in stage11_dir.
+_STAGE11_HEADLINE_MACROS = {
+    "phylo":         ["phyloNCopies", "phyloNIntact", "phyloMedianDiv",
+                      "phyloMedianAgeMyr", "phyloMasterName", "phyloMasterDiv"],
+    "grna_offtarget":["grnaOTNGuides", "grnaOTNCopies", "grnaOTNFrontier",
+                      "grnaOTBestGuide", "grnaOTBestCov", "grnaOTBestOff"],
+    "transduction":  ["transNLineages", "transLargestLineage", "transNInLineage",
+                      "transNPolyaSignal"],
+    "antisense":     ["antiNCopies", "antiNBidir", "antiMedBidir", "antiHasStranded"],
+    "ctcf_tad":      ["ctcfNCopies", "ctcfNMotif", "ctcfNChip", "ctcfNBoundaryProx"],
+    "epigenetic":    ["epiNCopies", "epiNTracks", "epiTrackList"],
+    "ortholog":      ["orthoNCopies", "orthoNSpecies", "orthoNLineageSpecific",
+                      "orthoSpeciesList"],
+    "multiassembly": ["masmNCopies", "masmNAssemblies", "masmBestAsm", "masmBestRate"],
+    "fold":          ["foldNOrfs", "foldNFolded", "foldBestName", "foldBestMeanPlddt"],
+    "divergence":    ["divNloci", "divNClusters", "divMedianAll", "divMeanAll",
+                      "divCpgOmega"],
+    "ltr_struct":    ["ltrNloci", "ltrNfull", "ltrNsolo", "ltrNpbs", "ltrNppt",
+                      "ltrPctFull"],
+    "subfamily":     ["subfamNClusters", "subfamNSubfamilies", "subfamMinDiv",
+                      "subfamMaxDiv"],
+    "benchmark":     ["benchNStages", "benchTotalMin", "benchGAMECAsteps",
+                      "benchManualSteps"],
+    "motif_gain":    ["motifGainNLoci", "motifGainNGained", "motifGainTopMotif"],
 }
 
 
@@ -477,6 +556,165 @@ def plot_combined_clustering(family_results: dict, out_path: Path):
     _pp(f"  Saved {out_path}")
 
 
+# ─── Stage 11 helpers ────────────────────────────────────────────────────────
+
+def _parse_tex_macros(tex_path: Path) -> dict:
+    r"""Read \newcommand / \providecommand macros from a tex file → {name: value}."""
+    macros: dict = {}
+    try:
+        for line in tex_path.read_text(errors="replace").splitlines():
+            m = re.match(
+                r'\\(?:new|provide)command\{\\(\w+)\}\{([^}]*)\}', line.strip()
+            )
+            if m:
+                macros[m.group(1)] = m.group(2)
+    except Exception:
+        pass
+    return macros
+
+
+def collect_stage11_meta(family: str, stage11_dir: Path) -> dict:
+    """Read the *_values.tex files written by each Stage 11 module and
+    return a dict of {module_key: {macro_name: value}} for report generation."""
+    tex_file_map = {
+        "phylo":         stage11_dir / "phylo_measured_values.tex",
+        "grna_offtarget":stage11_dir / "grna_offtarget_measured_values.tex",
+        "transduction":  stage11_dir / "transduction_measured_values.tex",
+        "antisense":     stage11_dir / "antisense_measured_values.tex",
+        "ctcf_tad":      stage11_dir / "ctcf_tad_measured_values.tex",
+        "epigenetic":    stage11_dir / "epigenetic_measured_values.tex",
+        "ortholog":      stage11_dir / "ortholog_measured_values.tex",
+        "multiassembly": stage11_dir / "multiassembly_measured_values.tex",
+        "fold":          stage11_dir / "fold_measured_values.tex",
+        "divergence":    stage11_dir / "repeat_landscape_values.tex",
+        "ltr_struct":    stage11_dir / "ltr_struct_values.tex",
+        "subfamily":     stage11_dir / "subfamily_values.tex",
+        "benchmark":     stage11_dir / "benchmark_values.tex",
+        "motif_gain":    stage11_dir / "motif_gain_measured_values.tex",
+    }
+    result: dict = {}
+    for mod, path in tex_file_map.items():
+        if path.exists():
+            result[mod] = _parse_tex_macros(path)
+            _pp(f"  [stage11/meta] {mod}: {len(result[mod])} macros parsed from {path.name}")
+        else:
+            result[mod] = {}
+    return result
+
+
+def run_stage11(
+    family: str,
+    df_c: pd.DataFrame,
+    stage11_dir: Path,
+    build: str,
+    script_dir: Path,
+    python: str,
+    force: bool,
+    # optional user-supplied knobs (None → omit the flag; module uses its own default)
+    ortholog_species=None,
+    target_assemblies=None,
+    epigenetic_preset=None,
+    ctcf_preset=None,
+    tads_preset=None,
+    liftover_cmd=None,
+    colabfold_cmd=None,
+    cpg_omega=None,
+) -> dict:
+    """Run all Stage 11 standout modules for one family.
+
+    Saves the clustered DataFrame to <stage11_dir>/<family_lower>_clustered.csv
+    so the runners can read it, then invokes each run_*.py script with the same
+    --input / --reports-dir / --family CLI the full query.py pipeline uses.
+
+    Returns the stage11 meta dict (see collect_stage11_meta).
+    """
+    stage11_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Save clustered CSV for runner scripts ──────────────────────────────
+    csv_path = stage11_dir / f"{family.lower().replace('-','_')}_clustered.csv"
+    if force or not csv_path.exists():
+        df_c.to_csv(csv_path, index=False)
+        _pp(f"  [stage11] clustered CSV → {csv_path.name}")
+
+    # Consensus FASTA may appear after run_phylo_analysis writes it; check each time.
+    cons_fa = stage11_dir / "all_cluster_consensuses.fa"
+
+    # ── Build runtime-injected extra args ──────────────────────────────────
+    _opt      = lambda flag, val: [flag, str(val)] if val else []
+    _opt_list = lambda flag, vals: ([flag] + list(vals)) if vals else []
+
+    runtime_extra: dict = {
+        "epigenetic":    _opt("--preset", epigenetic_preset),
+        "ortholog":      _opt_list("--species", ortholog_species or [])
+                         + _opt("--liftover-cmd", liftover_cmd),
+        "multiassembly": ["--source-assembly", build]
+                         + _opt_list("--target-assemblies", target_assemblies or [])
+                         + _opt("--liftover-cmd", liftover_cmd),
+        "fold":          _opt("--colabfold-cmd", colabfold_cmd),
+        "divergence":    ["--assembly", build] + _opt("--cpg-omega", cpg_omega),
+        "subfamily":     ["--assembly", build] + _opt("--cpg-omega", cpg_omega),
+        "benchmark":     ["--assembly", build],
+        "motif_gain":    ["--assembly", build],
+    }
+
+    _pp(f"\n{'─'*60}")
+    _pp(f"  Stage 11 modules for {family}  ({len(_STAGE11_MODULES)} modules)")
+    _pp(f"  Input CSV:   {csv_path}")
+    _pp(f"  Reports dir: {stage11_dir}")
+    _pp(f"{'─'*60}")
+
+    ok_count = fail_count = skip_count = 0
+
+    for mod in _STAGE11_MODULES:
+        key     = mod["key"]
+        runner  = script_dir / mod["runner"]
+        primary = stage11_dir / mod["primary_output"]
+
+        if not runner.exists():
+            _pp(f"  [{key}] SKIP — {mod['runner']} not found in {script_dir}")
+            skip_count += 1
+            continue
+
+        if _exists(primary, force):
+            skip_count += 1
+            continue
+
+        extra = list(mod["extra"]) + runtime_extra.get(key, [])
+
+        # Add --consensus-fasta when the file is present
+        if mod["needs_consensus"] and cons_fa.exists():
+            extra += ["--consensus-fasta", str(cons_fa)]
+
+        cmd = [python, str(runner),
+               "--input",       str(csv_path),
+               "--reports-dir", str(stage11_dir),
+               "--family",      family] + extra
+
+        _pp(f"  [{key}] running {mod['runner']} ...")
+        t0 = time.time()
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        elapsed = time.time() - t0
+
+        # Always write per-module log regardless of outcome
+        log_path = stage11_dir / f"stage11_{key}.log"
+        log_path.write_text(
+            f"CMD: {' '.join(cmd)}\n"
+            f"EXIT: {proc.returncode}  ({elapsed:.0f}s)\n"
+            f"STDOUT:\n{proc.stdout}\n"
+            f"STDERR:\n{proc.stderr}\n"
+        )
+
+        if proc.returncode == 0:
+            _pp(f"  [{key}] OK ({elapsed:.0f}s)")
+            ok_count += 1
+        else:
+            _pp(f"  [{key}] FAILED rc={proc.returncode} ({elapsed:.0f}s) — see {log_path.name}")
+            fail_count += 1
+
+    _pp(f"  Stage 11 {family}: {ok_count} ok / {fail_count} failed / {skip_count} skipped")
+    return collect_stage11_meta(family, stage11_dir)
+
+
 # ─── prep: RMSK / Dfam ───────────────────────────────────────────────────────
 
 def prep_family(family: str, build: str, source: str, rmsk_dir: str,
@@ -531,11 +769,19 @@ def prep_family(family: str, build: str, source: str, rmsk_dir: str,
 
 # ─── measured values / text report ───────────────────────────────────────────
 
-def write_measured_values(results: dict, reports_dir: Path):
-    """Write measured_values.tex (LaTeX macros) and report_numbers.txt (human-readable)."""
+def write_measured_values(results: dict, reports_dir: Path,
+                          stage11_meta: dict | None = None):
+    """Write measured_values.tex (LaTeX macros) and report_numbers.txt (human-readable).
+
+    stage11_meta: optional {family: {module_key: {macro_name: value}}} from
+                  collect_stage11_meta().  When present, prefixed Stage 11 macros
+                  are added to the tex file and full Stage 11 detail is appended
+                  to report_numbers.txt.
+    """
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     lines_tex = [
         "% Auto-generated by run_line_sine_ltr_analysis.py",
-        f"% {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"% {ts}",
         "",
         "% ─── existing MT2_Mm macros (placeholders --- run full pipeline to fill) ───",
         r"\providecommand{\mtTwoLoci}{(pending run)}",
@@ -546,12 +792,12 @@ def write_measured_values(results: dict, reports_dir: Path):
         r"\providecommand{\cythonSpeedupGC}{(pending run)}",
         r"\providecommand{\cythonSpeedupKmer}{(pending run)}",
         "",
-        "% ─── LINE / SINE / LTR analysis macros ─────────────────────────────────",
+        "% ─── LINE / SINE / LTR core analysis macros ─────────────────────────────",
     ]
     lines_txt = [
         "=" * 60,
-        "GAMECA LINE / SINE / LTR Analysis --- Measured Values",
-        f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "GAMECA LINE / SINE / LTR Cross-Family Analysis --- Measured Values",
+        f"Generated: {ts}",
         "=" * 60,
     ]
 
@@ -573,7 +819,7 @@ def write_measured_values(results: dict, reports_dir: Path):
         mcs      = res.get("min_cluster_size", "---")
 
         lines_tex += [
-            f"% {family} ({FAMILIES[family]['type']})",
+            f"% {family} ({FAMILIES[family]['type']}) — core",
             rf"\providecommand{{\{pfx}Loci}}{{{n_loci:,}}}",
             rf"\providecommand{{\{pfx}Clusters}}{{{n_clust}}}",
             rf"\providecommand{{\{pfx}ExprLoci}}{{{n_expr:,}}}",
@@ -582,11 +828,29 @@ def write_measured_values(results: dict, reports_dir: Path):
             rf"\providecommand{{\{pfx}MinClusterSize}}{{{mcs}}}",
             rf"\providecommand{{\{pfx}DeSig}}{{{n_de_sig}}}",
             rf"\providecommand{{\{pfx}MedianDiv}}{{{med_div:.1f}}}",
-            "",
         ]
+
+        # ── Stage 11 prefixed macros ───────────────────────────────────────
+        if stage11_meta and family in stage11_meta:
+            fam_s11 = stage11_meta[family]
+            lines_tex.append(f"% {family} — Stage 11")
+            for mod_key, headline_names in _STAGE11_HEADLINE_MACROS.items():
+                mod_macros = fam_s11.get(mod_key, {})
+                for macro_name in headline_names:
+                    val = mod_macros.get(macro_name, "(pending run)")
+                    # Capitalise first letter of macro_name for the prefixed version
+                    cap = macro_name[0].upper() + macro_name[1:]
+                    lines_tex.append(
+                        rf"\providecommand{{\{pfx}{cap}}}{{{val}}}"
+                    )
+
+        lines_tex.append("")
+
         lines_txt += [
             "",
-            f"── {family} ({FAMILIES[family]['type']}) ──────────────────────────────",
+            f"{'─'*60}",
+            f"{family}  ({FAMILIES[family]['type']})",
+            f"{'─'*60}",
             f"  Loci:               {n_loci:,}",
             f"  Clusters:           {n_clust}",
             f"  Expression loci:    {n_expr:,}",
@@ -595,6 +859,20 @@ def write_measured_values(results: dict, reports_dir: Path):
             f"  Median Kimura div.: {med_div:.1f}%",
             f"  DE sig comparisons: {n_de_sig} (BH-FDR < 0.05)",
         ]
+
+        if stage11_meta and family in stage11_meta:
+            fam_s11 = stage11_meta[family]
+            lines_txt.append("  ── Stage 11 ──")
+            for mod_key in _STAGE11_HEADLINE_MACROS:
+                mod_macros = fam_s11.get(mod_key, {})
+                if not mod_macros:
+                    lines_txt.append(f"    {mod_key:<18} (not run / no output)")
+                    continue
+                headline_names = _STAGE11_HEADLINE_MACROS[mod_key]
+                vals = "  ".join(
+                    f"{n}={mod_macros[n]}" for n in headline_names if n in mod_macros
+                )
+                lines_txt.append(f"    {mod_key:<18} {vals}")
 
     # Write
     tex_path = reports_dir / "measured_values.tex"
@@ -622,8 +900,9 @@ def parse_args():
                    help="Path to B1_Mus2_ultracombo.csv on cluster (optional --- skips DE/expression plots if absent)")
     p.add_argument("--iapltr1-expr",default="",
                    help="Path to IAPLTR1_Mm_ultracombo.csv on cluster (optional --- skips DE/expression plots if absent)")
-    p.add_argument("--reports-dir", default="/home/amodz/anmol/reports4",
-                   help="Directory to save figures and measured_values.tex")
+    p.add_argument("--reports-dir", default="reports_line_sine_ltr",
+                   help="Directory to save figures and measured_values.tex "
+                        "(default: ./reports_line_sine_ltr)")
     p.add_argument("--genome-fa",   default="",
                    help="Path to mm10.fa on cluster (optional; UCSC API fallback)")
     p.add_argument("--rmsk-dir",    default=os.path.expanduser("~/te_analysis/rmsk"),
@@ -640,6 +919,40 @@ def parse_args():
     p.add_argument("--random-state",type=int, default=42)
     p.add_argument("--force", action="store_true",
                    help="Ignore all cached outputs and rerun every step")
+
+    # ── Stage 11 options ──────────────────────────────────────────────────────
+    p.add_argument("--skip-stage11", action="store_true",
+                   help="Skip Stage 11 standout-analysis modules entirely")
+    p.add_argument("--script-dir", default=None,
+                   help="Directory containing run_*.py Stage 11 runner scripts "
+                        "(default: same directory as this script)")
+    p.add_argument("--epigenetic-preset", default=None,
+                   help="Cell-line preset passed to run_epigenetic_overlay.py "
+                        "(e.g. K562, GM12878, HepG2)")
+    p.add_argument("--ctcf-preset", default=None,
+                   help="Cell-line preset passed to run_ctcf_tad.py "
+                        "(e.g. GM12878, K562)")
+    p.add_argument("--tads-preset", default=None,
+                   help="Hi-C / TAD preset passed to run_ctcf_tad.py "
+                        "(e.g. GM12878, K562)")
+    p.add_argument("--ortholog-species", nargs="+", default=None,
+                   metavar="SPECIES",
+                   help="One or more genome assembly IDs for ortholog liftover "
+                        "(e.g. panTro6 rheMac10).  Passed to run_ortholog_insertion.py.")
+    p.add_argument("--target-assemblies", nargs="+", default=None,
+                   metavar="ASM",
+                   help="Additional assemblies for multi-assembly liftover "
+                        "(e.g. t2t mm39).  Passed to run_multiassembly_liftover.py.")
+    p.add_argument("--liftover-cmd", default=None,
+                   help="Path to the UCSC liftOver binary "
+                        "(default: searches PATH)")
+    p.add_argument("--colabfold-cmd", default=None,
+                   help="Path to colabfold_batch binary for fold prediction "
+                        "(default: searches PATH)")
+    p.add_argument("--cpg-omega", type=float, default=None,
+                   help="CpG correction factor omega for divergence / subfamily "
+                        "modules (default: module default)")
+
     return p.parse_args()
 
 
@@ -657,18 +970,28 @@ def main():
         "IAPLTR1_Mm": args.iapltr1_expr,
     }
 
+    script_dir = (
+        Path(args.script_dir).resolve()
+        if args.script_dir
+        else Path(__file__).resolve().parent
+    )
+    python = shutil.which("python3") or shutil.which("python") or sys.executable
+
     _pp("=" * 60)
     _pp("GAMECA --- LINE / SINE / LTR Cross-Family Analysis")
-    _pp(f"  Build:       {args.build}")
-    _pp(f"  Source:      {args.source}")
-    _pp(f"  Genome FA:   {args.genome_fa or '(none --- UCSC API)'}")
-    _pp(f"  Reports dir: {reports_dir}")
-    _pp(f"  Force rerun: {args.force}")
+    _pp(f"  Build:        {args.build}")
+    _pp(f"  Source:       {args.source}")
+    _pp(f"  Genome FA:    {args.genome_fa or '(none --- UCSC API)'}")
+    _pp(f"  Reports dir:  {reports_dir}")
+    _pp(f"  Script dir:   {script_dir}")
+    _pp(f"  Force rerun:  {args.force}")
+    _pp(f"  Skip Stage11: {args.skip_stage11}")
     _pp("=" * 60)
 
     family_loci: dict = {}
     family_results: dict = {}
     analysis_meta: dict = {}
+    stage11_all_meta: dict = {}  # {family: {mod_key: {macro: value}}}
 
     # ─── Step 1: Prep, expression match, and cluster each family ───────────────
     for family, expr_path in expr_paths.items():
@@ -806,7 +1129,55 @@ def main():
                 shutil.copy(src, dst)
                 _pp(f"  Copied {src.name} → {dst.name}")
 
-    # ─── Step 4: Write measured values ─────────────────────────────────────────
+    # ─── Step 4: Stage 11 standout modules ────────────────────────────────────
+    if args.skip_stage11:
+        _pp("\n[Stage 11] skipped (--skip-stage11)")
+    else:
+        _pp(f"\n{'='*60}")
+        _pp("Stage 11 --- Standout Analysis")
+        _pp(f"{'='*60}")
+        for family in FAMILIES:
+            df_c, _ = family_results[family]
+            stage11_dir = reports_dir / f"stage11_{family.lower().replace('_', '')}"
+            s11_meta_cache = stage11_dir / "stage11_meta.json"
+
+            # Cache hit only if at least one module actually produced output.
+            # An all-empty meta means runners were not found last time — re-run.
+            _cached_meta = {}
+            if not args.force and s11_meta_cache.exists() and stage11_dir.exists():
+                _cached_meta = json.loads(s11_meta_cache.read_text())
+            _s11_has_output = any(bool(v) for v in _cached_meta.values())
+
+            if _s11_has_output:
+                _pp(f"  [{family}] Stage 11 cache hit — loading {s11_meta_cache.name}")
+                stage11_all_meta[family] = _cached_meta
+            else:
+                if not _s11_has_output and _cached_meta:
+                    _pp(f"  [{family}] Stage 11 cache was all-empty (runners missing last time) — re-running")
+                meta = run_stage11(
+                    family       = family,
+                    df_c         = df_c,
+                    stage11_dir  = stage11_dir,
+                    build        = args.build,
+                    script_dir   = script_dir,
+                    python       = python,
+                    force        = args.force,
+                    ortholog_species    = args.ortholog_species,
+                    target_assemblies   = args.target_assemblies,
+                    epigenetic_preset   = args.epigenetic_preset,
+                    ctcf_preset         = args.ctcf_preset,
+                    tads_preset         = args.tads_preset,
+                    liftover_cmd        = args.liftover_cmd,
+                    colabfold_cmd       = args.colabfold_cmd,
+                    cpg_omega           = args.cpg_omega,
+                )
+                stage11_all_meta[family] = meta
+                # Cache the parsed meta so next run skips Stage 11
+                stage11_dir.mkdir(parents=True, exist_ok=True)
+                s11_meta_cache.write_text(json.dumps(meta, indent=2))
+                _pp(f"  [{family}] Stage 11 meta cached → {s11_meta_cache.name}")
+
+    # ─── Step 5: Write measured values ─────────────────────────────────────────
     tex_path = reports_dir / "measured_values.tex"
     txt_path = reports_dir / "report_numbers.txt"
     if not args.force and tex_path.exists() and txt_path.exists():
@@ -814,7 +1185,10 @@ def main():
     else:
         _pp(f"\n{'='*60}")
         _pp("Writing measured values...")
-        tex_path, txt_path = write_measured_values(analysis_meta, reports_dir)
+        tex_path, txt_path = write_measured_values(
+            analysis_meta, reports_dir,
+            stage11_meta=stage11_all_meta if stage11_all_meta else None,
+        )
 
     _pp(f"\n{'='*60}")
     _pp("ALL DONE")

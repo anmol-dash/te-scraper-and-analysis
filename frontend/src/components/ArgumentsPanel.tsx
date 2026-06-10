@@ -19,6 +19,8 @@ function LocalPanel() {
   const finishRun = useAppStore((s) => s.finishRun);
   const resetRun = useAppStore((s) => s.resetRun);
   const pushToast = useAppStore((s) => s.pushToast);
+  const clearLogs = useAppStore((s) => s.clearLogs);
+  const setSuppressLogs = useAppStore((s) => s.setSuppressLogs);
   const busy = runPhase === "running";
 
   const pickFile = useCallback(
@@ -60,15 +62,14 @@ function LocalPanel() {
   }, [family, assembly, genome, maxLoci, exprCsv, outDir, beginRun, finishRun, pushToast]);
 
   const cancel = useCallback(async () => {
-    if (!runId) return;
-    try {
-      await pyCancel(runId);
-    } catch (e) {
-      pushToast(e instanceof Error ? e.message : String(e));
-    } finally {
-      resetRun();
+    setSuppressLogs(true);
+    clearLogs();
+    if (runId) {
+      try { await pyCancel(runId); } catch (_) {}
     }
-  }, [runId, pushToast, resetRun]);
+    resetRun();
+    setTimeout(() => setSuppressLogs(false), 500);
+  }, [runId, clearLogs, setSuppressLogs, resetRun]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -675,11 +676,24 @@ function HpcPanel() {
     }
   }, [fields.localDir, fields.remoteDir, beginRun, finishRun, pushToast]);
 
+  const clearLogs = useAppStore((s) => s.clearLogs);
+  const setSuppressLogs = useAppStore((s) => s.setSuppressLogs);
+
   const cancel = useCallback(async () => {
-    if (!runId) return;
-    try { await pyCancel(runId); } catch (_) {}
+    setSuppressLogs(true);
+    clearLogs();
+    if (runId) {
+      try { await pyCancel(runId); } catch (_) {}
+    }
+    if (hpcJobId) {
+      const killCmd = hpcScheduler === "lsf" ? `bkill ${hpcJobId}` : `scancel ${hpcJobId}`;
+      void pyRunFull(["hpc-run", "--cmd", killCmd, "--timeout", "15"]).catch(() => {});
+      setHpcJobId(null);
+      setFields((p) => ({ ...p, jobId: "" }));
+    }
     resetRun();
-  }, [runId, resetRun]);
+    setTimeout(() => setSuppressLogs(false), 500);
+  }, [runId, clearLogs, setSuppressLogs, hpcJobId, hpcScheduler, setHpcJobId, resetRun]);
 
   if (!hpcConnected) {
     return (
@@ -1306,7 +1320,7 @@ function HpcPanel() {
               <Field label="ColabFold command" hint="Path to colabfold_batch — enables consensus protein structure predictions">
                 <input className={input} value={fields.s11ColabfoldCmd}
                   onChange={(e) => set("s11ColabfoldCmd", e.target.value)}
-                  placeholder="(disabled if not found)" disabled={busy} />
+                  placeholder="colabfold_batch" disabled={busy} />
               </Field>
 
               <div className="flex gap-2">

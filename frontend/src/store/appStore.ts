@@ -20,6 +20,8 @@ type Toast = { id: string; message: string };
 
 type AppStore = {
   logs: LogLine[];
+  suppressLogs: boolean;
+  setSuppressLogs: (v: boolean) => void;
   pushLog: (line: Omit<LogLine, "id"> & { id?: string }) => void;
   clearLogs: () => void;
 
@@ -78,10 +80,13 @@ type AppStore = {
   setSetupEvent: (phase: SetupPhase, fraction: number, message: string) => void;
 };
 
-export const useAppStore = create<AppStore>((set, get) => ({
+export const useAppStore = create<AppStore>((set) => ({
   logs: [],
+  suppressLogs: false,
+  setSuppressLogs: (v) => set({ suppressLogs: v }),
   pushLog: (line) =>
-    set(() => {
+    set((s) => {
+      if (s.suppressLogs) return {};
       const id = line.id ?? globalThis.crypto.randomUUID();
       const nextLine: LogLine = {
         id,
@@ -90,7 +95,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
         ts: line.ts ?? Date.now(),
         source: line.source,
       };
-      const logs = [...get().logs, nextLine];
+      const logs = [...s.logs, nextLine];
       return { logs: logs.length > LOG_CAP ? logs.slice(-LOG_CAP) : logs };
     }),
   clearLogs: () => set({ logs: [] }),

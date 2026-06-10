@@ -93,6 +93,9 @@ JASPAR_BIGBED_URLS = {
     "mm39":     f"{CMMT_BASE_URL}/JASPAR2022_mm39.bb",
 }
 
+# Hard cap (seconds) on the per-motif CMMT download.  Override via env var.
+_CMMT_MAX_TIME_S = int(os.environ.get("TE_CMMT_MAX_TIME", "1800"))
+
 _DEFAULT_BASE = os.environ.get("TE_BASE_DIR",   str(Path.home() / "te_analysis"))
 _DEFAULT_JASP = os.environ.get("TE_JASPAR_DIR", str(Path(_DEFAULT_BASE) / "jaspar"))
 
@@ -268,17 +271,44 @@ def _get_bigbed_to_bed(jaspar_dir):
         return None
 
 
+def _query_bigbed_pybigtools(bb_url, loci, out):
+    """Query bigBed via pybigtools (no external binary, no glibc dependency).
+
+    Returns (total_records_written, had_error).
+    """
+    import pybigtools  # noqa: PLC0415
+    bb = pybigtools.open(bb_url, "r")
+    seen: set = set()
+    for _, row in loci.iterrows():
+        chrom = str(row["chrom"])
+        start = max(0, int(row["start"]) - 1)
+        end   = int(row["end"]) + 1
+        try:
+            for entry in bb.entries(chrom, start, end):
+                # entries() yields (start, end, rest_string)
+                chrom_out = chrom
+                s, e = entry[0], entry[1]
+                rest = entry[2] if len(entry) > 2 else ""
+                line = f"{chrom_out}\t{s}\t{e}" + (f"\t{rest}" if rest else "")
+                if line in seen:
+                    continue
+                seen.add(line)
+                out.write(line + "\n")
+        except Exception:
+            pass
+    return len(seen)
+
+
 def _build_locus_jaspar_bed_from_bigbed(build, jaspar_dir, loci_bed):
-    """Query remote JASPAR bigBed by TE chromosome spans and write a BED file."""
+    """Query remote JASPAR bigBed by TE chromosome spans and write a BED file.
+
+    Tries pybigtools first (pure Python/Rust, no glibc dependency), then falls
+    back to the bigBedToBed binary if pybigtools is not installed.
+    """
     import subprocess
 
     bb_url = JASPAR_BIGBED_URLS.get(build)
     if not bb_url or not loci_bed:
-        return None
-
-    tool = _get_bigbed_to_bed(jaspar_dir)
-    if not tool:
-        log.warning("bigBedToBed is not available; cannot auto-query JASPAR bigBed.")
         return None
 
     try:
@@ -297,13 +327,54 @@ def _build_locus_jaspar_bed_from_bigbed(build, jaspar_dir, loci_bed):
 
     out_path = Path(jaspar_dir) / f"JASPAR2022_{build}.te_loci.bed"
     tmp_path = out_path.with_suffix(".bed.part")
-    total = 0
     log.info("Auto-querying JASPAR bigBed for %d TE loci", len(loci))
     log.info("  Source: %s", bb_url)
     log.info("  Output: %s", out_path)
-    seen = set()
-    errors = 0
     t0 = time.time()
+
+    # ── Path 1: pybigtools (Rust-based, works on any glibc / macOS / Windows) ──
+    try:
+        import pybigtools as _pbt  # noqa: F401, PLC0415
+        import concurrent.futures as _cf
+        log.info("  Using pybigtools for bigBed query (timeout=300s)")
+        with open(tmp_path, "w") as out:
+            _ex = _cf.ThreadPoolExecutor(max_workers=1)
+            _fut = _ex.submit(_query_bigbed_pybigtools, bb_url, loci, out)
+            try:
+                total = _fut.result(timeout=300)
+            except _cf.TimeoutError:
+                log.warning("  pybigtools bigBed query timed out (>300s)")
+                total = 0
+            finally:
+                _ex.shutdown(wait=False)
+        elapsed = time.time() - t0
+        if total > 0:
+            tmp_path.replace(out_path)
+            log.info("bigBed query complete (pybigtools): %d records in %.1fs", total, elapsed)
+            if validate_jaspar_bed(out_path):
+                log.info("JASPAR locus BED ready: %s", out_path)
+                return str(out_path)
+            out_path.unlink(missing_ok=True)
+            log.error("bigBed-derived BED failed validation; discarding")
+        else:
+            tmp_path.unlink(missing_ok=True)
+            log.warning("pybigtools returned 0 records (elapsed=%.1fs) — trying bigBedToBed", elapsed)
+    except ImportError:
+        log.info("  pybigtools not installed — trying bigBedToBed binary")
+    except Exception as exc:
+        log.warning("  pybigtools query failed (%s) — trying bigBedToBed binary", exc)
+        log.debug(traceback.format_exc())
+        tmp_path.unlink(missing_ok=True)
+
+    # ── Path 2: bigBedToBed binary (fallback) ────────────────────────────────
+    tool = _get_bigbed_to_bed(jaspar_dir)
+    if not tool:
+        log.warning("bigBedToBed is not available; cannot auto-query JASPAR bigBed.")
+        return None
+
+    seen: set = set()
+    errors = 0
+    total = 0
     with open(tmp_path, "w") as out:
         for row_i, row in loci.iterrows():
             chrom = str(row["chrom"])
@@ -319,7 +390,7 @@ def _build_locus_jaspar_bed_from_bigbed(build, jaspar_dir, loci_bed):
                 if "GLIBC" in result.stderr or "version `" in result.stderr or \
                         "version not found" in result.stderr:
                     log.error("bigBedToBed is incompatible with this system's glibc — "
-                              "aborting bigBed query and removing cached binary")
+                              "install pybigtools to avoid this: pip install pybigtools")
                     try:
                         Path(tool).unlink(missing_ok=True)
                     except Exception:
@@ -346,7 +417,7 @@ def _build_locus_jaspar_bed_from_bigbed(build, jaspar_dir, loci_bed):
         return None
 
     tmp_path.replace(out_path)
-    log.info("bigBed query complete: %d records in %.1fs", total, elapsed)
+    log.info("bigBed query complete (binary): %d records in %.1fs", total, elapsed)
     if validate_jaspar_bed(out_path):
         log.info("JASPAR locus BED ready: %s", out_path)
         return str(out_path)
@@ -409,16 +480,19 @@ def _overlaps_any(chr_, start, end, loci_lookup):
     return False
 
 
-def _download_cmmt_per_motif(build, jaspar_dir, loci_bed=None):
+def _download_cmmt_per_motif(build, jaspar_dir, loci_bed=None, max_time_s=None):
     """Stream-download JASPAR 2022 per-motif TSV.gz files from CMMT.
 
     Each file is decompressed on the fly.  When loci_bed is provided only rows
     that overlap the TE loci are kept, avoiding multi-GB local storage.  The
     merged result is sorted and cached as JASPAR2022_{build}.sorted.bed.gz.
 
+    max_time_s caps the total download time (default: _CMMT_MAX_TIME_S / 1800 s).
     Returns the path to the cached BED.gz, or None on failure.
     """
     import re, urllib.request
+    if max_time_s is None:
+        max_time_s = _CMMT_MAX_TIME_S
 
     if build not in CMMT_ASSEMBLIES:
         log.warning("Build '%s' not in CMMT assemblies; skipping per-motif download.", build)
@@ -457,6 +531,14 @@ def _download_cmmt_per_motif(build, jaspar_dir, loci_bed=None):
     try:
         with gzip.open(str(tmp_path), "wt") as out_fh:
             for i, (fname, url) in enumerate(file_list, 1):
+                if time.time() - t0 > max_time_s:
+                    log.error(
+                        "CMMT per-motif download aborted: exceeded %.0f-min budget "
+                        "after %d/%d files (%d rows). Pass --jaspar-bed or set "
+                        "TE_CMMT_MAX_TIME env var to extend.",
+                        max_time_s / 60, i - 1, len(file_list), total_written,
+                    )
+                    break
                 if i == 1 or i % 50 == 0 or i == len(file_list):
                     log.info("  [%d/%d] %s", i, len(file_list), fname)
                 rows_written = 0
@@ -539,6 +621,78 @@ def _download_cmmt_per_motif(build, jaspar_dir, loci_bed=None):
         return None
 
 
+def _download_jaspar_bulk_bed(build, jaspar_dir, loci_bed=None):
+    """Download the single bulk JASPAR 2024 BED from jaspar.elixir.no (~500 MB).
+
+    Much faster than per-motif streaming.  Filters to TE loci when loci_bed is
+    provided.  Saves as JASPAR2024_{build}.sorted.bed.gz.
+    Returns path or None on failure.
+    """
+    import urllib.request, shutil as _sh
+
+    url = JASPAR_URLS.get(build)
+    if not url:
+        log.info("No bulk JASPAR URL known for build '%s'; skipping.", build)
+        return None
+
+    jaspar_dir = Path(jaspar_dir)
+    out_path = jaspar_dir / f"JASPAR2024_{build}.sorted.bed.gz"
+    raw_gz   = jaspar_dir / f"JASPAR2024_{build}.raw.bed.gz"
+
+    if not raw_gz.exists():
+        log.info("Bulk JASPAR 2024 BED download (~500 MB): %s", url)
+        t0 = time.time()
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "te_motif/1.0"})
+            with urllib.request.urlopen(req, timeout=900) as resp, \
+                 open(raw_gz, "wb") as fh:
+                _sh.copyfileobj(resp, fh)
+            mb = raw_gz.stat().st_size / 1e6
+            log.info("  Downloaded %.1f MB in %.1fs", mb, time.time() - t0)
+            if mb < 1.0:
+                log.error("Bulk JASPAR download too small (%.1f MB); aborting", mb)
+                raw_gz.unlink(missing_ok=True)
+                return None
+        except Exception as exc:
+            log.warning("Bulk JASPAR download failed: %s", exc)
+            raw_gz.unlink(missing_ok=True)
+            return None
+    else:
+        log.info("Bulk JASPAR raw BED already present: %s", raw_gz)
+
+    loci_lookup = _build_loci_lookup(loci_bed) if loci_bed else None
+    try:
+        log.info("  Sorting bulk JASPAR BED%s ...",
+                 " (with loci filter)" if loci_lookup else "")
+        rows = []
+        with gzip.open(str(raw_gz), "rt", encoding="utf-8", errors="replace") as gz:
+            for line in gz:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) < 3:
+                    continue
+                try:
+                    chrom, start, end = parts[0], int(parts[1]), int(parts[2])
+                except ValueError:
+                    continue
+                if loci_lookup and not _overlaps_any(chrom, start, end, loci_lookup):
+                    continue
+                rows.append((chrom, start, line))
+        if not rows:
+            log.error("Bulk JASPAR BED: no rows after filter")
+            return None
+        rows.sort(key=lambda x: (x[0], x[1]))
+        with gzip.open(str(out_path), "wt") as fh:
+            for _, _, line in rows:
+                fh.write(line)
+        raw_gz.unlink(missing_ok=True)
+        log.info("Bulk JASPAR BED ready: %d rows → %s", len(rows), out_path)
+        return str(out_path) if validate_jaspar_bed(out_path) else None
+    except Exception as exc:
+        log.warning("Bulk JASPAR sort/filter failed: %s", exc)
+        raw_gz.unlink(missing_ok=True)
+        return None
+
+
 def resolve_jaspar_bed(build, jaspar_bed_arg, jaspar_dir, loci_bed=None):
     """Return path to a valid JASPAR BED, downloading if necessary."""
     jaspar_dir = Path(jaspar_dir)
@@ -589,8 +743,14 @@ def resolve_jaspar_bed(build, jaspar_bed_arg, jaspar_dir, loci_bed=None):
     if locus_bed:
         return locus_bed
 
-    # ── 4. CMMT per-motif TSV.gz streaming download (no external tools) ───────
-    log.info("bigBedToBed not available — falling back to per-motif CMMT download ...")
+    # ── 3.5. Single bulk BED from jaspar.elixir.no (~500 MB, one request) ───────
+    log.info("Trying single-file bulk JASPAR 2024 BED download ...")
+    bulk_path = _download_jaspar_bulk_bed(build, jaspar_dir, loci_bed=loci_bed)
+    if bulk_path:
+        return bulk_path
+
+    # ── 4. CMMT per-motif TSV.gz streaming (last resort; capped at 30 min) ────
+    log.info("Bulk download failed — falling back to per-motif CMMT download ...")
     cmmt_path = _download_cmmt_per_motif(build, jaspar_dir, loci_bed=loci_bed)
     if cmmt_path:
         return cmmt_path

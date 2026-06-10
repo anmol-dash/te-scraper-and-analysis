@@ -52,11 +52,27 @@ except ImportError:
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _UPLOAD_FILES = [
+    # core pipeline
     "run_line_sine_ltr_analysis.py",
     "te_prep.py",
     "te_clustering.py",
     "te_expression.py",
     "requirements.txt",
+    # Stage 11 runner scripts
+    "run_phylo_analysis.py",
+    "run_grna_offtarget.py",
+    "run_transduction.py",
+    "run_antisense_promoter.py",
+    "run_ctcf_tad.py",
+    "run_epigenetic_overlay.py",
+    "run_ortholog_insertion.py",
+    "run_multiassembly_liftover.py",
+    "run_fold_prediction.py",
+    "run_divergence.py",
+    "run_ltr_struct.py",
+    "run_subfamily.py",
+    "run_benchmark.py",
+    "run_motif_gain.py",
 ]
 
 
@@ -260,8 +276,8 @@ def parse_args():
                    help="Cluster path to B1_Mus2_ultracombo.csv")
     p.add_argument("--iapltr1-expr",required=True,
                    help="Cluster path to IAPLTR1_Mm_ultracombo.csv")
-    p.add_argument("--reports-dir", default="/home/amodz/anmol/reports4",
-                   help="Remote path for output figures")
+    p.add_argument("--reports-dir", default="/home/amodz/anmol/reports_line_sine_ltr",
+                   help="Remote path for output figures (created on cluster if absent)")
     p.add_argument("--genome-fa",   default="",
                    help="Cluster path to mm10.fa (optional)")
     p.add_argument("--build",       default="mm10")
@@ -287,56 +303,56 @@ def main():
             f"Password for {username}@{args.host}: ", stream=_STDERR
         )
 
-    # ── Connect ────────────────────────────────────────────────────────────────
+    # ── Connect — transport is closed automatically on any exit path ──────────
     transport = _connect(args.host, username, args.password, args.port, args.key)
+    try:
+        # ── Select work dir ──────────────────────────────────────────────────
+        work_dir = _select_work_dir(transport, username)
 
-    # ── Select work dir ────────────────────────────────────────────────────────
-    work_dir = _select_work_dir(transport, username)
+        # ── Detect scheduler ─────────────────────────────────────────────────
+        scheduler = args.scheduler
+        if scheduler == "auto":
+            scheduler = _detect_scheduler(transport)
 
-    # ── Detect scheduler ───────────────────────────────────────────────────────
-    scheduler = args.scheduler
-    if scheduler == "auto":
-        scheduler = _detect_scheduler(transport)
+        # ── Upload files ─────────────────────────────────────────────────────
+        _log("Uploading analysis files...")
+        for fname in _UPLOAD_FILES:
+            local = _SCRIPT_DIR / fname
+            if not local.exists():
+                _log(f"  WARNING: {fname} not found locally — skipping")
+                continue
+            _upload_file(transport, local, f"{work_dir}/{fname}")
 
-    # ── Upload files ───────────────────────────────────────────────────────────
-    _log("Uploading analysis files...")
-    for fname in _UPLOAD_FILES:
-        local = _SCRIPT_DIR / fname
-        if not local.exists():
-            _log(f"  WARNING: {fname} not found locally — skipping")
-            continue
-        _upload_file(transport, local, f"{work_dir}/{fname}")
+        # ── Build batch job script ────────────────────────────────────────────
+        ts       = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        job_name = f"gameca_lsl_{ts}"
+        job_sh   = f"{work_dir}/{job_name}.sh"
+        job_out  = f"{work_dir}/{job_name}.out"
+        job_err  = f"{work_dir}/{job_name}.err"
 
-    # ── Build batch job script ─────────────────────────────────────────────────
-    ts       = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    job_name = f"gameca_lsl_{ts}"
-    job_sh   = f"{work_dir}/{job_name}.sh"
-    job_out  = f"{work_dir}/{job_name}.out"
-    job_err  = f"{work_dir}/{job_name}.err"
+        # Build pipeline CLI args
+        analysis_args = (
+            f"--l1mdt-expr  {shlex.quote(args.l1mdt_expr)} "
+            f"--b1mus2-expr {shlex.quote(args.b1mus2_expr)} "
+            f"--iapltr1-expr {shlex.quote(args.iapltr1_expr)} "
+            f"--reports-dir {shlex.quote(args.reports_dir)} "
+            f"--build {args.build} --source {args.source}"
+        )
+        if args.genome_fa:
+            analysis_args += f" --genome-fa {shlex.quote(args.genome_fa)}"
+        if args.max_loci:
+            analysis_args += f" --max-loci {args.max_loci}"
 
-    # Build pipeline CLI args
-    analysis_args = (
-        f"--l1mdt-expr  {shlex.quote(args.l1mdt_expr)} "
-        f"--b1mus2-expr {shlex.quote(args.b1mus2_expr)} "
-        f"--iapltr1-expr {shlex.quote(args.iapltr1_expr)} "
-        f"--reports-dir {shlex.quote(args.reports_dir)} "
-        f"--build {args.build} --source {args.source}"
-    )
-    if args.genome_fa:
-        analysis_args += f" --genome-fa {shlex.quote(args.genome_fa)}"
-    if args.max_loci:
-        analysis_args += f" --max-loci {args.max_loci}"
+        modules_block = ""
+        if args.modules.strip():
+            modules_block = "\n".join(f"module load {m}" for m in args.modules.split())
 
-    modules_block = ""
-    if args.modules.strip():
-        modules_block = "\n".join(f"module load {m}" for m in args.modules.split())
+        header = _job_header(
+            scheduler, job_name, job_out, job_err,
+            args.mem_mb, args.cpus, args.walltime, args.queue,
+        )
 
-    header = _job_header(
-        scheduler, job_name, job_out, job_err,
-        args.mem_mb, args.cpus, args.walltime, args.queue,
-    )
-
-    job_script = f"""#!/bin/bash
+        job_script = f"""#!/bin/bash
 {header}
 {modules_block}
 
@@ -387,42 +403,41 @@ echo "[$(date)] Analysis finished with exit code $EXIT_CODE"
 exit $EXIT_CODE
 """
 
-    _log("Creating job script on cluster...")
-    safe_script = job_script.replace("'", "'\\''")
-    _, _, code = _run(
-        transport,
-        f"cat > {shlex.quote(job_sh)} << 'GAMECA_SCRIPT_EOF'\n{job_script}\nGAMECA_SCRIPT_EOF",
-        timeout=30,
-    )
-    if code != 0:
-        # Fallback: upload via base64
-        _upload_text(transport, job_script, job_sh, "job script")
-
-    _run(transport, f"chmod +x {shlex.quote(job_sh)}", timeout=10)
-
-    # ── Submit job ─────────────────────────────────────────────────────────────
-    _log("Submitting job...")
-    if scheduler == "lsf":
-        submit_cmd = f"bsub < {shlex.quote(job_sh)}"
-    elif scheduler == "slurm":
-        submit_cmd = f"sbatch {shlex.quote(job_sh)}"
-    else:
-        # nohup fallback: redirect output manually
-        submit_cmd = (
-            f"nohup bash {shlex.quote(job_sh)} "
-            f"> {shlex.quote(job_out)} 2> {shlex.quote(job_err)} & echo $!"
+        _log("Creating job script on cluster...")
+        _, _, code = _run(
+            transport,
+            f"cat > {shlex.quote(job_sh)} << 'GAMECA_SCRIPT_EOF'\n{job_script}\nGAMECA_SCRIPT_EOF",
+            timeout=30,
         )
+        if code != 0:
+            # Fallback: upload via base64
+            _upload_text(transport, job_script, job_sh, "job script")
 
-    out, err, code = _run(transport, submit_cmd, timeout=60)
-    if code != 0:
-        _log(f"  Submit failed (exit {code}): {err.strip()[:200]}")
+        _run(transport, f"chmod +x {shlex.quote(job_sh)}", timeout=10)
+
+        # ── Submit job ───────────────────────────────────────────────────────
+        _log("Submitting job...")
+        if scheduler == "lsf":
+            submit_cmd = f"bsub < {shlex.quote(job_sh)}"
+        elif scheduler == "slurm":
+            submit_cmd = f"sbatch {shlex.quote(job_sh)}"
+        else:
+            submit_cmd = (
+                f"nohup bash {shlex.quote(job_sh)} "
+                f"> {shlex.quote(job_out)} 2> {shlex.quote(job_err)} & echo $!"
+            )
+
+        out, err, code = _run(transport, submit_cmd, timeout=60)
+        if code != 0:
+            _log(f"  Submit failed (exit {code}): {err.strip()[:200]}")
+            sys.exit(1)
+
+        job_id = out.strip().splitlines()[-1].strip() if out.strip() else "(unknown)"
+        _log(f"  Job submitted: {job_id}")
+
+    finally:
         transport.close()
-        sys.exit(1)
-
-    job_id = out.strip().splitlines()[-1].strip() if out.strip() else "(unknown)"
-    _log(f"  Job submitted: {job_id}")
-
-    transport.close()
+        _log("Connection closed.")
 
     # ── Final output (stdout only — these two lines) ──────────────────────────
     print(f"OUT {job_out}")

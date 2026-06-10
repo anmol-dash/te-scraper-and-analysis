@@ -272,8 +272,10 @@ def find_colabfold(cmd_override: str = "") -> str:
         return shutil.which(cmd_override) or cmd_override
     candidates = [
         "colabfold_batch",
+        os.path.expanduser("~/localcolabfold/colabfold-conda/bin/colabfold_batch"),
         os.path.expanduser("~/.local/bin/colabfold_batch"),
         "/usr/local/bin/colabfold_batch",
+        "/opt/colabfold/bin/colabfold_batch",
     ]
     for c in candidates:
         found = shutil.which(c) or (os.path.isfile(c) and os.access(c, os.X_OK) and c)
@@ -285,6 +287,66 @@ def find_colabfold(cmd_override: str = "") -> str:
         p = os.path.join(conda_base, "bin", "colabfold_batch")
         if os.path.isfile(p):
             return p
+    return ""
+
+
+def _auto_install_colabfold() -> str:
+    """Install colabfold_batch if missing. Tries pip first, then localColabFold installer."""
+    # ── 1. pip install colabfold (fast, ~500 MB) ──────────────────────────────
+    _pp("colabfold_batch not found — installing via pip (colabfold[alphafold-minus-data])...")
+    try:
+        r = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--quiet",
+             "colabfold[alphafold-minus-data]>=1.5.5"],
+            timeout=300,
+        )
+        if r.returncode == 0:
+            found = shutil.which("colabfold_batch")
+            if found:
+                _pp(f"  pip install OK: {found}")
+                return found
+            # entry point may be in the same Scripts/bin as this interpreter
+            scripts = Path(sys.executable).parent
+            candidate = scripts / "colabfold_batch"
+            if candidate.exists() and os.access(candidate, os.X_OK):
+                _pp(f"  pip install OK: {candidate}")
+                return str(candidate)
+        _pp("  pip install finished but colabfold_batch not found — trying localColabFold installer")
+    except Exception as exc:
+        _pp(f"  pip install failed ({exc}) — trying localColabFold installer")
+
+    # ── 2. localColabFold bash installer fallback (~20 GB) ────────────────────
+    cf_bin = os.path.expanduser("~/localcolabfold/colabfold-conda/bin/colabfold_batch")
+    if os.path.isfile(cf_bin) and os.access(cf_bin, os.X_OK):
+        return cf_bin
+
+    _pp("Downloading localColabFold installer (~20 GB, may take 20-30 min)...")
+    installer_url = "https://raw.githubusercontent.com/YoshitakaMo/localcolabfold/main/install_colabfold_linux.sh"
+    home = os.path.expanduser("~")
+    installer = os.path.join(home, "install_colabfold_linux.sh")
+    try:
+        r = subprocess.run(["wget", "-q", "-O", installer, installer_url], timeout=60)
+        if r.returncode != 0:
+            _pp("ERROR: failed to download localColabFold installer")
+            return ""
+        os.chmod(installer, 0o755)
+        r = subprocess.run(["bash", installer], cwd=home)
+        if r.returncode != 0:
+            _pp("ERROR: localColabFold installer exited with non-zero status")
+            return ""
+    except Exception as exc:
+        _pp(f"ERROR: localColabFold install failed: {exc}")
+        return ""
+    finally:
+        try:
+            os.remove(installer)
+        except OSError:
+            pass
+
+    if os.path.isfile(cf_bin) and os.access(cf_bin, os.X_OK):
+        _pp(f"  localColabFold installed: {cf_bin}")
+        return cf_bin
+    _pp("ERROR: installer finished but colabfold_batch binary not found at expected path")
     return ""
 
 
@@ -714,9 +776,10 @@ def main():
     fold_results: dict = {}
 
     if not cf_cmd:
-        _pp("WARNING: colabfold_batch not found --- skipping structure prediction.")
-        _pp("  Install with:  pip install colabfold[alphafold]")
-        _pp("  Or pass --colabfold-cmd /path/to/colabfold_batch")
+        cf_cmd = _auto_install_colabfold()
+    if not cf_cmd:
+        _pp("WARNING: colabfold_batch not found and auto-install failed — skipping structure prediction.")
+        _pp("  Pass --colabfold-cmd /path/to/colabfold_batch to enable folding.")
     else:
         _pp(f"ColabFold found: {cf_cmd}")
         already_done = (not args.force and cf_dir.exists()

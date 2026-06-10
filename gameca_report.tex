@@ -15,7 +15,7 @@
 \usepackage{caption}
 \usepackage[colorlinks=true,allcolors=blue!55!black]{hyperref}
 
-\graphicspath{{./}{figures/}}
+\graphicspath{{./}{figures/}{reports8/}{reports8/stage11_l1mdt/}{reports8/stage11_b1mus2/}{reports8/stage11_iapltr1mm/}}
 
 % ---------------------------------------------------------------------------
 % Figure-slot macro: check current dir (.pdf), then figures/ (.pdf), then .png,
@@ -61,7 +61,8 @@
 
 % LINE / SINE / LTR macros — written by run_line_sine_ltr_analysis.py
 \IfFileExists{measured_values.tex}{\input{measured_values.tex}}{%
-  \IfFileExists{figures/measured_values.tex}{\input{figures/measured_values.tex}}{}}
+  \IfFileExists{figures/measured_values.tex}{\input{figures/measured_values.tex}}{%
+    \IfFileExists{reports8/measured_values.tex}{\input{reports8/measured_values.tex}}{}}}
 \providecommand{\lOneTLoci}{23,639}
 \providecommand{\lOneTClusters}{2}
 \providecommand{\lOneTExprLoci}{7,490}
@@ -85,7 +86,11 @@
 % fill gaps so the report always compiles. "(pending run)" => not yet generated.
 % ---------------------------------------------------------------------------
 \newcommand{\inputIfAny}[1]{%
-  \IfFileExists{#1}{\input{#1}}{\IfFileExists{figures/#1}{\input{figures/#1}}{}}}
+  \IfFileExists{#1}{\input{#1}}{%
+    \IfFileExists{figures/#1}{\input{figures/#1}}{%
+      \IfFileExists{reports8/stage11_l1mdt/#1}{\input{reports8/stage11_l1mdt/#1}}{%
+        \IfFileExists{reports8/stage11_b1mus2/#1}{\input{reports8/stage11_b1mus2/#1}}{%
+          \IfFileExists{reports8/stage11_iapltr1mm/#1}{\input{reports8/stage11_iapltr1mm/#1}}{}}}}}}
 \inputIfAny{phylo_measured_values.tex}
 \inputIfAny{grna_offtarget_measured_values.tex}
 \inputIfAny{transduction_measured_values.tex}
@@ -509,7 +514,16 @@ significant comparisons are marked ($q{<}0.05$).
 
 \begin{figure}[h]
   \centering
-  \resizebox{1.0\textwidth}{!}{\figorbox{fig_line_results}}
+  \resizebox{1.0\textwidth}{!}{\figorbox{reports8/fig_line_sine_ltr_clustering}}
+  \caption{UMAP clustering overview for all three cross-family elements:
+    \emph{L1Md\_T} (LINE), \emph{B1\_Mus2} (SINE), and \emph{IAPLTR1\_Mm} (LTR) in
+    \texttt{mm10}. Each panel shows the HDBSCAN partition coloured by cluster.}
+  \label{fig:line_sine_ltr_clustering}
+\end{figure}
+
+\begin{figure}[h]
+  \centering
+  \resizebox{1.0\textwidth}{!}{\figorbox{reports8/fig_line_results}}
   \caption{\emph{L1Md\_T} (LINE, \texttt{mm10}) end-to-end in GAMECA.
     \textbf{(a)} UMAP embedding coloured by HDBSCAN cluster.
     \textbf{(b)} Per-cluster mean SQuIRE expression (log1p).
@@ -519,21 +533,21 @@ significant comparisons are marked ($q{<}0.05$).
 
 \begin{figure}[h]
   \centering
-  \resizebox{1.0\textwidth}{!}{\figorbox{fig_sine_results}}
+  \resizebox{1.0\textwidth}{!}{\figorbox{reports8/fig_sine_results}}
   \caption{\emph{B1\_Mus2} (SINE, \texttt{mm10}).  Layout as in Figure~\ref{fig:line_results}.}
   \label{fig:sine_results}
 \end{figure}
 
 \begin{figure}[h]
   \centering
-  \resizebox{1.0\textwidth}{!}{\figorbox{fig_ltr_results}}
+  \resizebox{1.0\textwidth}{!}{\figorbox{reports8/fig_ltr_results}}
   \caption{\emph{IAPLTR1\_Mm} (LTR, \texttt{mm10}).  Layout as in Figure~\ref{fig:line_results}.}
   \label{fig:ltr_results}
 \end{figure}
 
 \begin{figure}[h]
   \centering
-  \resizebox{1.0\textwidth}{!}{\figorbox{fig_kimura_divergence}}
+  \resizebox{1.0\textwidth}{!}{\figorbox{reports8/fig_kimura_divergence}}
   \caption{Repeat landscape: CpG-corrected Kimura substitution histograms for
     \emph{L1Md\_T} (LINE), \emph{B1\_Mus2} (SINE), and \emph{IAPLTR1\_Mm} (LTR)
     in \texttt{mm10}.  Dashed vertical lines mark family medians.}
@@ -666,22 +680,22 @@ All modules above compose into a single \texttt{gameca.yaml}: stages form a DAG 
 and run identically on LSF, Slurm, or locally (Section~\ref{sec:hpc}) and inside an
 Apptainer/Singularity image for install-free HPC execution.
 
-\begin{figure}[h]\centering\resizebox{0.8\textwidth}{!}{\figorbox{fig_phylo_tree}}
+\begin{figure}[h]\centering\resizebox{0.8\textwidth}{!}{\figorbox{reports8/stage11_l1mdt/fig_phylo_tree}}
   \caption{\texttt{\phyloFamily}: neighbour-joining tree of cluster consensuses /
     representative copies.}\label{fig:phylo_tree}\end{figure}
-\begin{figure}[h]\centering\resizebox{1.0\textwidth}{!}{\figorbox{fig_phylo_divergence}}
+\begin{figure}[h]\centering\resizebox{1.0\textwidth}{!}{\figorbox{reports8/stage11_l1mdt/fig_phylo_divergence}}
   \caption{\texttt{\phyloFamily}: Kimura divergence-from-consensus and
     molecular-clock age distributions.}\label{fig:phylo_div}\end{figure}
-\begin{figure}[h]\centering\resizebox{0.9\textwidth}{!}{\figorbox{fig_phylo_master}}
+\begin{figure}[h]\centering\resizebox{0.9\textwidth}{!}{\figorbox{reports8/stage11_l1mdt/fig_phylo_master}}
   \caption{\texttt{\phyloFamily}: candidate master/source elements ranked by
     intactness vs divergence.}\label{fig:phylo_master}\end{figure}
-\begin{figure}[h]\centering\resizebox{0.8\textwidth}{!}{\figorbox{fig_grna_offtarget_pareto}}
+\begin{figure}[h]\centering\resizebox{0.8\textwidth}{!}{\figorbox{reports8/stage11_l1mdt/fig_grna_offtarget_pareto}}
   \caption{\texttt{\grnaOTFamily}: gRNA specificity-vs-coverage Pareto frontier
     over the full copy landscape.}\label{fig:grna_pareto}\end{figure}
-\begin{figure}[h]\centering\resizebox{1.0\textwidth}{!}{\figorbox{fig_transduction_groups}}
+\begin{figure}[h]\centering\resizebox{1.0\textwidth}{!}{\figorbox{reports8/stage11_l1mdt/fig_transduction_groups}}
   \caption{\texttt{\transFamily}: 3' transduction lineage sizes and shared-tail
     $k$-mer matrix.}\label{fig:transduction}\end{figure}
-\begin{figure}[h]\centering\resizebox{0.9\textwidth}{!}{\figorbox{fig_antisense_motifs}}
+\begin{figure}[h]\centering\resizebox{0.9\textwidth}{!}{\figorbox{reports8/stage11_l1mdt/fig_antisense_motifs}}
   \caption{\texttt{\antiFamily}: sense vs antisense promoter-motif counts per
     copy.}\label{fig:antisense}\end{figure}
 \begin{figure}[h]\centering\resizebox{0.8\textwidth}{!}{\figorbox{fig_ctcf_overlap}}
@@ -696,16 +710,16 @@ Apptainer/Singularity image for install-free HPC execution.
 \begin{figure}[h]\centering\resizebox{0.8\textwidth}{!}{\figorbox{fig_subfamily_tree}}
   \caption{UPGMA dendrogram of cluster consensus sequences with provisional subfamily
     labels.}\label{fig:subfamily_tree}\end{figure}
-\begin{figure}[h]\centering\resizebox{0.8\textwidth}{!}{\figorbox{de_heatmap}}
+\begin{figure}[h]\centering\resizebox{0.8\textwidth}{!}{\figorbox{reports8/fig_de_l1mdt}}
   \caption{Pairwise differential expression between clusters: $-\log_{10}(p_\mathrm{adj})$
     heatmap (Mann--Whitney $U$, BH-corrected).}\label{fig:de_heatmap}\end{figure}
-\begin{figure}[h]\centering\resizebox{0.8\textwidth}{!}{\figorbox{de_volcano}}
+\begin{figure}[h]\centering\resizebox{0.8\textwidth}{!}{\figorbox{reports8/fig_de_b1mus2}}
   \caption{Differential-expression volcano plot: $\log_2$ fold-change vs.\
     $-\log_{10}(p_\mathrm{adj})$ across all cluster pairs and expression
     columns.}\label{fig:de_volcano}\end{figure}
 \begin{figure}[h]\centering\resizebox{0.9\textwidth}{!}{\figorbox{fig_benchmark}}
   \caption{Per-stage wall-clock time for the GAMECA pipeline.}\label{fig:benchmark}\end{figure}
-\begin{figure}[h]\centering\resizebox{0.7\textwidth}{!}{\figorbox{fig_benchmark_steps}}
+\begin{figure}[h]\centering\resizebox{0.7\textwidth}{!}{\figorbox{reports8/stage11_l1mdt/fig_benchmark_steps}}
   \caption{User-facing step count: GAMECA vs.\ the equivalent manual
     workflow.}\label{fig:benchmark_steps}\end{figure}
 

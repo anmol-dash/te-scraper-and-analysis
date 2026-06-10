@@ -671,6 +671,13 @@ def _handle_cancel(state: _IPCState, req_id: str, target: str) -> None:
         _emit({"type": "result", "id": req_id, "payload": {"ok": False, "reason": "unknown_target"}})
         return
     ev.set()
+    # Close any active SSH transport so blocking paramiko reads unblock immediately.
+    try:
+        from yourtool.cli import _HPC_CLIENT  # noqa: PLC0415
+        if _HPC_CLIENT is not None:
+            _HPC_CLIENT.disconnect()
+    except Exception:
+        pass
     _emit({"type": "result", "id": req_id, "payload": {"ok": True}})
 
 
