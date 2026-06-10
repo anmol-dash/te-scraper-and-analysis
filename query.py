@@ -699,13 +699,20 @@ def _check_jaspar_env(args):
         print(f"  JASPAR:  OK — pre-built BED supplied ({jaspar_bed})")
         return
 
-    # Check pybigtools
+    # Check pybigtools — auto-install it if missing (glibc-independent fix)
     try:
         import pybigtools  # noqa: F401
         print("  JASPAR:  OK — pybigtools available (no bigBedToBed needed)")
         return
     except ImportError:
         pass
+    try:
+        from te_motif import _ensure_pybigtools
+        if _ensure_pybigtools():
+            print("  JASPAR:  OK — pybigtools auto-installed (no bigBedToBed needed)")
+            return
+    except Exception as _exc:
+        print(f"  JASPAR:  pybigtools auto-install attempt failed: {_exc}")
 
     # Check bigBedToBed binary GLIBC compatibility
     tool = shutil.which("bigBedToBed")
@@ -716,27 +723,42 @@ def _check_jaspar_env(args):
         tool_path = Path(jaspar_dir) / "bin" / "bigBedToBed"
         tool = str(tool_path) if tool_path.exists() else None
 
-    if tool:
-        r = subprocess.run([tool, "--version"], capture_output=True, text=True)
-        stderr = r.stderr + r.stdout
-        if "GLIBC" in stderr or "version `" in stderr or "version not found" in stderr:
-            print(
-                "  JASPAR:  WARNING — bigBedToBed binary is GLIBC-incompatible on this node "
-                "and pybigtools is not installed.\n"
-                "           Motif stage WILL FAIL. Fix before running:\n"
-                "             pip install pybigtools\n"
-                "           OR pass --jaspar-bed /path/to/JASPAR2024_hg38.bed.gz\n"
-                "           OR pass --skip-motif"
-            )
-        else:
-            print(f"  JASPAR:  OK — bigBedToBed compatible ({tool})")
-    else:
-        print(
-            "  JASPAR:  WARNING — bigBedToBed not found and pybigtools not installed.\n"
-            "           Motif stage will attempt to download the binary at runtime.\n"
-            "           If that binary is also GLIBC-incompatible, motif will fail.\n"
-            "           Recommended: pip install pybigtools  OR  --jaspar-bed /path/to/file"
-        )
+    # pybigtools is unavailable (and auto-install failed). The motif stage can
+    # now only work if a GLIBC-compatible bigBedToBed binary exists. If we
+    # can't prove that *right now*, die hard at preflight instead of wasting
+    # ~9 stages of compute and then failing.
+    def _bigbed_ok(path):
+        r = subprocess.run([path], capture_output=True, text=True)
+        out = r.stderr + r.stdout
+        return not ("GLIBC" in out or "version `" in out or "version not found" in out)
+
+    if not tool:
+        # Try to fetch the runtime binary now so the check is authoritative.
+        try:
+            from pathlib import Path
+            from te_motif import _get_bigbed_to_bed
+            _jdir = getattr(args, "jaspar_dir", None) or str(Path.home() / "te_analysis" / "jaspar")
+            tool = _get_bigbed_to_bed(_jdir)
+        except Exception as _exc:
+            print(f"  JASPAR:  could not obtain bigBedToBed binary: {_exc}")
+            tool = None
+
+    if tool and _bigbed_ok(tool):
+        print(f"  JASPAR:  OK — bigBedToBed compatible ({tool})")
+        return
+
+    # No working path to JASPAR — abort the whole job immediately.
+    print(
+        "\n  JASPAR:  FATAL — no usable JASPAR backend on this node.\n"
+        "           pybigtools is not installed and could not be auto-installed,\n"
+        "           and bigBedToBed is missing or GLIBC-incompatible.\n"
+        "           The motif stage WOULD fail, so the job is aborting now.\n"
+        "           Fix one of:\n"
+        "             • pip install pybigtools   (on a node with network)\n"
+        "             • --jaspar-bed /path/to/JASPAR2024_hg38.bed.gz\n"
+        "             • --skip-motif             (drop motif analysis)\n"
+    )
+    sys.exit(1)
 
 
 def _check_ucsc_connectivity():
@@ -2699,18 +2721,29 @@ def run_pipeline(args):
                                  clustered_csv=str(clustered_csv))
             _diag("  Motif stage completed OK")
         except SystemExit as e:
-            _diag(f"  Motif stage SystemExit code={e.code}")
-            progress_print(f"  Motif/GO stage did not complete (exit={e.code})")
-            (DIRS["motif"] / "MOTIF_ANALYSIS_FAILED.txt").write_text(
-                f"Motif stage exited with code {e.code}.\n"
-                "Check the log, genome build, JASPAR BED path, and bedtools availability.\n"
-            )
+            if e.code in (0, None):
+                _diag(f"  Motif stage SystemExit code={e.code} (clean)")
+            else:
+                _diag(f"  Motif stage SystemExit code={e.code}")
+                progress_print(f"  Motif/GO stage did not complete (exit={e.code})")
+                (DIRS["motif"] / "MOTIF_ANALYSIS_FAILED.txt").write_text(
+                    f"Motif stage exited with code {e.code}.\n"
+                    "Check the log, genome build, JASPAR BED path, and bedtools availability.\n"
+                )
+                # Die hard so the LSF job is marked FAILED (not "Successfully
+                # completed") and we can keep iterating on the real fix.
+                progress_print("[Pipeline] FATAL: motif stage failed — aborting job.")
+                sys.exit(e.code or 1)
         except Exception as e:
             _diag(f"  Motif FAILED: {type(e).__name__}: {e}\n{traceback.format_exc()}")
             log_error("MOTIF / TFBS / GO", e)
             (DIRS["motif"] / "MOTIF_ANALYSIS_FAILED.txt").write_text(
                 f"Motif stage failed: {type(e).__name__}: {e}\n"
             )
+            # Die hard so the LSF job is marked FAILED (not "Successfully
+            # completed") and we can keep iterating on the real fix.
+            progress_print(f"[Pipeline] FATAL: motif stage failed ({type(e).__name__}: {e}) — aborting job.")
+            sys.exit(1)
         stage_times["Motif+TFBS+GO"] = time.time() - t0
         _checkpoint(OUT_DIR, "stage9_motif")
         if getattr(args, "stop_after", None) in {"motif", "go"}:

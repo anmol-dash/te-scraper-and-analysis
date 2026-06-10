@@ -304,6 +304,52 @@ def _query_bigbed_pybigtools(bb_url, loci, out):
     return len(seen)
 
 
+def _ensure_pybigtools():
+    """Import pybigtools, attempting an automatic pip install if it is missing.
+
+    pybigtools is a Rust-based wheel with no glibc dependency, so it is the
+    correct fix when the bundled bigBedToBed binary is GLIBC-incompatible.
+    Returns True if pybigtools is importable after this call, else False.
+    """
+    try:
+        import pybigtools  # noqa: F401, PLC0415
+        return True
+    except ImportError:
+        pass
+
+    import importlib
+    import subprocess
+    import sys
+
+    log.info("pybigtools not installed — attempting automatic pip install ...")
+    # Try a normal install first, then a --user install (works without write
+    # access to the conda/site-packages dir, common on shared HPC nodes).
+    attempts = (
+        [sys.executable, "-m", "pip", "install", "--quiet",
+         "--disable-pip-version-check", "pybigtools"],
+        [sys.executable, "-m", "pip", "install", "--quiet",
+         "--disable-pip-version-check", "--user", "pybigtools"],
+    )
+    for cmd in attempts:
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            if res.returncode != 0:
+                log.warning("  pip install failed (%s): %s",
+                            " ".join(cmd[-2:]), (res.stderr or res.stdout)[-300:])
+                continue
+            importlib.invalidate_caches()
+            import pybigtools  # noqa: F401, PLC0415
+            log.info("  pybigtools installed successfully via: %s", " ".join(cmd[3:]))
+            return True
+        except subprocess.TimeoutExpired:
+            log.warning("  pip install timed out (>600s): %s", " ".join(cmd[3:]))
+        except Exception as exc:
+            log.warning("  pip install attempt errored (%s): %s",
+                        " ".join(cmd[3:]), exc)
+    log.error("  Could not auto-install pybigtools (no network / no pip / restricted env).")
+    return False
+
+
 def _build_locus_jaspar_bed_from_bigbed(build, jaspar_dir, loci_bed):
     """Query remote JASPAR bigBed by TE chromosome spans and write a BED file.
 
@@ -338,6 +384,8 @@ def _build_locus_jaspar_bed_from_bigbed(build, jaspar_dir, loci_bed):
     t0 = time.time()
 
     # ── Path 1: pybigtools (Rust-based, works on any glibc / macOS / Windows) ──
+    # Auto-install if missing — this is the glibc-independent fix.
+    _ensure_pybigtools()
     _pbt_available = False
     try:
         import pybigtools as _pbt  # noqa: F401, PLC0415
