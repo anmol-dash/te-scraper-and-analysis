@@ -148,6 +148,9 @@ def _apply_network_env():
         for var in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
             os.environ.setdefault(var, proxy)
         log.info("Network: using proxy %s (auto-detected)", proxy)
+    else:
+        log.info("Network: no proxy detected (checked *_proxy env, ~/.curlrc, "
+                 "~/.condarc, ~/.wgetrc, /etc/wgetrc)")
     return proxy
 
 

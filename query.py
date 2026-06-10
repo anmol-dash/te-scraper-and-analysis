@@ -686,7 +686,18 @@ def _check_jaspar_env(args):
       4. bigBedToBed binary is present AND GLIBC-compatible.
     Prints a clear OK or WARNING line so the user knows before Stage 7.
     """
-    import subprocess, shutil
+    import subprocess, shutil, logging
+
+    # Surface te_motif's network/install diagnostics to the job stdout so the
+    # job log shows *why* JASPAR setup fails (proxy detection, each pip error,
+    # the curl wheel fallback, the bigBedToBed probe) instead of only a FATAL.
+    _tm_log = logging.getLogger("te_motif")
+    if not any(getattr(h, "_jaspar_preflight", False) for h in _tm_log.handlers):
+        _h = logging.StreamHandler(sys.stdout)
+        _h.setFormatter(logging.Formatter("  [jaspar-setup] %(message)s"))
+        _h._jaspar_preflight = True
+        _tm_log.addHandler(_h)
+    _tm_log.setLevel(logging.INFO)
 
     # Auto-detect any proxy/route the node uses (e.g. configured only in
     # ~/.curlrc or ~/.condarc) and export it so pip/requests use it too.
@@ -695,8 +706,10 @@ def _check_jaspar_env(args):
         _proxy = _apply_network_env()
         if _proxy:
             print(f"  Network: proxy auto-detected → {_proxy}")
-    except Exception:
-        pass
+        else:
+            print("  Network: no proxy found in env / ~/.curlrc / ~/.condarc / wgetrc")
+    except Exception as _exc:
+        print(f"  Network: proxy detection errored: {_exc}")
 
     skip_motif = getattr(args, "skip_motif", False)
     jaspar_bed = getattr(args, "jaspar_bed", None) or ""
