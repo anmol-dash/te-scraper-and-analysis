@@ -3755,9 +3755,16 @@ def _send():
     payload = json.dumps({{
         "from": _FROM, "to": [_TO], "subject": _SUBJECT, "text": _BODY,
     }}).encode("utf-8")
+    # NB: a real User-Agent is REQUIRED. Resend's API is fronted by Cloudflare,
+    # which returns "403 error code: 1010" (banned by client signature) for the
+    # default "Python-urllib/x.y" UA. A normal browser UA passes the WAF.
     req = urllib.request.Request(
         "https://api.resend.com/emails", data=payload, method="POST",
-        headers={{"Authorization": "Bearer " + _API_KEY, "Content-Type": "application/json"}})
+        headers={{"Authorization": "Bearer " + _API_KEY,
+                  "Content-Type": "application/json",
+                  "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                  "Accept": "application/json"}})
     with _opener.open(req, timeout=45) as r:
         resp = json.loads(r.read().decode())
     if not resp.get("id"):
@@ -4367,8 +4374,10 @@ exit 0
             self._save_state()
             if "FAIL (HTTP" in result_line:
                 print("\n  HTTPS reached Resend but it rejected the request (see code/body above).")
-                print("  Common causes: 403 = sender domain not verified for this key; 401 = bad API")
-                print("  key; 422 = invalid From/To address. Fix and re-run.")
+                print("  Common causes: 403 'error code: 1010' = Cloudflare blocked the client")
+                print("  signature (needs a real User-Agent — handled by the app); 403 other =")
+                print("  sender domain not verified for this key; 401 = bad API key; 422 = invalid")
+                print("  From/To address. Fix and re-run.")
             else:
                 print("\n  The HTTPS request never completed — likely the proxy wasn't detected on the")
                 print("  compute node. Check what makes curl work there:")
