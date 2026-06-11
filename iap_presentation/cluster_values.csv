@@ -1,0 +1,6 @@
+cluster,label,n_loci,n_plus,n_minus,median_len_bp,total_expr,mean_twocell,mean_fourcell,mean_eightcell,mean_morulacell,mean_pronuc,dominant_stage,top_te_name
+-1,noise,2729,1203,1526,453,269192.89,1.5442,47.3854,46.8661,2.7493,0.0966,fourcell,IAPEz-int:ERVK:LTR
+0,cluster_0,1751,1234,517,429,62173.63,0.7278,3.1161,30.3131,1.238,0.1125,eightcell,IAPEz-int:ERVK:LTR
+1,cluster_1,2570,1476,1094,895,135399.98,1.1771,19.8232,30.083,1.4425,0.159,eightcell,IAPEz-int:ERVK:LTR
+2,cluster_2,1828,1769,59,352,122734.43,1.3597,17.0218,46.0232,2.6636,0.0731,eightcell,IAPLTR1_Mm:ERVK:LTR
+3,cluster_3,3699,351,3348,399,389250.36,1.6908,44.0765,55.9285,3.4543,0.0812,eightcell,IAPEz-int:ERVK:LTR

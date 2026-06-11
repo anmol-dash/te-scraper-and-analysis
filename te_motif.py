@@ -1256,11 +1256,37 @@ def bedtools_intersect_safe(v_bed, jaspar_bed, scratch=None):
                  time.time() - t0, subset.stat().st_size / 1e6, subset)
         return str(subset)
 
-    def _run_cli(a, b):
-        """Stream bedtools output to a temp file; return (_OverlapResult, stderr)."""
+    def _sort_a(a):
+        """Sort the -a (TE loci) BED with the SAME ordering as the cached JASPAR
+        BED (`LC_ALL=C sort -k1,1 -k2,2n`, see bb_to_sorted_bed.py) so bedtools
+        can use the low-memory `-sorted` sweep-line algorithm."""
+        tmp_dir = scratch or os.environ.get("TMPDIR") or str(Path(a).parent)
+        a_sorted = Path(tmp_dir) / f"{Path(a).stem}.csorted_{os.getpid()}.bed"
+        env = dict(os.environ, LC_ALL="C")
+        with open(a_sorted, "w") as fh:
+            proc = subprocess.run(
+                ["sort", "-k1,1", "-k2,2n", "-T", str(tmp_dir), str(a)],
+                stdout=fh, stderr=subprocess.PIPE, env=env)
+        if proc.returncode != 0:
+            a_sorted.unlink(missing_ok=True)
+            log.warning("sort of -a BED failed (%s); using unsorted -a",
+                        proc.stderr.decode(errors="replace")[:500])
+            return str(a)
+        return str(a_sorted)
+
+    def _run_cli(a, b, sorted_stream=True):
+        """Stream bedtools output to a temp file; return (_OverlapResult, stderr).
+
+        With sorted_stream=True both inputs are assumed `LC_ALL=C` chrom/start
+        sorted and `-sorted` is passed so bedtools sweeps the (multi-GB) JASPAR
+        BED instead of loading it fully into RAM (the historical SIGKILL/-9 OOM).
+        """
         tmp_dir = scratch or os.environ.get("TMPDIR") or str(Path(a).parent)
         tmp_out = Path(tmp_dir) / f"bedtools_overlaps_{os.getpid()}.tsv"
-        cmd = ["bedtools", "intersect", "-a", str(a), "-b", str(b), "-wa", "-wb"]
+        a_use = _sort_a(a) if sorted_stream else str(a)
+        cmd = ["bedtools", "intersect", "-a", a_use, "-b", str(b), "-wa", "-wb"]
+        if sorted_stream:
+            cmd.append("-sorted")
         log.debug("bedtools CLI command: %s", " ".join(cmd))
         log.debug("bedtools output temp file: %s", tmp_out)
         t0 = time.time()
@@ -1268,6 +1294,8 @@ def bedtools_intersect_safe(v_bed, jaspar_bed, scratch=None):
             proc = subprocess.run(cmd, stdout=fh, stderr=subprocess.PIPE)
         elapsed = time.time() - t0
         stderr_text = proc.stderr.decode(errors="replace")
+        if a_use != str(a):
+            Path(a_use).unlink(missing_ok=True)
         if stderr_text.strip():
             log.debug("bedtools stderr: %s", stderr_text[:2000])
         if proc.returncode != 0:
@@ -1294,7 +1322,12 @@ def bedtools_intersect_safe(v_bed, jaspar_bed, scratch=None):
     log.info("Running bedtools intersect (CLI, streaming to disk) ...")
     intersect_b = _tabix_subset(v_bed, jaspar_bed)
     log.debug("  -a: %s  -b: %s", v_bed, intersect_b)
-    overlaps, stderr_text = _run_cli(v_bed, intersect_b)
+    overlaps, stderr_text = _run_cli(v_bed, intersect_b, sorted_stream=True)
+    if overlaps is None and any(k in stderr_text.lower() for k in
+                                ("sorted", "chromosomes", "chrom order", "order")):
+        log.warning("`-sorted` sweep failed on chrom ordering; retrying without "
+                    "-sorted (higher memory). stderr head: %s", stderr_text[:300])
+        overlaps, stderr_text = _run_cli(v_bed, intersect_b, sorted_stream=False)
     if overlaps is None and "fields" in stderr_text.lower():
         log.warning("Column mismatch detected — normalising JASPAR BED to 6 cols ...")
         norm = str(intersect_b).replace(".bed.gz", ".norm6.bed").replace(".bed", ".norm6.bed")

@@ -212,6 +212,14 @@ def on_target_score(grna: str) -> float:
 
 # ── k-mer index ───────────────────────────────────────────────────────────────
 
+# Above this many sequences, a global all-20-mer index (both strands) of
+# full-length elements holds >10^8 distinct k-mers and OOM-kills the job
+# (historical SIGKILL/-9). Exact coverage — which drives candidate ranking, the
+# greedy set and the UMAP/t-SNE coverage figure — does NOT use this index, so we
+# skip it for large inputs and report mm1 columns as not-computed.
+GLOBAL_MM_INDEX_MAX_SEQS = 4000
+
+
 def build_kmer_index_20(df, grna_len=20):
     """Build {kmer: set(row_indices)} for all 20-mers (both strands) in df['Seq'].
 
@@ -595,6 +603,134 @@ def fig_grna_candidates(df_cands: pd.DataFrame, family: str, out_path: Path):
     _pp(f"  Saved {out_path}")
 
 
+def _grna_rows(df_cands, grna):
+    """Exact-coverage locus indices for one guide (frozenset), or empty set."""
+    hit = df_cands.loc[df_cands["grna"] == grna, "rows_exact"]
+    return set(hit.values[0]) if len(hit) else set()
+
+
+def fig_grna_embedding_coverage(df, df_cands, greedy_df, family, out_path,
+                                covered_csv=None):
+    """Highlight, on the UMAP and t-SNE embeddings, every locus that the optimal
+    multi-guide panel (greedy set) can hit by exact protospacer match.
+
+    Two top panels: the full greedy combo, with each locus coloured by the
+    FIRST guide (in greedy rank order) that covers it; uncovered loci stay grey.
+    Two bottom panels: the single best (rank-1) guide alone — covered vs not.
+    This is the slide that says "here are the actual loci our reagents reach".
+
+    Coverage is EXACT protospacer match (the honest, PAM-aware metric); nothing
+    here is mismatch-extrapolated.
+    """
+    has_umap = {"umap_x", "umap_y"}.issubset(df.columns)
+    has_tsne = {"tsne_x", "tsne_y"}.issubset(df.columns)
+    if not (has_umap or has_tsne):
+        _pp("  [embedding-coverage] no umap_x/umap_y or tsne_x/tsne_y columns "
+            "in input — skipping embedding coverage figure")
+        return None
+    if greedy_df is None or len(greedy_df) == 0:
+        _pp("  [embedding-coverage] empty greedy set — skipping")
+        return None
+
+    n_loci = len(df)
+    guides = list(greedy_df["grna"])
+
+    # First-covering-guide label per locus (greedy/marginal assignment), plus a
+    # boolean "covered by any guide in the combo".
+    first_guide = np.full(n_loci, -1, dtype=int)   # -1 = uncovered
+    any_covered = np.zeros(n_loci, dtype=bool)
+    guide_total_hits = []
+    for gi, g in enumerate(guides):
+        rows = _grna_rows(df_cands, g)
+        rows = {r for r in rows if 0 <= r < n_loci}
+        guide_total_hits.append(len(rows))
+        for r in rows:
+            any_covered[r] = True
+            if first_guide[r] == -1:
+                first_guide[r] = gi
+
+    rank1_rows = {r for r in _grna_rows(df_cands, guides[0]) if 0 <= r < n_loci}
+    rank1_mask = np.zeros(n_loci, dtype=bool)
+    for r in rank1_rows:
+        rank1_mask[r] = True
+
+    # Optional: write the per-locus covering-guide table for reproducibility.
+    if covered_csv is not None:
+        cov = pd.DataFrame({
+            "locus_index": np.arange(n_loci),
+            "covered_any": any_covered,
+            "first_guide_rank": np.where(first_guide >= 0, first_guide + 1, 0),
+            "first_guide_seq": [guides[i] if i >= 0 else "" for i in first_guide],
+        })
+        for c in ("Cluster", "cluster", "chr", "start", "stop", "strand", "te_name"):
+            if c in df.columns:
+                cov[c] = df[c].values
+        cov.to_csv(covered_csv, index=False)
+        _pp(f"  Saved {covered_csv}")
+
+    embeds = []
+    if has_umap:
+        embeds.append(("UMAP", df["umap_x"].values, df["umap_y"].values))
+    if has_tsne:
+        embeds.append(("t-SNE", df["tsne_x"].values, df["tsne_y"].values))
+
+    n_cov = int(any_covered.sum())
+    pct_cov = 100.0 * n_cov / max(n_loci, 1)
+    expr = df["_total_expr"].values if "_total_expr" in df.columns else np.ones(n_loci)
+    pct_expr = 100.0 * float(expr[any_covered].sum()) / max(float(expr.sum()), 1e-9)
+
+    fig, axes = plt.subplots(2, len(embeds), figsize=(7.2 * len(embeds), 12),
+                             squeeze=False)
+    fig.suptitle(
+        f"{family} — gRNA reagent coverage on the embeddings\n"
+        f"optimal {len(guides)}-guide panel hits {n_cov:,}/{n_loci:,} loci "
+        f"({pct_cov:.1f}%), {pct_expr:.1f}% of expression — exact protospacer match",
+        fontsize=14, fontweight="bold")
+
+    grey = (0.82, 0.82, 0.82)
+
+    # ── Row 0: full optimal combo, coloured by first covering guide ───────────
+    for col, (name, ex, ey) in enumerate(embeds):
+        ax = axes[0][col]
+        unc = first_guide < 0
+        ax.scatter(ex[unc], ey[unc], s=8, color=grey, alpha=0.55,
+                   linewidths=0, rasterized=True, label="not covered")
+        for gi, g in enumerate(guides):
+            m = first_guide == gi
+            if not m.any():
+                continue
+            ax.scatter(ex[m], ey[m], s=14, color=_PALETTE[gi % len(_PALETTE)],
+                       alpha=0.9, linewidths=0, rasterized=True,
+                       label=f"#{gi+1} {g[:10]}…  (+{int(m.sum())} loci, "
+                             f"{guide_total_hits[gi]} total)")
+        ax.set_title(f"({chr(97+col)}) Optimal combo on {name}", fontweight="bold")
+        ax.set_xlabel(f"{name}-1"); ax.set_ylabel(f"{name}-2")
+        ax.spines[["top", "right"]].set_visible(False)
+        if col == 0:
+            ax.legend(fontsize=7.5, loc="best", markerscale=1.6,
+                      title="covering guide (rank)")
+
+    # ── Row 1: best single guide, covered vs not ──────────────────────────────
+    for col, (name, ex, ey) in enumerate(embeds):
+        ax = axes[1][col]
+        ax.scatter(ex[~rank1_mask], ey[~rank1_mask], s=8, color=grey,
+                   alpha=0.55, linewidths=0, rasterized=True, label="not hit")
+        ax.scatter(ex[rank1_mask], ey[rank1_mask], s=16, color=_PALETTE[0],
+                   alpha=0.9, linewidths=0, rasterized=True,
+                   label=f"hit by #1 ({int(rank1_mask.sum())} loci)")
+        ax.set_title(f"({chr(97+len(embeds)+col)}) Best single guide on {name}\n"
+                     f"{guides[0][:20]}", fontweight="bold", fontsize=11)
+        ax.set_xlabel(f"{name}-1"); ax.set_ylabel(f"{name}-2")
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.legend(fontsize=8, loc="best", markerscale=1.4)
+
+    plt.tight_layout(rect=(0, 0, 1, 0.95))
+    plt.savefig(out_path, bbox_inches="tight")
+    plt.close()
+    _pp(f"  Saved {out_path}")
+    return {"n_covered": n_cov, "pct_loci": pct_cov, "pct_expr": pct_expr}
+
+
 # ── measured values writer ────────────────────────────────────────────────────
 
 def write_grna_values(results: dict, reports_dir: Path):
@@ -665,6 +801,13 @@ def parse_args():
                    help="Cap number of candidates for speed (default: all)")
     p.add_argument("--n-greedy",    type=int, default=5,
                    help="Number of gRNAs in greedy set-cover solution")
+    p.add_argument("--global-mm-index", choices=["auto", "on", "off"],
+                   default="auto",
+                   help="Build the global both-strand 20-mer index for mm1 "
+                        "coverage columns. 'auto' (default) skips it above "
+                        f"{GLOBAL_MM_INDEX_MAX_SEQS} sequences to avoid OOM; "
+                        "exact coverage (used everywhere downstream) is "
+                        "unaffected.")
     return p.parse_args()
 
 
@@ -693,10 +836,19 @@ def main():
     _pp(f"  Expression columns ({len(expr_cols)}): {expr_cols}")
     df["_total_expr"] = df[expr_cols].sum(axis=1) if expr_cols else 0.0
 
-    # ── Build global 20-mer index ─────────────────────────────────────────────
-    _pp("Building 20-mer index (both strands)...")
-    kmer_index = build_kmer_index_20(df, grna_len=args.grna_len)
-    _pp(f"  {len(kmer_index):,} unique 20-mers indexed")
+    # ── Build global 20-mer index (mm1 columns only; OOM-prone, so optional) ──
+    want_index = (args.global_mm_index == "on" or
+                  (args.global_mm_index == "auto" and
+                   len(df) <= GLOBAL_MM_INDEX_MAX_SEQS))
+    if want_index:
+        _pp("Building global 20-mer index (both strands)...")
+        kmer_index = build_kmer_index_20(df, grna_len=args.grna_len)
+        _pp(f"  {len(kmer_index):,} unique 20-mers indexed")
+    else:
+        kmer_index = None
+        _pp(f"Skipping global 20-mer index ({len(df):,} seqs > "
+            f"{GLOBAL_MM_INDEX_MAX_SEQS} or --global-mm-index=off): "
+            "mm1_* columns will be 0; exact coverage drives all downstream steps.")
 
     # ── Score PAM-adjacent candidates ─────────────────────────────────────────
     _pp("Scoring gRNA candidates...")
@@ -756,6 +908,17 @@ def main():
 
     fig_grna_candidates(df_cands, args.family,
                         out_path=reports_dir / "fig_grna_candidates.pdf")
+
+    # The reagent-design centrepiece: where the optimal guide panel lands on the
+    # UMAP / t-SNE embeddings (requires umap_x/umap_y / tsne_x/tsne_y in input).
+    emb_cov = fig_grna_embedding_coverage(
+        df, df_cands, greedy_df, args.family,
+        out_path=reports_dir / "fig_grna_umap_tsne_coverage.pdf",
+        covered_csv=reports_dir / "grna_covered_loci.csv",
+    )
+    if emb_cov:
+        _pp(f"  Embedding coverage: optimal panel hits {emb_cov['pct_loci']:.1f}% "
+            f"of loci / {emb_cov['pct_expr']:.1f}% of expression")
 
     # ── Write measured values ─────────────────────────────────────────────────
     results = {
