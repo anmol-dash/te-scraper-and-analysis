@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-_SCRIPT_BUILD = "20260519-3"  # bump this when changing job script logic
+_SCRIPT_BUILD = "20260610-1"  # bump this when changing job script logic
 """
 HPC Client for TE Analysis Pipeline
 
@@ -574,12 +574,19 @@ GAMECA_VENV="{venv_dir}"
 GAMECA_PY="{self._python}"
 GAMECA_REQ="{req_file}"
 mkdir -p "$(dirname "$GAMECA_VENV")"
+# Recreate the venv if it predates --system-site-packages (or is broken). The
+# inherited site-packages let us reuse the cluster conda env's prebuilt numpy/
+# pandas/scipy/matplotlib instead of compiling them from source.
+if [ -x "$GAMECA_VENV/bin/python" ] && ! grep -qi "include-system-site-packages = true" "$GAMECA_VENV/pyvenv.cfg" 2>/dev/null; then
+    echo "[GAMECA] Rebuilding venv with --system-site-packages ..."
+    rm -rf "$GAMECA_VENV"
+fi
 if [ ! -x "$GAMECA_VENV/bin/python" ]; then
-    echo "[GAMECA] Creating virtualenv at $GAMECA_VENV ..."
-    "$GAMECA_PY" -m venv "$GAMECA_VENV" || {{
+    echo "[GAMECA] Creating virtualenv (--system-site-packages) at $GAMECA_VENV ..."
+    "$GAMECA_PY" -m venv --system-site-packages "$GAMECA_VENV" || {{
         echo "[GAMECA] venv creation failed — trying to install python3-venv ..."
         apt-get install -y python3-venv python3-pip >/dev/null 2>&1 || true
-        "$GAMECA_PY" -m venv "$GAMECA_VENV" || {{ echo "[GAMECA] ERROR: cannot create venv"; exit 1; }}
+        "$GAMECA_PY" -m venv --system-site-packages "$GAMECA_VENV" || {{ echo "[GAMECA] ERROR: cannot create venv"; exit 1; }}
     }}
 fi
 source "$GAMECA_VENV/bin/activate" || {{ echo "[GAMECA] ERROR: cannot activate venv at $GAMECA_VENV"; exit 1; }}
@@ -588,10 +595,32 @@ if [ -f "$GAMECA_REQ" ]; then
     _last_hash=$(cat "$GAMECA_VENV/.req_hash" 2>/dev/null || echo "")
     if [ "$_req_hash" != "$_last_hash" ]; then
         echo "[GAMECA] Installing dependencies (requirements changed) ..."
-        python -m pip install --quiet --upgrade pip setuptools wheel
-        python -m pip install --quiet --prefer-binary -r "$GAMECA_REQ" || {{ echo "[GAMECA] ERROR: pip install failed"; exit 1; }}
+        python -m pip install --quiet --upgrade pip setuptools wheel || true
+        # Install each requirement INDEPENDENTLY, preferring prebuilt wheels.
+        # Rationale for old-glibc HPC nodes:
+        #   * a single un-installable package (pybigtools = manylinux_2_28 only,
+        #     or the huge colabfold stack) must NOT abort the whole install and
+        #     take scikit-learn etc. down with it (pip -r is all-or-nothing);
+        #   * --prefer-binary avoids source builds; packages already provided by
+        #     the conda base env are detected as satisfied and skipped.
+        _failed=""
+        while IFS= read -r _line || [ -n "$_line" ]; do
+            _pkg="${{_line%%#*}}"
+            _pkg="$(echo $_pkg | xargs)"
+            [ -z "$_pkg" ] && continue
+            if ! python -m pip install --prefer-binary "$_pkg" > /tmp/gameca_pip.$$ 2>&1; then
+                echo "[GAMECA] WARN: could not install '$_pkg' (skipping):"
+                tail -3 /tmp/gameca_pip.$$ | sed 's/^/[GAMECA]     /'
+                _failed="$_failed $_pkg"
+            fi
+        done < "$GAMECA_REQ"
+        rm -f /tmp/gameca_pip.$$
         echo "$_req_hash" > "$GAMECA_VENV/.req_hash"
-        echo "[GAMECA] Dependencies installed."
+        if [ -n "$_failed" ]; then
+            echo "[GAMECA] Dependencies installed (skipped:$_failed )"
+        else
+            echo "[GAMECA] Dependencies installed."
+        fi
     fi
 else
     echo "[GAMECA] Warning: $GAMECA_REQ not found — skipping pip install"

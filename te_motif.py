@@ -990,6 +990,17 @@ def _download_jaspar_bulk_bed(build, jaspar_dir, loci_bed=None):
                 _sh.copyfileobj(resp, fh)
             mb = raw_gz.stat().st_size / 1e6
             log.info("  Downloaded %.1f MB in %.1fs", mb, time.time() - t0)
+            # Content sniff: a dead/redirected URL (e.g. the retired
+            # jaspar.elixir.no/static/data/beds path) returns a tiny HTML 404
+            # page with HTTP 200 via some proxies. Reject anything that is not a
+            # real gzip stream so a 404 page is never saved as a "cache".
+            with open(raw_gz, "rb") as _fh:
+                magic = _fh.read(2)
+            if magic != b"\x1f\x8b":
+                log.error("Bulk JASPAR download is not gzip (magic=%s) — likely an "
+                          "HTML error page; aborting: %s", magic.hex(), url)
+                raw_gz.unlink(missing_ok=True)
+                return None
             if mb < 1.0:
                 log.error("Bulk JASPAR download too small (%.1f MB); aborting", mb)
                 raw_gz.unlink(missing_ok=True)

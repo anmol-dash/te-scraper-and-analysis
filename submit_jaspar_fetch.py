@@ -37,7 +37,7 @@ DEFAULT_BUILDS = ["hg38", "hg19", "mm10", "mm39"]
 
 
 def _build_job_script(scheduler, build, remote_dir, cache_dir, mem_mb, cpus,
-                      queue, workers):
+                      queue, workers, notify_email=""):
     """Generate a scheduler job script with NO wall-clock limit."""
     name = f"jaspar_{build}"
     out  = f"{cache_dir}/fetch_{build}.out"
@@ -46,6 +46,10 @@ def _build_job_script(scheduler, build, remote_dir, cache_dir, mem_mb, cpus,
             f"--build {shlex.quote(build)} "
             f"--cache-dir {shlex.quote(cache_dir)} "
             f"--workers {workers}")
+    if notify_email:
+        # Each job emails when its own build finishes (runs on the cluster, so
+        # the cluster home's ~/.hpc_te_state.json must hold the Gmail App Password).
+        cmd += f" --notify-email {shlex.quote(notify_email)}"
 
     if scheduler == "slurm":
         # --time intentionally omitted → partition default (no cap from us).
@@ -82,24 +86,6 @@ def _build_job_script(scheduler, build, remote_dir, cache_dir, mem_mb, cpus,
     )
 
 
-def _put_remote_file(client, content_bytes, remote_path):
-    """Upload bytes to remote_path: prefer SFTP, fall back to base64 over SSH."""
-    import io
-    if getattr(client, "sftp", None):
-        try:
-            client.sftp.putfo(io.BytesIO(content_bytes), remote_path)
-            return True
-        except Exception as exc:
-            print(f"  SFTP put failed ({exc}); falling back to base64 over SSH")
-    b64 = base64.b64encode(content_bytes).decode()
-    out, err, rc = client.run_command(
-        f"echo {b64} | base64 -d > {shlex.quote(remote_path)}", timeout=120)
-    if rc != 0:
-        print(f"  base64 upload failed (rc={rc}): {err[:200]}")
-        return False
-    return True
-
-
 def main():
     ap = argparse.ArgumentParser(
         description="Login to HPC and submit 4 parallel no-time-limit JASPAR fetch jobs.")
@@ -120,6 +106,9 @@ def main():
                     help="HTTP workers within each build job (default 4).")
     ap.add_argument("--upload", action="store_true",
                     help="SFTP-upload fetch_jaspar.py from the local repo to --remote-dir.")
+    ap.add_argument("--notify-email", default="", metavar="EMAIL",
+                    help="Each build job emails this address on completion (needs a Gmail "
+                         "App Password in the cluster home's ~/.hpc_te_state.json).")
     args = ap.parse_args()
 
     try:
@@ -140,43 +129,57 @@ def main():
     print(f"\nScheduler: {scheduler.upper()}   remote-dir: {args.remote_dir}")
     print(f"Cache dir: {args.cache_dir}")
 
-    # Ensure the cache dir exists remotely.
-    client.run_command(f"mkdir -p {shlex.quote(args.cache_dir)}", timeout=60)
+    submit_cmd = "bsub <" if scheduler == "lsf" else "sbatch"
 
-    # Optionally upload the local fetch_jaspar.py so the remote repo doesn't
-    # have to be synced first. (te_motif.py is assumed already present remotely.)
+    # Build ONE remote driver script that creates the cache dir, writes every
+    # job script (base64-embedded), and submits them all. Running this in a
+    # SINGLE SSH exec avoids the multi-session fragility that caused only the
+    # first build to submit before the transport dropped.
+    driver = ["set -uo pipefail", f"mkdir -p {shlex.quote(args.cache_dir)}"]
+
     if args.upload:
         local = Path(__file__).resolve().parent / "fetch_jaspar.py"
         if not local.exists():
             print(f"--upload requested but {local} not found locally.")
             sys.exit(1)
-        remote = f"{args.remote_dir}/fetch_jaspar.py"
-        print(f"Uploading {local.name} → {remote}")
-        if not _put_remote_file(client, local.read_bytes(), remote):
-            print("Upload failed — aborting.")
-            sys.exit(1)
+        b64 = base64.b64encode(local.read_bytes()).decode()
+        remote_fetch = f"{args.remote_dir}/fetch_jaspar.py"
+        driver.append(f'echo {b64} | base64 -d > {shlex.quote(remote_fetch)} '
+                      f'&& echo "[upload] fetch_jaspar.py -> {remote_fetch}"')
 
-    submit_cmd = "bsub <" if scheduler == "lsf" else "sbatch"
-    submitted = []
     for build in args.builds:
         script = _build_job_script(scheduler, build, args.remote_dir, args.cache_dir,
-                                   args.mem_mb, args.cpus, args.queue, args.workers)
+                                   args.mem_mb, args.cpus, args.queue, args.workers,
+                                   notify_email=args.notify_email)
         remote_sh = f"{args.cache_dir}/submit_jaspar_{build}.sh"
-        print(f"\n[{build}] writing job script → {remote_sh}")
-        if not _put_remote_file(client, script.encode(), remote_sh):
-            print(f"[{build}] could not write job script — skipping.")
-            continue
-        out, err, rc = client.run_command(f"{submit_cmd} {shlex.quote(remote_sh)}",
-                                          timeout=120)
-        line = (out or err).strip().splitlines()[-1] if (out or err).strip() else ""
-        if rc == 0:
-            print(f"[{build}] SUBMITTED: {line}")
-            submitted.append(build)
-        else:
-            print(f"[{build}] submit FAILED (rc={rc}): {(err or out)[:200]}")
+        b64 = base64.b64encode(script.encode()).decode()
+        driver.append(f'echo {b64} | base64 -d > {shlex.quote(remote_sh)}')
+        driver.append(f'echo "[{build}] submitting {remote_sh}"')
+        # `|| true` so one bad submit never aborts the rest of the driver.
+        driver.append(f'{submit_cmd} {shlex.quote(remote_sh)} || echo "[{build}] SUBMIT FAILED"')
+
+    driver_script = "\n".join(driver) + "\n"
+    print(f"\nSubmitting {len(args.builds)} jobs in a single SSH session: "
+          f"{', '.join(args.builds)}")
+    out, err, rc = client.run_command(driver_script, timeout=300)
+    if out:
+        print(out.rstrip())
+    if err.strip():
+        print("---- stderr ----")
+        print(err.rstrip())
+
+    # Honest reporting: failed builds print an explicit marker; job ids are
+    # counted from the scheduler's own confirmation lines.
+    blob = out + "\n" + err
+    failed = [b for b in args.builds if f"[{b}] SUBMIT FAILED" in blob]
+    n_jobids = blob.count("Job <") if scheduler == "lsf" else blob.count("Submitted batch job")
 
     print("\n" + "=" * 60)
-    print(f"Submitted {len(submitted)}/{len(args.builds)} jobs: {', '.join(submitted) or '(none)'}")
+    print(f"Driver exit rc={rc}.  Scheduler confirmations: {n_jobids}/{len(args.builds)}")
+    if failed:
+        print(f"  FAILED builds: {', '.join(failed)}")
+    if n_jobids < len(args.builds):
+        print("  Some builds may not have submitted — check the output above.")
     print("Watch progress with:")
     print(f"  bpeek -f <jobid>     # or:  tail -f {args.cache_dir}/fetch_<build>.out")
     print("When done, run the pipeline with:")

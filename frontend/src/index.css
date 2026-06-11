@@ -41,6 +41,33 @@
   * {
     box-sizing: border-box;
   }
+
+  /* Allow text selection / copy-paste throughout the app. The macOS WKWebView
+     used by Tauri disables user selection by default for a "native" feel; this
+     re-enables it everywhere so logs, paths, commands and output are copyable. */
+  html,
+  body,
+  * {
+    -webkit-user-select: text;
+    user-select: text;
+    -webkit-touch-callout: default;
+    cursor: auto;
+  }
+
+  /* Keep interactive controls feeling like controls (pointer, no text caret). */
+  button,
+  a,
+  label,
+  select,
+  [role="button"] {
+    cursor: pointer;
+  }
+
+  /* Inputs use the text caret as usual. */
+  input,
+  textarea {
+    cursor: text;
+  }
 }
 
 @keyframes slide {

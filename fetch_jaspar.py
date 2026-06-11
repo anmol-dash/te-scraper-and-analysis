@@ -2,17 +2,23 @@
 """
 fetch_jaspar.py  —  Pre-fetch & cache genome-wide JASPAR 2022 sorted BED files.
 
-Downloads the full per-motif CMMT JASPAR 2022 track for one or more genome
-builds and writes a single sorted, cached BED per build:
+Uses te_motif.resolve_jaspar_bed() — the SAME resolver the main pipeline uses —
+to download and write a single sorted, cached BED per build. The resolver tries,
+in order: an existing cache → the bulk JASPAR 2024 BED (one fast request) → the
+per-motif CMMT 2022 stream (slow last resort). Depending on which method wins it
+writes one of:
 
-    <cache-dir>/JASPAR2022_<build>.sorted.bed.gz
+    <cache-dir>/JASPAR2024_<build>.sorted.bed.gz   (bulk path)
+    <cache-dir>/JASPAR2022_<build>.sorted.bed.gz   (per-motif path)
+
+Because we go through the same resolver, the file written here is exactly the
+one the pipeline picks up later (it looks for both names).
 
 These caches are GENOME-WIDE (no TE-loci filter), so every future pipeline run
 — for any family — reuses the same file with a single read. Point the pipeline
 at the cache with  --jaspar-dir <cache-dir>  (or env TE_JASPAR_<BUILD>=<file>).
 
-NO TIME LIMIT: the download runs to completion however long it takes (the CMMT
-per-motif fallback in te_motif has no overall cap).
+NO TIME LIMIT: the download runs to completion however long it takes.
 
 Parallelism:
   • --parallel-builds N   run N builds at once (default 1; the submit script
@@ -45,31 +51,32 @@ DEFAULT_BUILDS = ["hg38", "hg19", "mm10", "mm39"]
 
 
 def _fetch_one(build, cache_dir, workers):
-    """Download (or reuse) the genome-wide JASPAR sorted BED for one build."""
+    """Download (or reuse) the genome-wide JASPAR sorted BED for one build.
+
+    Routes through te_motif.resolve_jaspar_bed() — the SAME resolver the main
+    pipeline uses — so the file we write here is guaranteed to be the one the
+    pipeline later picks up (it checks both the JASPAR2022 per-motif cache and
+    the JASPAR2024 bulk cache). resolve_jaspar_bed tries, in order: existing
+    caches → bulk JASPAR2024 BED (one ~500 MB request, fast) → per-motif CMMT
+    streaming (slow last resort). loci_bed=None ⇒ genome-wide, reusable cache.
+    """
     import te_motif  # heavy imports (pandas/matplotlib) — done lazily per call
 
     os.environ["TE_CMMT_WORKERS"] = str(workers)
     cache_dir = Path(cache_dir)
-    out = cache_dir / f"JASPAR2022_{build}.sorted.bed.gz"
-
-    # Cache hit → single read, no re-download.
-    if out.exists():
-        try:
-            if te_motif.validate_jaspar_bed(str(out)):
-                size_mb = out.stat().st_size / 1e6
-                print(f"[{build}] CACHED ({size_mb:.1f} MB) — valid, skipping: {out}",
-                      flush=True)
-                return build, str(out), True
-            print(f"[{build}] cached file invalid — re-downloading: {out}", flush=True)
-            out.unlink(missing_ok=True)
-        except Exception as exc:
-            print(f"[{build}] cache validation errored ({exc}); re-downloading", flush=True)
 
     t0 = time.time()
-    print(f"[{build}] downloading genome-wide JASPAR 2022 (workers={workers}) → {out}",
+    print(f"[{build}] resolving genome-wide JASPAR cache (workers={workers}) → {cache_dir}",
           flush=True)
     try:
-        path = te_motif._download_cmmt_per_motif(build, str(cache_dir), loci_bed=None)
+        # resolve_jaspar_bed validates & reuses an existing cache before
+        # downloading, and returns the path to whichever cache it settled on.
+        path = te_motif.resolve_jaspar_bed(build, None, str(cache_dir), loci_bed=None)
+    except SystemExit:
+        # resolve_jaspar_bed calls sys.exit(1) when every method fails; treat
+        # that as a per-build failure instead of killing the whole job.
+        print(f"[{build}] FAILED — all JASPAR download methods exhausted", flush=True)
+        return build, None, False
     except Exception as exc:
         print(f"[{build}] FAILED with exception: {exc}", flush=True)
         return build, None, False
@@ -100,6 +107,9 @@ def main():
                     help="Parallel HTTP workers within each build (default 4).")
     ap.add_argument("--source-base-url", default=None,
                     help="Override the CMMT base URL to use an alternate mirror.")
+    ap.add_argument("--notify-email", default="", metavar="EMAIL",
+                    help="Email this address when the fetch finishes (needs a Gmail "
+                         "App Password stored via ui.py option [g]).")
     args = ap.parse_args()
 
     builds = [args.build] if args.build else (args.builds or DEFAULT_BUILDS)
@@ -131,11 +141,26 @@ def main():
 
     print("\n" + "=" * 64, flush=True)
     print("SUMMARY", flush=True)
+    summary_lines = []
     for b, path, ok in sorted(results):
-        print(f"  {b:8s} {'OK   ' + str(path) if ok else 'FAILED'}", flush=True)
+        line = f"  {b:8s} {'OK   ' + str(path) if ok else 'FAILED'}"
+        print(line, flush=True)
+        summary_lines.append(line.strip())
     print("=" * 64, flush=True)
 
-    sys.exit(0 if all(ok for _, _, ok in results) else 1)
+    all_ok = all(ok for _, _, ok in results)
+
+    if args.notify_email:
+        try:
+            from te_notify import send_completion_email
+            status = "all builds OK" if all_ok else "SOME BUILDS FAILED"
+            send_completion_email(
+                args.notify_email, "fetch_jaspar", str(cache_dir),
+                summary=f"{status}\n" + "\n".join(summary_lines))
+        except Exception as exc:
+            print(f"  [notify] email step errored: {exc}", flush=True)
+
+    sys.exit(0 if all_ok else 1)
 
 
 if __name__ == "__main__":

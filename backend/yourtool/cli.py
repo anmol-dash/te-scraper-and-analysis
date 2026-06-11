@@ -299,10 +299,28 @@ def _cmd_hpc_upload(args: argparse.Namespace, _cancel_event: Event | None) -> di
     return {"ok": True, "uploaded": uploaded}
 
 
+# Matches an invocation of a Python script (e.g. "python te_clustering.py",
+# "python3 -u query.py"), so we know to set up the venv/requirements first.
+_PY_SCRIPT_RE = re.compile(r"(?:^|[\s;&|(])python[0-9.]*\s+(?:-\S+\s+)*\S+\.py\b")
+
+
 def _cmd_hpc_run(args: argparse.Namespace, cancel_event: Event | None) -> dict[str, Any]:
     client = _client_required()
+    cmd = args.cmd
+    # If this runs a GAMECA Python script, make sure the project venv exists and
+    # requirements.txt is installed first — the base conda env on the cluster
+    # often lacks deps like scikit-learn. ensure_venv_cmd() is hash-gated, so the
+    # pip install only runs when requirements change; after `source activate`,
+    # bare `python` resolves to the venv interpreter with the deps available.
+    if getattr(client, "remote_work_dir", None) and _PY_SCRIPT_RE.search(cmd):
+        try:
+            venv_block = client.ensure_venv_cmd()
+            cmd = f"{venv_block}\n{cmd}"
+            print("[HPC-RUN] venv + requirements ensured before command", flush=True)
+        except Exception as exc:
+            print(f"[HPC-RUN] venv setup skipped ({exc})", flush=True)
     print(f"[HPC-RUN] user={client._username}  cmd={args.cmd[:300]}", flush=True)
-    out, err, code = client.run_command(args.cmd, timeout=args.timeout,
+    out, err, code = client.run_command(cmd, timeout=args.timeout,
                                         stream_output="summary", cancel_event=cancel_event)
     if code != 0:
         print(f"[HPC DIAG] hpc-run command failed: {args.cmd}", flush=True)
