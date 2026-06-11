@@ -998,8 +998,7 @@ MENU = [
     ("18", "Browse remote filesystem",                    "action"),
     (None, "Session",                                     "section"),
     ("19", "Diagnose job submission  (test nohup + sbatch)","action"),
-    ("17", "Test email  (set sender / receiver / password)","action"),
-    ("21", "Test email notification  (submit batch job → auto-email on finish)","action"),
+    ("22", "Test email delivery  (submit job → Resend API send via cluster proxy)","action"),
     ("15", "Disconnect and exit",                         "action"),
 ]
 
@@ -1141,12 +1140,8 @@ def interactive_menu(client):
                 client.diagnose_job_submission()
                 _pause(keep_output=True)
 
-            elif choice == '17':
-                client.test_email_interactive()
-                _pause()
-
-            elif choice == '21':
-                client.submit_email_test_job()
+            elif choice == '22':
+                client.submit_email_diagnostic_job()
                 _pause(keep_output=True)
 
             elif choice == '15':

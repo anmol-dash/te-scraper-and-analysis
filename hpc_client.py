@@ -39,7 +39,6 @@ import tarfile
 import tempfile
 import threading
 import zipfile
-from email.mime.text import MIMEText
 from pathlib import Path
 
 _STATE_FILE = Path.home() / ".hpc_te_state.json"
@@ -1150,12 +1149,12 @@ fi
             print("         same build — tabix only reads your loci regions, not the whole file.")
             print("    [26] P_THRESHOLD: Fisher exact test p-value cutoff for motif/GO significance")
             print("         (default 0.05; lower = stricter, e.g. 0.01 or 0.001)")
-            print("    [27] NOTIFY_EMAIL: Email address for job-complete notification (requires Gmail App Password)")
+            print("    [27] NOTIFY_EMAIL: Email address for job-complete notification (sent via Resend — no setup needed)")
             print("    [28] SKIP_JASPAR: 1 = skip JASPAR motif/TFBS analysis")
             print("    [29] SKIP_PRIMERS: 1 = skip primer design")
             print("    [30] SKIP_GO: 1 = skip GO enrichment")
             print()
-            print("  [g]  Set up Gmail App Password  (run once to enable email notifications)")
+            print("  [g]  Send a test email  (Resend via cluster — confirm notifications work)")
             print("  [p]  Preview family count")
             print("  [r]  Run analysis")
             print("  [q]  Back")
@@ -1166,7 +1165,7 @@ fi
             if choice == "q":
                 return False
             elif choice == "g":
-                self.setup_email_auth()
+                self.submit_email_diagnostic_job()
             elif choice == "p":
                 self.preview_family_count()
             elif choice == "r":
@@ -1572,6 +1571,34 @@ echo "  Input data: OK ({quoted})"'''
         pipeline_args = self._pipeline_cli_args()
         _log(f"Creating batch job script at {job_script}")
 
+        # Fire-and-forget completion email, sent from the compute node via the
+        # Resend API over HTTPS (through the proxy). Body is built at run time so
+        # it reflects the real exit status / timing.
+        notify_to  = str(self.params.get("NOTIFY_EMAIL", "")).strip()
+        notify_b64 = self._email_notify_b64() if notify_to else ""
+        if notify_b64:
+            fam = self.params.get("FAMILY_NAME", "")
+            notify_section = (
+                '\n# --- GAMECA completion email (Resend API over HTTPS/proxy) ---\n'
+                'GAMECA_NOTIFY_PY="$(mktemp "${TMPDIR:-/tmp}/gameca_notify_XXXXXX.py")"\n'
+                'chmod 600 "$GAMECA_NOTIFY_PY"\n'
+                f'echo {shlex.quote(notify_b64)} | base64 -d > "$GAMECA_NOTIFY_PY"\n'
+                'if [ "$EXIT_CODE" -eq 0 ]; then GAMECA_RESULT="SUCCEEDED"; else GAMECA_RESULT="FAILED (exit $EXIT_CODE)"; fi\n'
+                'GAMECA_PMIN=$((PIPELINE_SECONDS/60)); GAMECA_PSEC=$((PIPELINE_SECONDS%60))\n'
+                'GAMECA_WMIN=$((WALL_SECONDS/60)); GAMECA_WSEC=$((WALL_SECONDS%60))\n'
+                f'export GAMECA_MAIL_TO={shlex.quote(notify_to)}\n'
+                f'export GAMECA_MAIL_SUBJECT="GAMECA {fam}: pipeline $GAMECA_RESULT"\n'
+                "GAMECA_MAIL_BODY=\"$(printf 'TE analysis for %s %s\\non host %s at %s.\\n\\n"
+                "Output dir: %s\\nPipeline time: %sm %ss\\nWall time: %sm %ss\\n' "
+                f'"{fam}" "$GAMECA_RESULT" "$(hostname)" "$(date)" "{self.remote_output_dir}" '
+                '"$GAMECA_PMIN" "$GAMECA_PSEC" "$GAMECA_WMIN" "$GAMECA_WSEC")"\n'
+                'export GAMECA_MAIL_BODY\n'
+                f'{self._python} "$GAMECA_NOTIFY_PY" || echo "  (email notification step failed)"\n'
+                'rm -f "$GAMECA_NOTIFY_PY"\n'
+            )
+        else:
+            notify_section = ""
+
         bsub_script = f'''#!/bin/bash
 {sched_header}
 {module_block}
@@ -1679,7 +1706,7 @@ echo "=========================================================="
 
 # Create done marker file
 echo $EXIT_CODE > {job_done}
-
+{notify_section}
 exit $EXIT_CODE
 '''
 
@@ -3432,101 +3459,359 @@ exit $EXIT_CODE
         return True
 
     # ------------------------------------------------------------------
-    # Gmail App Password + email notifications
+    # Gmail OAuth + cluster-side email notifications
     # ------------------------------------------------------------------
 
-    _APP_PASSWORD_STATE_KEY = "gmail_app_password"
+    _APP_PASSWORD_STATE_KEY = "gmail_app_password"   # legacy (SMTP path retired)
     _SENDER_EMAIL_STATE_KEY = "gmail_sender_email"
+    _OAUTH_CLIENT_ID_KEY     = "gmail_oauth_client_id"
+    _OAUTH_CLIENT_SECRET_KEY = "gmail_oauth_client_secret"
+    _OAUTH_REFRESH_TOKEN_KEY = "gmail_oauth_refresh_token"
 
-    def _get_email_creds(self) -> tuple[str, str]:
-        """Return (sender_email, app_password), prompting and saving any missing values."""
-        sender = self._state.get(self._SENDER_EMAIL_STATE_KEY, "").strip()
-        pw = self._state.get(self._APP_PASSWORD_STATE_KEY, "").strip()
+    # --- App-shipped OAuth client (the "installed app" pattern) ---------------
+    # Create ONE Desktop OAuth client a single time (Google Cloud Console ->
+    # APIs & Services -> Credentials -> Create credentials -> OAuth client ID ->
+    # Application type "Desktop app"), then paste its two values here. After that
+    # NO end user ever touches the console: option [17] just opens the Google
+    # consent popup, exactly like gcloud/gsutil.
+    #
+    # For Desktop clients Google treats the secret as non-confidential, so
+    # shipping it in the app is the expected, supported pattern. Caveat: while
+    # the OAuth app's publishing status is "Testing", only added Test users can
+    # authorize and their refresh tokens expire after 7 days. Click "Publish app"
+    # on the consent screen to lift both limits (the gmail.send scope shows an
+    # "unverified app" interstitial until Google verifies it, which you can click
+    # through for your own / test accounts).
+    _DEFAULT_OAUTH_CLIENT_ID     = ""
+    _DEFAULT_OAUTH_CLIENT_SECRET = ""
 
-        if sender and pw:
-            return sender, pw
+    # --- Resend (active email provider) ---------------------------------------
+    # The cluster sends completion mail via a single HTTPS POST to Resend, which
+    # rides the same proxy your downloads use. The API key is embedded on purpose
+    # (per user request). From-address uses the verified anmol-dash.com domain, so
+    # notifications can be delivered to ANY recipient (not just the Resend account
+    # email). If you ever switch domains, verify it at resend.com/domains and set
+    # _RESEND_FROM to an address on it.
+    _RESEND_API_KEY = "re_VNAgkap7_KFTasPNHnQeMu3QuED4iDDtW"
+    _RESEND_FROM    = "GAMECA <no-reply@anmol-dash.com>"
 
-        print("\n" + "="*60)
-        print("GMAIL CREDENTIALS REQUIRED")
-        print("="*60)
-        print()
+    # "gmail.send" lets the cluster send on your behalf; "userinfo.email" lets us
+    # record which address authorized (used as the From: header).
+    _OAUTH_SCOPES = ("https://www.googleapis.com/auth/gmail.send "
+                     "https://www.googleapis.com/auth/userinfo.email")
 
-        if not sender:
-            sender = input("Gmail address to send FROM: ").strip()
-            if not sender:
-                print("  No email entered — notifications disabled.")
-                return "", ""
-            self._state[self._SENDER_EMAIL_STATE_KEY] = sender
-            self._save_state()
-            print(f"  Sender email saved: {sender}")
+    def _resolve_oauth_client(self):
+        """Return (client_id, client_secret): a per-user override stored in state
+        if present, otherwise the app-shipped default. Either may be "" if nothing
+        is configured yet."""
+        cid  = (self._state.get(self._OAUTH_CLIENT_ID_KEY, "").strip()
+                or self._DEFAULT_OAUTH_CLIENT_ID.strip())
+        csec = (self._state.get(self._OAUTH_CLIENT_SECRET_KEY, "").strip()
+                or self._DEFAULT_OAUTH_CLIENT_SECRET.strip())
+        return cid, csec
 
-        if not pw:
-            print()
-            print("An App Password is needed (not your regular Gmail password).")
-            print("Generate one at: myaccount.google.com/apppasswords")
-            print("(16-character password, spaces optional)")
-            print()
-            pw = getpass.getpass("Paste your Gmail App Password: ").strip().replace(" ", "")
-            if not pw:
-                print("  No password entered — notifications disabled.")
-                return "", ""
-            self._state[self._APP_PASSWORD_STATE_KEY] = pw
-            self._save_state()
-            print("  App password saved to state file.")
+    def _oauth_creds_present(self) -> bool:
+        cid, csec = self._resolve_oauth_client()
+        return bool(cid and csec and self._state.get(self._OAUTH_REFRESH_TOKEN_KEY, "").strip())
 
-        return sender, pw
+    def _get_oauth_creds(self, interactive: bool = True):
+        """Return (client_id, client_secret, refresh_token, sender_email).
 
-    def setup_email_auth(self):
-        """Clear stored Gmail credentials and prompt for fresh ones."""
-        print("\n" + "="*60)
-        print("GMAIL APP PASSWORD SETUP")
-        print("="*60)
-        print()
-        print("Steps (one-time):")
-        print("  1. Go to myaccount.google.com/apppasswords")
-        print("  2. Create an app password (select 'Mail' / 'Other')")
-        print("  3. Copy the 16-character password shown")
-        print()
-        self._state.pop(self._APP_PASSWORD_STATE_KEY, None)
-        self._state.pop(self._SENDER_EMAIL_STATE_KEY, None)
-        sender, pw = self._get_email_creds()
-        if sender and pw:
-            print("  Setup complete — notifications are enabled.")
-
-    def _send_notification_email(self, to: str, local_path: str, remote_dir: str):
-        """Send job-complete notification via Gmail SMTP with App Password."""
-        import smtplib
-
-        sender, pw = self._get_email_creds()
-        if not sender or not pw:
-            return
-
-        family = self.params.get("FAMILY_NAME", "")
-        subject = f"TE Analysis Complete: {family}"
-        body = (
-            f"Your TE analysis pipeline has completed.\n\n"
-            f"Family:        {family}\n"
-            f"Remote output: {remote_dir}\n"
-            f"Local path:    {local_path}\n"
+        Runs the one-time browser authorization if no refresh token is stored.
+        Returns empty strings if setup is declined or fails.
+        """
+        if not self._oauth_creds_present():
+            if not interactive:
+                return "", "", "", ""
+            self.setup_email_auth()
+        if not self._oauth_creds_present():
+            return "", "", "", ""
+        cid, csec = self._resolve_oauth_client()
+        return (
+            cid, csec,
+            self._state.get(self._OAUTH_REFRESH_TOKEN_KEY, "").strip(),
+            self._state.get(self._SENDER_EMAIL_STATE_KEY, "").strip(),
         )
 
-        msg = MIMEText(body)
-        msg["Subject"] = subject
-        msg["From"] = sender
-        msg["To"] = to
+    def _oauth_loopback_authorize(self, client_id: str, client_secret: str):
+        """Open the browser for Google consent; return (refresh_token, email).
+
+        Uses a localhost redirect and stdlib only. This runs on YOUR machine,
+        which has normal internet; only the resulting refresh token is later
+        used on the cluster (over HTTPS, through the proxy).
+        """
+        import http.server, socket, secrets, webbrowser
+        import urllib.parse, urllib.request, json as _json
+
+        s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
+        redirect_uri = f"http://localhost:{port}/"
+        state = secrets.token_urlsafe(16)
+        auth_url = "https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode({
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "response_type": "code",
+            "scope": self._OAUTH_SCOPES,
+            "access_type": "offline",
+            "prompt": "consent",
+            "state": state,
+        })
+
+        holder = {}
+
+        class _Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                holder["code"]  = (qs.get("code")  or [None])[0]
+                holder["state"] = (qs.get("state") or [None])[0]
+                holder["error"] = (qs.get("error") or [None])[0]
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(b"<h2>GAMECA: Gmail authorization received.</h2>"
+                                 b"<p>You can close this tab and return to the terminal.</p>")
+
+            def log_message(self, *a):
+                pass
+
+        httpd = http.server.HTTPServer(("127.0.0.1", port), _Handler)
+        print("\n  Opening your browser to authorize Gmail access ...")
+        print("  (Sign in, then click Allow. If no browser opens, paste this URL:)")
+        print(f"    {auth_url}\n")
+        try:
+            webbrowser.open(auth_url)
+        except Exception:
+            pass
+        try:
+            httpd.handle_request()  # serve the single redirect, then stop
+        finally:
+            httpd.server_close()
+
+        if holder.get("error"):
+            print(f"  Authorization failed: {holder['error']}")
+            return "", ""
+        if not holder.get("code") or holder.get("state") != state:
+            print("  Authorization failed (no code returned or state mismatch).")
+            return "", ""
 
         try:
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-                smtp.login(sender, pw)
-                smtp.send_message(msg)
-            print(f"  Notification email sent to {to}")
-        except smtplib.SMTPAuthenticationError:
-            print("  Email auth failed — run option [g] to update your credentials.")
-            self._state.pop(self._APP_PASSWORD_STATE_KEY, None)
-            self._state.pop(self._SENDER_EMAIL_STATE_KEY, None)
-            self._save_state()
+            data = urllib.parse.urlencode({
+                "code": holder["code"],
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "redirect_uri": redirect_uri,
+                "grant_type": "authorization_code",
+            }).encode()
+            req = urllib.request.Request("https://oauth2.googleapis.com/token", data=data)
+            with urllib.request.urlopen(req, timeout=30) as r:
+                tok = _json.loads(r.read().decode())
         except Exception as e:
-            print(f"  Email send failed: {e}")
+            print(f"  Token exchange failed: {e}")
+            return "", ""
+
+        refresh = tok.get("refresh_token", "")
+        access  = tok.get("access_token", "")
+        if not refresh:
+            print("  Google did not return a refresh token. Revoke prior access at")
+            print("  myaccount.google.com/permissions and re-run this setup.")
+            return "", ""
+
+        email = ""
+        try:
+            req2 = urllib.request.Request(
+                "https://www.googleapis.com/oauth2/v2/userinfo",
+                headers={"Authorization": "Bearer " + access},
+            )
+            with urllib.request.urlopen(req2, timeout=30) as r:
+                email = _json.loads(r.read().decode()).get("email", "")
+        except Exception:
+            pass
+        return refresh, email
+
+    def setup_email_auth(self):
+        """Authorize Gmail via Google OAuth — just a browser consent popup.
+
+        If the app ships (or you've stored) an OAuth client, this opens Google's
+        sign-in/consent screen directly; the user never visits the console. The
+        stored refresh token lets the cluster send mail over HTTPS (Gmail API)
+        through the same proxy your downloads use.
+        """
+        print("\n" + "=" * 64)
+        print("GMAIL AUTHORIZATION  (Google sign-in popup — no SMTP, no password)")
+        print("=" * 64)
+
+        client_id, client_secret = self._resolve_oauth_client()
+
+        if not (client_id and client_secret):
+            # No client shipped/stored yet — this only happens for whoever sets
+            # the app up the first time. Offer the one-time client creation.
+            print()
+            print("  No OAuth client is configured yet. This is a ONE-TIME step for")
+            print("  whoever sets up the app; end users never see it afterward.")
+            print()
+            print("  Create one Desktop OAuth client (~3 min):")
+            print("    1. https://console.cloud.google.com/ -> create/pick a project.")
+            print("    2. APIs & Services -> Library -> 'Gmail API' -> ENABLE.")
+            print("    3. APIs & Services -> OAuth consent screen -> 'External' ->")
+            print("       add your Gmail under 'Test users' (or click 'Publish app').")
+            print("    4. Credentials -> Create credentials -> OAuth client ID ->")
+            print("       Application type 'Desktop app' -> Create. Copy both values.")
+            print()
+            print("  Tip: paste them into _DEFAULT_OAUTH_CLIENT_ID / _SECRET in")
+            print("  hpc_client.py to make this fully automatic for everyone. Or enter")
+            print("  them now to store them just for you:")
+            print()
+            client_id = input("  OAuth Client ID: ").strip()
+            if not client_id:
+                print("  No client ID — aborting.")
+                return
+            client_secret = getpass.getpass("  OAuth Client secret: ").strip()
+            if not client_secret:
+                print("  No client secret — aborting.")
+                return
+            self._state[self._OAUTH_CLIENT_ID_KEY] = client_id
+            self._state[self._OAUTH_CLIENT_SECRET_KEY] = client_secret
+            self._save_state()
+
+        refresh, email = self._oauth_loopback_authorize(client_id, client_secret)
+        if not refresh:
+            print("\n  Authorization did not complete (no refresh token returned).")
+            return
+        self._state[self._OAUTH_REFRESH_TOKEN_KEY] = refresh
+        if email:
+            self._state[self._SENDER_EMAIL_STATE_KEY] = email
+        self._save_state()
+
+        print("\n  Gmail authorized" + (f" as {email}" if email else "") + ".")
+        print("  Now run option [22] to verify the cluster can actually send")
+        print("  (it submits a job that mails you via the Gmail API over HTTPS).")
+
+    def _email_send_py(self, result_path: str = "") -> str:
+        """Return standalone Python (stdlib only) that sends one email via the
+        Resend HTTPS API, routed through any detected proxy (same egress curl
+        uses). Returns "" if no Resend API key is configured.
+
+        Recipient / subject / body are read at run time from the environment
+        (GAMECA_MAIL_TO / GAMECA_MAIL_SUBJECT / GAMECA_MAIL_BODY) so the same
+        script serves both static tests and the pipeline's dynamic status mail.
+        """
+        key    = self._RESEND_API_KEY.strip()
+        sender = self._RESEND_FROM.strip()
+        if not key:
+            return ""
+        rp = repr(result_path) if result_path else "None"
+        # NOTE: subject/body/recipient come from the environment at run time.
+        return f'''import os, json, urllib.request, urllib.error
+from pathlib import Path
+
+def _detect_proxy():
+    for v in ("https_proxy","HTTPS_PROXY","http_proxy","HTTP_PROXY","all_proxy","ALL_PROXY"):
+        x = os.environ.get(v)
+        if x:
+            return x.strip()
+    home = Path.home()
+    rc = home / ".curlrc"
+    if rc.exists():
+        for raw in rc.read_text(errors="ignore").splitlines():
+            ln = raw.strip()
+            if not ln or ln.startswith("#"):
+                continue
+            if ln.lower().startswith(("proxy","-x","--proxy")):
+                for sep in ("=", " "):
+                    if sep in ln:
+                        c = ln.split(sep,1)[1].strip().strip('"').strip("'")
+                        if c:
+                            return c if "://" in c else "http://"+c
+    cc = home / ".condarc"
+    if cc.exists():
+        txt = cc.read_text(errors="ignore")
+        for key in ("https:","http:"):
+            if key in txt:
+                seg = txt.split(key,1)[1].splitlines()[0].strip().strip('"').strip("'")
+                if seg.startswith(("http://","https://")):
+                    return seg
+    for wg in (home / ".wgetrc", Path("/etc/wgetrc")):
+        if wg.exists():
+            for raw in wg.read_text(errors="ignore").splitlines():
+                ln = raw.strip()
+                if ln.lower().startswith(("https_proxy","http_proxy")) and "=" in ln:
+                    c = ln.split("=",1)[1].strip().strip('"').strip("'")
+                    if c:
+                        return c if "://" in c else "http://"+c
+    return None
+
+_proxy = _detect_proxy()
+_handler = urllib.request.ProxyHandler({{"http": _proxy, "https": _proxy}}) if _proxy else urllib.request.ProxyHandler({{}})
+_opener = urllib.request.build_opener(_handler)
+
+_API_KEY = {key!r}
+_FROM    = {sender!r}
+_TO      = os.environ.get("GAMECA_MAIL_TO", "")
+_SUBJECT = os.environ.get("GAMECA_MAIL_SUBJECT", "GAMECA notification")
+_BODY    = os.environ.get("GAMECA_MAIL_BODY", "")
+
+def _send():
+    if not _TO:
+        raise RuntimeError("GAMECA_MAIL_TO is empty")
+    payload = json.dumps({{
+        "from": _FROM, "to": [_TO], "subject": _SUBJECT, "text": _BODY,
+    }}).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.resend.com/emails", data=payload, method="POST",
+        headers={{"Authorization": "Bearer " + _API_KEY, "Content-Type": "application/json"}})
+    with _opener.open(req, timeout=45) as r:
+        resp = json.loads(r.read().decode())
+    if not resp.get("id"):
+        raise RuntimeError("no id in Resend response: %s" % resp)
+
+try:
+    _send()
+    _status = "resend_send=PASS (proxy=%s)" % (_proxy or "none")
+except urllib.error.HTTPError as e:
+    _status = "resend_send=FAIL (HTTP %s: %s)" % (e.code, e.read().decode(errors="ignore")[:300])
+except Exception as e:
+    _status = "resend_send=FAIL (%s)" % e
+
+print(_status)
+_rp = {rp}
+if _rp:
+    try:
+        with open(_rp, "w") as _fh:
+            _fh.write(_status + "\\n")
+    except Exception:
+        pass
+'''
+
+    def _email_notify_b64(self, result_path: str = "") -> str:
+        """base64 of the env-driven Resend send script, or "" if not configured."""
+        py = self._email_send_py(result_path)
+        return base64.b64encode(py.encode()).decode() if py else ""
+
+    def _email_notify_block(self, to: str, subject: str, body: str,
+                            result_path: str = "") -> str:
+        """Return a bash snippet that sends a Resend notification from the compute
+        node (HTTPS via proxy) with a STATIC subject/body. Returns "" if no API
+        key or no recipient.
+
+        For a dynamic body (e.g. exit code), use _email_notify_b64 directly and
+        set GAMECA_MAIL_* in the surrounding shell.
+        """
+        to = (to or "").strip()
+        if not to:
+            return ""
+        b64 = self._email_notify_b64(result_path)
+        if not b64:
+            return ""
+        return (
+            '\n# --- GAMECA email notification (Resend API over HTTPS/proxy) ---\n'
+            'GAMECA_NOTIFY_PY="$(mktemp "${TMPDIR:-/tmp}/gameca_notify_XXXXXX.py")"\n'
+            'chmod 600 "$GAMECA_NOTIFY_PY"\n'
+            f'echo {shlex.quote(b64)} | base64 -d > "$GAMECA_NOTIFY_PY"\n'
+            f'export GAMECA_MAIL_TO={shlex.quote(to)}\n'
+            f'export GAMECA_MAIL_SUBJECT={shlex.quote(subject)}\n'
+            f'export GAMECA_MAIL_BODY={shlex.quote(body)}\n'
+            f'{self._python} "$GAMECA_NOTIFY_PY" || echo "  (email notification step failed)"\n'
+            'rm -f "$GAMECA_NOTIFY_PY"\n'
+        )
 
     # ------------------------------------------------------------------
     # tmpfiles.org upload
@@ -3574,12 +3859,15 @@ exit $EXIT_CODE
                 os.unlink(zip_path)
 
     def _notify_job_complete(self, local_path: Path, remote_dir: str):
-        """Email a completion notification with the local path if NOTIFY_EMAIL is set."""
-        to = str(self.params.get("NOTIFY_EMAIL", "")).strip()
-        if not to:
-            return
-        print(f"\nSending completion notification to {to} ...")
-        self._send_notification_email(to, str(local_path), remote_dir)
+        """Local-side completion email is intentionally disabled.
+
+        Notification is sent fire-and-forget from the compute node via the Resend
+        API (see _email_notify_block, wired into the batch job script). Sending
+        again from the laptop here was removed so a working local send can't mask
+        a broken cluster-side path (a false positive). Run option [22] to verify
+        cluster delivery.
+        """
+        return
 
     # ------------------------------------------------------------------
     # State persistence
@@ -3923,119 +4211,39 @@ exit $EXIT_CODE
         self._save_state()
         print(f"\nDone. {len(chosen)} file(s) saved to {local_path}")
 
-    def test_email_interactive(self):
-        """Interactively set sender/receiver/password, print the test script, then run it."""
-        import smtplib
+    def submit_email_diagnostic_job(self):
+        """Verify cluster-side email delivery via the Resend HTTPS API.
 
-        print("\n" + "="*60)
-        print("EMAIL TEST")
-        print("="*60)
-        print()
-
-        # Sender
-        stored_sender = self._state.get(self._SENDER_EMAIL_STATE_KEY, "").strip()
-        prompt = f"  Sender Gmail address [{stored_sender}]: " if stored_sender else "  Sender Gmail address: "
-        sender = input(prompt).strip() or stored_sender
-        if not sender:
-            print("  No sender address — aborting.")
-            return
-        self._state[self._SENDER_EMAIL_STATE_KEY] = sender
-
-        # Receiver
-        stored_receiver = self._state.get("test_receiver_email", "").strip()
-        prompt = f"  Receiver email address [{stored_receiver}]: " if stored_receiver else "  Receiver email address: "
-        receiver = input(prompt).strip() or stored_receiver
-        if not receiver:
-            print("  No receiver address — aborting.")
-            return
-        self._state["test_receiver_email"] = receiver
-
-        # App password (masked input; show if already stored)
-        stored_pw = self._state.get(self._APP_PASSWORD_STATE_KEY, "").strip()
-        if stored_pw:
-            replace = input(f"  App password already stored. Replace it? (y/n) [n]: ").strip().lower()
-            if replace == "y":
-                stored_pw = ""
-        if not stored_pw:
-            print("  Generate an App Password at: myaccount.google.com/apppasswords")
-            stored_pw = getpass.getpass("  Paste Gmail App Password: ").strip().replace(" ", "")
-            if not stored_pw:
-                print("  No password entered — aborting.")
-                return
-        self._state[self._APP_PASSWORD_STATE_KEY] = stored_pw
-        self._save_state()
-
-        # Print the exact script that will run
-        script = f"""\
-import smtplib
-from email.mime.text import MIMEText
-
-SENDER   = "{sender}"
-RECEIVER = "{receiver}"
-PASSWORD = "{'*' * len(stored_pw)}"  # actual password loaded from state file
-
-msg = MIMEText("Test email from HPC TE Analysis Client.")
-msg["Subject"] = "HPC TE Client — Email Test"
-msg["From"]    = SENDER
-msg["To"]      = RECEIVER
-
-with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-    smtp.login(SENDER, PASSWORD)
-    smtp.send_message(msg)
-
-print("Email sent successfully.")"""
-
-        print()
-        print("-"*60)
-        print("TEST SCRIPT (password masked):")
-        print("-"*60)
-        print(script)
-        print("-"*60)
-        print()
-
-        confirm = input("Send test email now? (y/n) [y]: ").strip().lower()
-        if confirm == "n":
-            print("  Aborted.")
-            return
-
-        msg = MIMEText("Test email from HPC TE Analysis Client.")
-        msg["Subject"] = "HPC TE Client — Email Test"
-        msg["From"] = sender
-        msg["To"] = receiver
-
-        try:
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-                smtp.login(sender, stored_pw)
-                smtp.send_message(msg)
-            print(f"  Email sent successfully to {receiver}.")
-        except smtplib.SMTPAuthenticationError:
-            print("  Auth failed — check that the App Password is correct and that")
-            print("  2-Step Verification is enabled on the sender account.")
-            self._state.pop(self._APP_PASSWORD_STATE_KEY, None)
-            self._save_state()
-        except Exception as e:
-            print(f"  Send failed: {e}")
-
-    def submit_email_test_job(self):
-        """Submit a trivial batch job, poll for completion, then send a notification email."""
+        SMTP can't leave these compute nodes (raw sockets get ENETUNREACH), but
+        HTTPS does — through the same proxy curl/downloads use. This submits ONE
+        tiny job that, on the compute node, POSTs a test email to the Resend API
+        through the proxy and reports PASS/FAIL. No per-user setup: the API key is
+        embedded in the app.
+        """
         import datetime as _dt
-        import smtplib
         import time as _time
 
-        print("\n" + "="*60)
-        print("TEST EMAIL NOTIFICATION")
-        print("="*60)
+        print("\n" + "=" * 64)
+        print("EMAIL DELIVERY TEST  (Resend API over HTTPS — cluster-side)")
+        print("=" * 64)
         print()
 
-        # Credentials are mandatory here — _get_email_creds prompts if missing
-        sender, pw = self._get_email_creds()
-        if not sender or not pw:
-            print("  App password is required for this test — aborting.")
+        if not getattr(self, "_scheduler_live", False) or self.scheduler not in {"lsf", "slurm"}:
+            print("  No live LSF/Slurm scheduler detected — this test targets")
+            print("  scheduler-based clusters. Aborting.")
             return
 
-        # Recipient
-        stored_to = self._state.get("test_receiver_email", sender).strip()
-        prompt = f"  Send test email to [{stored_to}]: "
+        # Step 1 — confirm Resend is configured (API key is embedded in the app).
+        if not self._RESEND_API_KEY.strip():
+            print("\n  No Resend API key set (_RESEND_API_KEY in hpc_client.py). Aborting.")
+            return
+        print(f"  Sending via Resend, From: {self._RESEND_FROM}")
+        print("  (anmol-dash.com is verified, so delivery to any recipient is allowed.)")
+
+        # Step 2 — recipient.
+        stored_to = self._state.get("test_receiver_email", "").strip()
+        prompt = (f"\n  Send the test email to [{stored_to}]: " if stored_to
+                  else "\n  Send the test email to (your Resend account email): ")
         to = input(prompt).strip() or stored_to
         if not to:
             print("  No recipient — aborting.")
@@ -4043,94 +4251,81 @@ print("Email sent successfully.")"""
         self._state["test_receiver_email"] = to
         self._save_state()
 
-        # Show the exact script that will run (password masked), same as option [17]
-        script_preview = f"""\
-import smtplib
-from email.mime.text import MIMEText
+        _ts        = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        job_name   = "gameca_email_diag"
+        job_script = f"{self.remote_work_dir}/gameca_email_diag_{_ts}.sh"
+        job_out    = f"{self.remote_work_dir}/gameca_email_diag_{_ts}.out"
+        job_err    = f"{self.remote_work_dir}/gameca_email_diag_{_ts}.err"
+        job_done   = f"{self.remote_work_dir}/gameca_email_diag_{_ts}.done"
+        job_result = f"{self.remote_work_dir}/gameca_email_diag_{_ts}.result"
 
-SENDER   = "{sender}"
-RECEIVER = "{to}"
-PASSWORD = "{'*' * len(pw)}"  # actual password loaded from state file
+        subject = f"GAMECA cluster email test {_ts}"
+        body    = (f"This message was sent from a compute node via the Resend API "
+                   f"over HTTPS (through the cluster proxy).\n\nIf you received it, "
+                   f"cluster-side notifications work. Test id: {_ts}")
 
-msg = MIMEText("GAMECA batch test job completed.")
-msg["Subject"] = "GAMECA: Email notification test passed"
-msg["From"]    = SENDER
-msg["To"]      = RECEIVER
-
-with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-    smtp.login(SENDER, PASSWORD)
-    smtp.send_message(msg)
-
-print("Email sent successfully.")"""
-
-        print()
-        print("-"*60)
-        print("EMAIL SCRIPT (password masked):")
-        print("-"*60)
-        print(script_preview)
-        print("-"*60)
-        print()
-
-        confirm = input("Submit batch job and send email on completion? (y/n) [y]: ").strip().lower()
-        if confirm == "n":
-            print("  Aborted.")
+        notify_b64 = self._email_notify_b64(result_path=job_result)
+        if not notify_b64:
+            print("  Internal error: Resend send script could not be built. Aborting.")
             return
 
-        # Build a minimal 1-CPU job that writes a done marker
-        _ts        = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-        job_name   = "gameca_email_test"
-        job_script = f"{self.remote_work_dir}/gameca_email_test_{_ts}.sh"
-        job_out    = f"{self.remote_work_dir}/gameca_email_test_{_ts}.out"
-        job_err    = f"{self.remote_work_dir}/gameca_email_test_{_ts}.err"
-        job_done   = f"{self.remote_work_dir}/gameca_email_test_{_ts}.done"
-
-        sched_header = self._job_script_header(
+        header = self._job_script_header(
             job_name, job_out, job_err,
             mem_mb=500, cpus=1, walltime="00:05", queue=self.params.get("QUEUE", "normal"),
         )
 
         script = f'''#!/bin/bash
-{sched_header}
-
-echo "GAMECA — email notification test job"
+{header}
+echo "GAMECA email delivery test (Resend API / HTTPS)"
 echo "Host: $(hostname)"
 echo "Date: $(date)"
 
-# Create a small marker file in the user's home
-echo "GAMECA email test completed at $(date)" > "$HOME/gameca_email_test_{_ts}.txt"
-echo "Job: ${{LSB_JOBID:-${{SLURM_JOB_ID:-?}}}}" >> "$HOME/gameca_email_test_{_ts}.txt"
+GAMECA_NOTIFY_PY="$(mktemp "${{TMPDIR:-/tmp}}/gameca_notify_XXXXXX.py")"
+chmod 600 "$GAMECA_NOTIFY_PY"
+echo {shlex.quote(notify_b64)} | base64 -d > "$GAMECA_NOTIFY_PY"
+export GAMECA_MAIL_TO={shlex.quote(to)}
+export GAMECA_MAIL_SUBJECT={shlex.quote(subject)}
+export GAMECA_MAIL_BODY={shlex.quote(body)}
+{self._python} "$GAMECA_NOTIFY_PY"
+rm -f "$GAMECA_NOTIFY_PY"
 
-echo "Job complete."
-echo 0 > {job_done}
+touch {job_done}
+echo "Test complete."
 exit 0
 '''
 
-        print(f"\n  Creating test job script ...")
-        create_cmd = f"cat > {job_script} << 'GAMECA_TEST_EOF'\n{script}\nGAMECA_TEST_EOF"
+        print("\n  This submits one 1-CPU job that, on the compute node:")
+        print("    - detects the proxy (env / ~/.curlrc / ~/.condarc / wgetrc), and")
+        print("    - POSTs the test email to the Resend API over HTTPS.")
+        print("  Your refresh token is written only to a 0600 temp file on the node,")
+        print("  never printed here.")
+        confirm = input("\n  Submit test job? (y/n) [y]: ").strip().lower()
+        if confirm == "n":
+            print("  Aborted.")
+            return
+
+        # Write + submit the job.
+        create_cmd = f"cat > {job_script} << 'GAMECA_DIAG_EOF'\n{script}\nGAMECA_DIAG_EOF"
         out, err, code = self.run_command(create_cmd, timeout=30)
         if code != 0:
             print(f"  Error creating script: {err}")
             return
-        self.run_command(f"chmod +x {job_script}", timeout=10)
-        self.run_command(f"rm -f {job_out} {job_err} {job_done}", timeout=10)
+        self.run_command(f"chmod 700 {job_script}", timeout=10)
+        self.run_command(f"rm -f {job_out} {job_err} {job_done} {job_result}", timeout=10)
 
         submit_cmd = self._submit_job_cmd(job_script)
-        print(f"  Submitting: {submit_cmd}")
+        print(f"\n  Submitting: {submit_cmd}")
         out, err, code = self.run_command(submit_cmd, timeout=30)
         job_id = self._parse_job_id(out + err)
-
         if code != 0:
-            print(f"  Submission failed (exit {code}):")
-            if out.strip(): print(f"  stdout: {out.strip()}")
-            if err.strip(): print(f"  stderr: {err.strip()}")
+            print(f"  Submission failed (exit {code}): {(out + err).strip()}")
             return
-
-        print(f"\n  Job submitted — ID: {job_id or '?'}")
+        print(f"  Job submitted — ID: {job_id or '?'}")
         if job_id:
             self.current_job_id = job_id
 
-        # Poll for the done marker (up to 5 minutes)
-        print(f"  Waiting for job to finish (polling every 15 s, timeout 5 min) ...")
+        # Poll for the done marker (up to 5 minutes).
+        print("  Waiting for job to finish (polling every 15 s, timeout 5 min) ...")
         deadline = _time.time() + 300
         done = False
         while _time.time() < deadline:
@@ -4140,36 +4335,46 @@ exit 0
                 break
             _time.sleep(15)
 
-        if done:
-            print(f"  Job finished.")
+        # Read back the server-side result line.
+        res_out, _, res_code = self.run_command(f"cat {job_result} 2>/dev/null", timeout=10)
+        result_line = res_out.strip() if res_code == 0 else ""
+
+        print("\n" + "=" * 64)
+        print("RESULT")
+        print("=" * 64)
+        if not done:
+            print("  (job did not finish within 5 min — result may be partial)")
+        print(f"  Compute-node Resend send : {result_line or 'no result file written'}")
+        print("=" * 64)
+
+        sent_ok = result_line.startswith("resend_send=PASS")
+        if sent_ok:
+            print(f"\n  The compute node reported a successful send to {to}.")
+            print(f"  Check that inbox for subject: \"{subject}\"")
+            ans = input("  Did the email ARRIVE? (y/n): ").strip().lower()
+            if ans == "y":
+                self._state["email_delivery_method"] = "resend_cluster"
+                self._save_state()
+                print("\n  Saved email_delivery_method = 'resend_cluster'.")
+                print("  Real pipeline jobs with NOTIFY_EMAIL set will now email you on finish,")
+                print("  sent fire-and-forget from the compute node — no need to keep this client open.")
+            else:
+                print("\n  Resend reported success but you didn't see it — check Spam. The sender")
+                print("  domain (anmol-dash.com) is verified, so any recipient is allowed; a missing")
+                print("  message is almost always spam-filtering or a typo in the recipient address.")
         else:
-            print(f"  Job did not complete within 5 minutes — sending email anyway.")
-
-        # Send the notification email from the local machine, same code path as option [17]
-        print(f"\n  Sending notification email to {to} ...")
-        msg = MIMEText(
-            f"Your GAMECA email notification test job completed.\n\n"
-            f"Sender:    {sender}\n"
-            f"Recipient: {to}\n"
-            f"Job ID:    {job_id or '?'}\n\n"
-            f"Email notifications are working correctly."
-        )
-        msg["Subject"] = "GAMECA: Email notification test passed"
-        msg["From"]    = sender
-        msg["To"]      = to
-
-        try:
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-                smtp.login(sender, pw)
-                smtp.send_message(msg)
-            print(f"  Email sent successfully to {to}.")
-        except smtplib.SMTPAuthenticationError:
-            print("  Auth failed — check that the App Password is correct.")
-            print("  Re-run option [g] to update your credentials.")
-            self._state.pop(self._APP_PASSWORD_STATE_KEY, None)
+            self._state["email_delivery_method"] = "none"
             self._save_state()
-        except Exception as exc:
-            print(f"  Email send failed: {exc}")
+            if "FAIL (HTTP" in result_line:
+                print("\n  HTTPS reached Resend but it rejected the request (see code/body above).")
+                print("  Common causes: 403 = sender domain not verified for this key; 401 = bad API")
+                print("  key; 422 = invalid From/To address. Fix and re-run.")
+            else:
+                print("\n  The HTTPS request never completed — likely the proxy wasn't detected on the")
+                print("  compute node. Check what makes curl work there:")
+                print("    echo $https_proxy $HTTPS_PROXY ; grep -i proxy ~/.curlrc ~/.condarc 2>/dev/null")
+                print("  If a proxy shows up only in a config this script doesn't read, tell me the")
+                print("  value and I'll wire it in. The full error is in the result line above.")
 
     def main_menu(self):
         """Main interactive menu after connection."""
@@ -4196,10 +4401,11 @@ exit 0
                 print("  [9]  Retrieve results  (all files)")
                 print("  [10] Download error logs only")
                 print("  [11] Disconnect and exit")
-                print("  [12] Test email (set sender / receiver / password and send test)")
+                print("  [12] Send a test email (Resend via cluster — confirm notifications work)")
+                print("  [13] Test email delivery (submit job → Resend API send via cluster proxy)")
                 print("="*60)
 
-                choice = input("\nSelect option (1-12): ").strip()
+                choice = input("\nSelect option (1-13): ").strip()
 
                 if choice == '1':
                     if self.set_parameter_interactive():
@@ -4239,7 +4445,9 @@ exit 0
                 elif choice == '11':
                     break
                 elif choice == '12':
-                    self.test_email_interactive()
+                    self.submit_email_diagnostic_job()
+                elif choice == '13':
+                    self.submit_email_diagnostic_job()
                 else:
                     print("Invalid option")
 
@@ -4276,7 +4484,7 @@ Examples:
     parser.add_argument("-o", "--output", help="Local output directory for results")
     parser.add_argument(
         "--setup-email", action="store_true",
-        help="Run one-time Gmail OAuth2 setup for email notifications, then exit",
+        help="Show email (Resend) notification status, then exit",
     )
     parser.add_argument(
         "--scheduler", choices=["lsf", "slurm"],
@@ -4292,7 +4500,14 @@ Examples:
     client = HPCClient()
 
     if args.setup_email:
-        client.setup_email_auth()
+        if client._RESEND_API_KEY.strip():
+            print("\n  Email notifications use Resend (HTTPS) — no setup required.")
+            print(f"  From: {client._RESEND_FROM}")
+            print("  Set NOTIFY_EMAIL to your recipient, then use menu option to send a")
+            print("  test once connected. Sender domain anmol-dash.com is verified, so any")
+            print("  recipient address is allowed.")
+        else:
+            print("\n  No Resend API key configured (_RESEND_API_KEY in hpc_client.py).")
         sys.exit(0)
 
     state = client._state

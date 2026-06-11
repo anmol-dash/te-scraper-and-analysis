@@ -136,7 +136,7 @@ export default function StatusBar() {
                 : "border border-[var(--app-border)] text-[var(--app-muted)] hover:text-[var(--app-text)]"
             }`}
           >
-            {fileViewerOpen ? "✕ Files" : "📁 Files"}
+            {fileViewerOpen ? "✕ Remote Files" : "Remote Files"}
           </button>
         </>
       )}
