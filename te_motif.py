@@ -443,12 +443,12 @@ def _query_bigbed_pybigtools(bb_url, loci, out):
         start = max(0, int(row["start"]) - 1)
         end   = int(row["end"]) + 1
         try:
-            for entry in bb.entries(chrom, start, end):
-                # entries() yields (start, end, rest_string)
-                chrom_out = chrom
-                s, e = entry[0], entry[1]
-                rest = entry[2] if len(entry) > 2 else ""
-                line = f"{chrom_out}\t{s}\t{e}" + (f"\t{rest}" if rest else "")
+            # pybigtools API: .records(chrom, start, end) yields (start, end, *rest)
+            # for bigBed; rest fields (name, score, strand, …) are split by space.
+            for rec in bb.records(chrom, start, end):
+                s, e = rec[0], rec[1]
+                rest = "\t".join(str(x) for x in rec[2:])
+                line = f"{chrom}\t{s}\t{e}" + (f"\t{rest}" if rest else "")
                 if line in seen:
                     continue
                 seen.add(line)

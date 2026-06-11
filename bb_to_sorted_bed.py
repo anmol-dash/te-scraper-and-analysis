@@ -122,9 +122,11 @@ def _extract_with_pybigtools(bb, work, threads):
         try:
             bb_local = pybigtools.open(str(bb), "r")  # one handle per thread
             with open(dest, "w") as fh:
-                for entry in bb_local.entries(chrom, 0, int(length)):
-                    s, e = entry[0], entry[1]
-                    rest = entry[2] if len(entry) > 2 else ""
+                # .records() yields (start, end, *rest) for bigBed; rest fields
+                # (name, score, strand, …) are split by whitespace.
+                for rec in bb_local.records(chrom, 0, int(length)):
+                    s, e = rec[0], rec[1]
+                    rest = "\t".join(str(x) for x in rec[2:])
                     fh.write(f"{chrom}\t{s}\t{e}" + (f"\t{rest}" if rest else "") + "\n")
                     n += 1
             return dest if n else None
@@ -140,6 +142,25 @@ def _extract_with_pybigtools(bb, work, threads):
     if not out:
         raise RuntimeError("pybigtools produced no records.")
     return out
+
+
+def _advise_no_backend():
+    """Print actionable guidance when neither bigBedToBed nor pybigtools works."""
+    sys.exit(
+        "\nERROR: no usable bigBed backend on this machine.\n"
+        "  • bigBedToBed needs glibc >= 2.29 (absent on old HPC nodes), and\n"
+        "  • pybigtools is not installed (its prebuilt wheel needs glibc >= 2.28,\n"
+        "    and building from source needs gcc >= 4.9 + Rust).\n"
+        "\nFix one of:\n"
+        "  A) On the cluster, load a modern compiler then build pybigtools:\n"
+        "       module load gcc/9.3.0   # any gcc >= 4.9\n"
+        "       export CC=$(which gcc) CXX=$(which g++)\n"
+        "       pip install pybigtools\n"
+        "  B) Run this script on a machine with a modern toolchain (e.g. your\n"
+        "     laptop: `pip install pybigtools`), then copy the .sorted.bed.gz back.\n"
+        "  C) Skip the bigBed: use fetch_jaspar.py (per-motif CMMT download — no\n"
+        "     binary/compiler needed) to produce the same sorted.bed.gz.\n"
+    )
 
 
 def main():
@@ -187,15 +208,21 @@ def main():
     work = Path(tempfile.mkdtemp(prefix="bb2bed_", dir=out_dir))
     try:
         # ── 1. Extract bigBed → per-chrom BEDs (parallel) ────────────────────
+        def _pybigtools_or_advise():
+            try:
+                return _extract_with_pybigtools(bb, work, threads)
+            except ImportError:
+                _advise_no_backend()
+
         if bigbedtobed:
             try:
                 bed_parts = _extract_with_binary(bigbedtobed, bigbedinfo, bb, work, threads)
             except Exception as exc:
                 print(f"  bigBedToBed extraction failed ({exc}) — trying pybigtools ...")
-                bed_parts = _extract_with_pybigtools(bb, work, threads)
+                bed_parts = _pybigtools_or_advise()
         else:
-            print("  bigBedToBed not found — using pybigtools fallback.")
-            bed_parts = _extract_with_pybigtools(bb, work, threads)
+            print("  bigBedToBed not found — trying pybigtools fallback.")
+            bed_parts = _pybigtools_or_advise()
 
         print(f"  Extracted {len(bed_parts)} BED part(s) in {time.time()-t0:.1f}s")
 
