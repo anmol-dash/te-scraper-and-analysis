@@ -36,6 +36,7 @@ Example (cluster):
 
 import argparse
 import datetime
+import json
 import os
 import subprocess
 import sys
@@ -400,12 +401,14 @@ def run_clustering(df, present_stages, out_dir, family, kmer=6, seed=42,
     n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
     _pp(f"  Final: {n_clusters} clusters (n_neighbors={nn_used}, "
         f"min_cluster_size={chosen['best']['mcs']})")
-    return df, clustered, {
+    cinfo = {
         "n_neighbors": nn_used,
         "min_cluster_size": chosen["best"]["mcs"],
         "n_clusters": n_clusters,
         "noise_frac": chosen["best"]["noise_frac"],
     }
+    (out_dir / "cluster_info.json").write_text(json.dumps(cinfo, indent=2))
+    return df, clustered, cinfo
 
 
 # ── per-cluster value table + expression heatmap ─────────────────────────────
@@ -585,6 +588,9 @@ def parse_args():
                    help="Comma list of reagent-relevant Stage-11 modules.")
     p.add_argument("--max-workers", type=int, default=4)
     p.add_argument("--skip-stage11", action="store_true")
+    p.add_argument("--skip-clustering", action="store_true",
+                   help="Resume from existing clustered CSV + cluster_info.json; "
+                        "skip data load, strand check, clustering, and heatmap.")
     return p.parse_args()
 
 
@@ -602,22 +608,51 @@ def main():
     print(f"  out   : {out_dir}")
     print("=" * 64)
 
-    # 1. Load + parse.
-    df, present = prepare_dataframe(args.input)
+    if args.skip_clustering:
+        # Resume: load existing outputs produced by the previous run.
+        clustered_csv = out_dir / f"{args.family.lower()}_clustered.csv"
+        if not clustered_csv.exists():
+            raise SystemExit(f"ERROR: --skip-clustering set but {clustered_csv} not found.")
+        cinfo_path = out_dir / "cluster_info.json"
+        if cinfo_path.exists():
+            cinfo = json.loads(cinfo_path.read_text())
+        else:
+            # Reconstruct from cluster_sweep.csv (chosen = row closest to target_clusters).
+            sweep_path = out_dir / "cluster_sweep.csv"
+            if sweep_path.exists():
+                sw = pd.read_csv(sweep_path)
+                best_row = sw.loc[(sw["n_clusters"] - args.target_clusters).abs().idxmin()]
+                cinfo = {
+                    "n_neighbors": int(best_row["n_neighbors"]),
+                    "min_cluster_size": int(best_row["min_cluster_size"]),
+                    "n_clusters": int(best_row["n_clusters"]),
+                    "noise_frac": float(best_row["noise_frac"]),
+                }
+                _pp(f"  cluster_info.json missing; reconstructed from cluster_sweep.csv: {cinfo}")
+            else:
+                raise SystemExit("ERROR: neither cluster_info.json nor cluster_sweep.csv found.")
+        strand_res = pd.DataFrame()
+        _pp(f"--skip-clustering: resuming from {clustered_csv}")
+        _pp(f"  cinfo: {cinfo}")
+    else:
+        # 1. Load + parse.
+        df, present = prepare_dataframe(args.input)
 
-    # 2. Strand spot-check (best effort).
-    strand_res = spot_check_strand(df, args.assembly, out_dir,
-                                   n=args.spotcheck_n, seed=args.seed)
+        # 2. Strand spot-check (best effort).
+        strand_res = spot_check_strand(df, args.assembly, out_dir,
+                                       n=args.spotcheck_n, seed=args.seed)
 
-    # 3. Clustering + all required plots (must finish before downstream).
-    df, clustered_csv, cinfo = run_clustering(
-        df, present, out_dir, args.family, kmer=args.kmer,
-        seed=args.seed, target_clusters=args.target_clusters)
+        # 3. Clustering + all required plots (must finish before downstream).
+        df, clustered_csv, cinfo = run_clustering(
+            df, present, out_dir, args.family, kmer=args.kmer,
+            seed=args.seed, target_clusters=args.target_clusters)
 
-    # 4. Per-cluster value table + expression heatmap.
-    vals = cluster_values(df, present, out_dir, args.family)
+        # 4. Per-cluster value table + expression heatmap.
+        vals = cluster_values(df, present, out_dir, args.family)
 
     # 5. Downstream heavy stages in parallel (alignment + gRNA).
+    if args.skip_clustering:
+        vals = pd.DataFrame()  # not needed for explainer content
     cons_fa = out_dir / "alignments" / "cluster_alignments" / "all_cluster_consensuses.fa"
     futures = {}
     results = []

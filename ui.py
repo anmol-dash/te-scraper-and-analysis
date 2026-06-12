@@ -513,7 +513,10 @@ def _step_prep(client):
 
 def _batch_submit(client, label, cmd, scripts):
     """Upload scripts and submit cmd as a batch job. Returns job_id or None."""
-    if not _sync_remote_files(client, scripts):
+    all_scripts = list(scripts)
+    if "te_notify.py" not in all_scripts:
+        all_scripts.append("te_notify.py")
+    if not _sync_remote_files(client, all_scripts):
         return None
     job_id = client.submit_command_as_batch_job(label, cmd)
     if job_id:

@@ -177,7 +177,11 @@ def main():
                     help="Path to bigBedToBed (else found on PATH).")
     ap.add_argument("--bigbedinfo", default="",
                     help="Path to bigBedInfo (else found on PATH).")
-    ap.add_argument("--tabix", action="store_true", help="Also create a .tbi tabix index.")
+    ap.add_argument("--tabix", dest="tabix", action="store_true", default=True,
+                    help="Create a .tbi tabix index (default: on — the index is "
+                         "what makes downstream JASPAR intersects fast seeks).")
+    ap.add_argument("--no-tabix", dest="tabix", action="store_false",
+                    help="Skip building the .tbi tabix index.")
     ap.add_argument("--keep-tmp", action="store_true", help="Keep intermediate BED files.")
     args = ap.parse_args()
 

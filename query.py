@@ -1365,15 +1365,18 @@ def run_motif_stage_full(args, out_dir, dirs, family_name,
         _tbi = Path(str(_tp) + ".tbi")
         if not _tp.exists():
             print(f"  ⚠  Not found: {_tp}  — falling back to auto-build / --jaspar-bed")
-        elif not _tbi.exists():
-            _is_interactive = getattr(sys.stdin, "isatty", lambda: False)()
-            if not _is_interactive:
-                raise FileNotFoundError(
-                    f"JASPAR tabix index not found: {_tp}.tbi\n"
-                    f"  Run on the cluster:  tabix -p bed {_tp}\n"
-                    f"  Or pass --skip-motif to skip JASPAR analysis."
-                )
-            print(f"  ⚠  No .tbi alongside {_tp.name}  — falling back to auto-build / --jaspar-bed")
+        elif not _tbi.exists() and not Path(str(_tp) + ".csi").exists():
+            # No index yet — build it once (cached) instead of refusing. This is
+            # the one-time cost that makes every later run a fast tabix seek.
+            print(f"  No index alongside {_tp.name} — building one (one-time) ...")
+            from te_motif import ensure_tabix_index
+            _indexed = ensure_tabix_index(str(_tp), scratch=scratch)
+            if _indexed:
+                PREBUILT_TABIX = _indexed
+                progress_print(f"  ✓  Indexed JASPAR: {_indexed}")
+            else:
+                print(f"  ⚠  Could not build index for {_tp.name} "
+                      f"— falling back to auto-build / --jaspar-bed")
         else:
             PREBUILT_TABIX = str(_tp)
             progress_print(f"  ✓  Pre-built tabix: {_tp}  ({_tp.stat().st_size/1e6:.0f} MB)")
@@ -1581,68 +1584,25 @@ def run_motif_stage_full(args, out_dir, dirs, family_name,
         tabix_target = Path(PREBUILT_TABIX)
         print(f"  Using pre-built tabix file (no rebuild needed):")
         print(f"    {tabix_target}")
-        _tbi = Path(str(tabix_target) + ".tbi")
-        print(f"    {_tbi}  ({_tbi.stat().st_size/1e3:.1f} KB)")
+        for _ext in (".tbi", ".csi"):
+            _idx = Path(str(tabix_target) + _ext)
+            if _idx.exists():
+                print(f"    {_idx}  ({_idx.stat().st_size/1e3:.1f} KB)")
         print(f"  M3b done in {time.time()-t0:.2f}s")
     else:
-        cache_dir = motif_dir / "jaspar_indexed"
-        cache_dir.mkdir(parents=True, exist_ok=True)
-
-        def _is_bgzip(p):
-            try:
-                with open(p,"rb") as _f: magic = _f.read(4)
-                return len(magic)==4 and magic[0]==0x1f and magic[1]==0x8b \
-                       and magic[2]==0x08 and magic[3]==0x04
-            except Exception: return False
-
-        indexed_gz  = cache_dir / "JASPAR_indexed.bed.gz"
-        indexed_tbi = Path(str(indexed_gz) + ".tbi")
-        sibling_tbi = Path(str(jasp_raw) + ".tbi")
-        src_bgzip   = _is_bgzip(jasp_raw)
-        print(f"  Source bgzip? {src_bgzip}  |  cache: {cache_dir}")
-
-        if src_bgzip and sibling_tbi.exists():
-            print(f"  Reusing source .tbi at {sibling_tbi}")
-            tabix_target = jasp_raw
-        elif indexed_gz.exists() and indexed_tbi.exists() and not FORCE:
-            print(f"  Reusing cached indexed copy:")
-            print(f"    {indexed_gz}  ({indexed_gz.stat().st_size/1e6:.1f} MB)")
-            print(f"    {indexed_tbi}  ({indexed_tbi.stat().st_size/1e3:.1f} KB)")
-            tabix_target = indexed_gz
+        # Single shared code path: build (or reuse) an index for jasp_raw, in
+        # place when writable, else as a scratch symlink / re-bgzipped copy. No
+        # 30 GB copy-to-cache — the helper drops only the tiny index.
+        from te_motif import ensure_tabix_index
+        print(f"  Ensuring tabix index for {jasp_raw} ...")
+        _indexed = ensure_tabix_index(str(jasp_raw), scratch=scratch)
+        if _indexed:
+            tabix_target = Path(_indexed)
+            print(f"  Tabix target: {tabix_target}")
         else:
-            if src_bgzip:
-                print(f"  Copying bgzip source to cache ...")
-                _shutil.copy2(jasp_raw, indexed_gz)
-                print(f"    → {indexed_gz}  ({indexed_gz.stat().st_size/1e6:.1f} MB)")
-            else:
-                print(f"  Plain gzip detected — decompressing + re-bgzipping + sorting ...")
-                print(f"  (one-time cost; subsequent runs reuse the cached index)")
-                _t_bg = time.time()
-                with open(indexed_gz, "wb") as _fout:
-                    _p1 = subprocess.Popen(["zcat", str(jasp_raw)], stdout=subprocess.PIPE)
-                    _p2 = subprocess.Popen(
-                        ["sort","-k1,1","-k2,2n","-S","2G","-T",str(scratch)],
-                        stdin=_p1.stdout, stdout=subprocess.PIPE)
-                    _p1.stdout.close()
-                    _p3 = subprocess.Popen(["bgzip","-c"], stdin=_p2.stdout, stdout=_fout)
-                    _p2.stdout.close()
-                    _p3.communicate(); _p2.wait(); _p1.wait()
-                    if _p3.returncode != 0:
-                        raise RuntimeError(f"bgzip pipeline failed (exit {_p3.returncode})")
-                print(f"    Wrote {indexed_gz}  "
-                      f"({indexed_gz.stat().st_size/1e6:.1f} MB) in {time.time()-_t_bg:.1f}s")
-            print(f"  Building tabix index ...")
-            _t_tb = time.time()
-            _res = subprocess.run(
-                ["tabix","-p","bed","-f",str(indexed_gz)],
-                capture_output=True, text=True)
-            if _res.returncode != 0:
-                raise RuntimeError(f"tabix indexing failed:\n{_res.stderr}")
-            print(f"    Wrote {indexed_tbi}  "
-                  f"({indexed_tbi.stat().st_size/1e3:.1f} KB) in {time.time()-_t_tb:.1f}s")
-            tabix_target = indexed_gz
-
-        print(f"  Tabix target: {tabix_target}")
+            use_tabix = False
+            progress_print("  Could not build a tabix index — falling back to "
+                           "full bedtools scan (slower).")
         print(f"  M3b done in {time.time()-t0:.1f}s")
 
     # ══════════════════════════════════════════════════════════
@@ -1675,14 +1635,29 @@ def run_motif_stage_full(args, out_dir, dirs, family_name,
 
         if use_tabix and tabix_target:
             # ── Step 1: tabix subset ──────────────────────────
+            # Merge loci first so tabix does fewer, non-overlapping block seeks
+            # (v_bed is already coord-sorted). The original v_bed stays the -a
+            # for the intersect, so per-locus output rows are preserved.
+            _region_bed = scratch / f"loci_merged_{os.getpid()}.bed"
+            try:
+                with open(_region_bed, "w") as _fo:
+                    subprocess.run(["bedtools","merge","-i",str(v_bed)],
+                                   stdout=_fo, check=True)
+                if _region_bed.stat().st_size == 0:
+                    _region_bed = Path(v_bed)
+            except Exception as _me:
+                print(f"    (loci merge skipped: {_me})")
+                _region_bed = Path(v_bed)
             subset_path = scratch / f"jaspar_subset_{os.getpid()}.bed"
             print(f"\n  [Step 1/2] tabix -R (pulls only JASPAR rows overlapping our loci)")
-            print(f"    tabix -R {v_bed} {tabix_target}")
+            print(f"    tabix -R {_region_bed} {tabix_target}")
             _t_tx = time.time()
             with open(subset_path,"w") as _fo:
                 _res = subprocess.run(
-                    ["tabix","-R",str(v_bed),str(tabix_target)],
+                    ["tabix","-R",str(_region_bed),str(tabix_target)],
                     stdout=_fo, stderr=subprocess.PIPE, text=True)
+            if str(_region_bed) != str(v_bed):
+                Path(_region_bed).unlink(missing_ok=True)
             if _res.returncode != 0:
                 raise RuntimeError(f"tabix -R failed:\n{_res.stderr}")
             _n_sub = sum(1 for _ in open(subset_path))
@@ -1700,14 +1675,33 @@ def run_motif_stage_full(args, out_dir, dirs, family_name,
 
         # ── Step 2: bedtools intersect ────────────────────────
         tmp_out = scratch / f"bt_overlaps_{os.getpid()}.tsv"
+        # Full-scan fallback (no index): -b is still a multi-GB .gz. Pipe it
+        # through multi-threaded `bgzip -d` so decompression isn't the
+        # single-threaded bottleneck of the streaming sweep.
+        _gz_fallback = intersect_b.endswith(".gz") and _shutil.which("bgzip")
         _cmd = ["bedtools","intersect",
-                "-a", str(v_bed), "-b", intersect_b,
+                "-a", str(v_bed), "-b", ("-" if _gz_fallback else intersect_b),
                 "-sorted", "-wa", "-wb"]
         print(f"\n  [Step 2/2] bedtools intersect")
-        print(f"    {' '.join(_cmd)}")
+        print(f"    {' '.join(_cmd)}"
+              + (f"   (-b via bgzip -d from {intersect_b})" if _gz_fallback else ""))
         _t_bt = time.time()
-        with open(tmp_out,"w") as _fo:
-            _proc = subprocess.run(_cmd, stdout=_fo, stderr=subprocess.PIPE)
+        if _gz_fallback:
+            _nthr = str(os.cpu_count() or 4)
+            with open(tmp_out,"w") as _fo:
+                _dec = subprocess.Popen(["bgzip","-d","-@",_nthr,"-c",intersect_b],
+                                        stdout=subprocess.PIPE)
+                _p = subprocess.Popen(_cmd, stdin=_dec.stdout, stdout=_fo,
+                                      stderr=subprocess.PIPE)
+                _dec.stdout.close()
+                _, _err = _p.communicate(); _dec.wait()
+            class _PR:  # minimal shim matching subprocess.run's result fields
+                returncode = _p.returncode
+                stderr = _err
+            _proc = _PR()
+        else:
+            with open(tmp_out,"w") as _fo:
+                _proc = subprocess.run(_cmd, stdout=_fo, stderr=subprocess.PIPE)
         _stderr = _proc.stderr.decode(errors="replace")
         print(f"    exit={_proc.returncode}  elapsed={time.time()-_t_bt:.1f}s")
         if _stderr.strip():

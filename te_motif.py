@@ -1210,6 +1210,111 @@ def _normalise_bed(src, dst, n_cols=6):
         raise
 
 
+def ensure_tabix_index(bed_gz, scratch=None):
+    """Guarantee a usable tabix index for a bgzipped, coordinate-sorted BED.
+
+    Returns the path to an indexed ``.bed.gz`` (the original when the index can
+    be built in place, or a scratch symlink/re-bgzipped copy when the source
+    dir is read-only or the source is plain gzip), or ``None`` if indexing is
+    impossible (no tabix/bgzip on PATH).
+
+    The index is built once and cached, so subsequent runs reuse it. This is
+    what turns the genome-wide JASPAR intersect from a full multi-GB streaming
+    scan into a few-MB ``tabix -R`` seek.
+    """
+    import subprocess, shutil
+    bed_gz = Path(bed_gz)
+    if shutil.which("tabix") is None or shutil.which("bgzip") is None:
+        log.info("tabix/bgzip not on PATH — cannot index %s (will full-scan)", bed_gz)
+        return None
+
+    def _has_index(p):
+        return Path(f"{p}.tbi").exists() or Path(f"{p}.csi").exists()
+
+    def _is_bgzip(p):
+        try:
+            with open(p, "rb") as f:
+                magic = f.read(4)
+            return len(magic) == 4 and magic[0] == 0x1f and magic[1] == 0x8b \
+                   and magic[2] == 0x08 and magic[3] == 0x04
+        except Exception:
+            return False
+
+    def _build(p):
+        """Index p in place; try .tbi then fall back to .csi (large coords)."""
+        for extra in ([], ["-C"]):
+            r = subprocess.run(["tabix", "-f", "-p", "bed", *extra, str(p)],
+                               capture_output=True, text=True)
+            if r.returncode == 0 and _has_index(p):
+                return True
+            log.debug("tabix %s failed for %s: %s",
+                      extra or ["tbi"], p, (r.stderr or "")[:300])
+        return False
+
+    # 1. Already indexed.
+    if _has_index(bed_gz):
+        return str(bed_gz)
+
+    nthreads = str(os.cpu_count() or 4)
+    tmp_dir = Path(scratch or os.environ.get("TMPDIR") or bed_gz.parent)
+
+    # 2. True BGZF + writable dir → index in place (common, cheap).
+    if _is_bgzip(bed_gz) and os.access(bed_gz.parent, os.W_OK):
+        if _build(bed_gz):
+            log.info("Built tabix index for %s", bed_gz)
+            return str(bed_gz)
+
+    # 3. True BGZF but read-only dir → symlink into scratch and index the link
+    #    (avoids copying a tens-of-GB file just to drop a tiny index).
+    if _is_bgzip(bed_gz):
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        link = tmp_dir / bed_gz.name
+        if _has_index(link):
+            return str(link)
+        try:
+            if link.exists() or link.is_symlink():
+                link.unlink()
+            os.symlink(bed_gz.resolve(), link)
+        except OSError:
+            shutil.copy2(bed_gz, link)  # symlinks unsupported on this FS
+        if _build(link):
+            log.info("Built tabix index via scratch symlink → %s.tbi", link)
+            return str(link)
+        return None
+
+    # 4. Plain gzip → decompress, coord-sort, re-bgzip once, then index.
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    cached = tmp_dir / (bed_gz.name if bed_gz.name.endswith(".bed.gz")
+                        else bed_gz.stem + ".sorted.bed.gz")
+    if _has_index(cached):
+        return str(cached)
+    log.info("Re-bgzipping plain-gzip %s (one-time) ...", bed_gz)
+    t0 = time.time()
+    try:
+        with open(cached, "wb") as fout:
+            p1 = subprocess.Popen(["zcat", str(bed_gz)], stdout=subprocess.PIPE)
+            p2 = subprocess.Popen(
+                ["sort", "-k1,1", "-k2,2n", "-S", "1G", "-T", str(tmp_dir)],
+                stdin=p1.stdout, stdout=subprocess.PIPE)
+            p1.stdout.close()
+            p3 = subprocess.Popen(["bgzip", "-@", nthreads, "-c"],
+                                  stdin=p2.stdout, stdout=fout)
+            p2.stdout.close()
+            p3.communicate(); p2.wait(); p1.wait()
+            if p3.returncode != 0:
+                raise RuntimeError(f"bgzip pipeline exit {p3.returncode}")
+    except Exception as exc:
+        log.warning("re-bgzip pipeline failed for %s: %s", bed_gz, exc)
+        cached.unlink(missing_ok=True)
+        return None
+    if _build(cached):
+        log.info("Built tabix index (re-bgzipped copy) in %.1fs → %s",
+                 time.time() - t0, cached)
+        return str(cached)
+    cached.unlink(missing_ok=True)
+    return None
+
+
 def bedtools_intersect_safe(v_bed, jaspar_bed, scratch=None):
     """Run bedtools intersect, writing output to a temp file to avoid OOM/SIGBUS.
 
@@ -1223,24 +1328,59 @@ def bedtools_intersect_safe(v_bed, jaspar_bed, scratch=None):
             rows = [str(x).rstrip("\n").split("\t") for x in self]
             return pd.DataFrame(rows, columns=names)
 
+    def _merge_loci(a, tmp_dir):
+        """Coord-sort + merge the -a loci into a compact, non-overlapping region
+        file used ONLY for the tabix region query (fewer redundant bgzip block
+        seeks). The original -a is still used for the final bedtools intersect,
+        so per-locus output rows are preserved. Falls back to raw -a if bedtools
+        merge is unavailable."""
+        if _shutil.which("bedtools") is None:
+            return str(a)
+        sorted_tmp = Path(tmp_dir) / f"loci_sorted_{os.getpid()}.bed"
+        merged = Path(tmp_dir) / f"loci_merged_{os.getpid()}.bed"
+        try:
+            with open(sorted_tmp, "w") as fh:
+                subprocess.run(
+                    ["sort", "-k1,1", "-k2,2n", "-T", str(tmp_dir), str(a)],
+                    stdout=fh, env=dict(os.environ, LC_ALL="C"), check=True)
+            with open(merged, "w") as fh:
+                subprocess.run(["bedtools", "merge", "-i", str(sorted_tmp)],
+                               stdout=fh, check=True)
+            sorted_tmp.unlink(missing_ok=True)
+            if merged.stat().st_size > 0:
+                return str(merged)
+        except Exception as exc:
+            log.debug("loci merge failed (%s); using raw -a for tabix", exc)
+        sorted_tmp.unlink(missing_ok=True)
+        merged.unlink(missing_ok=True)
+        return str(a)
+
     def _tabix_subset(a, b):
         if not str(b).endswith(".gz"):
             return b
         if _shutil.which("tabix") is None:
             log.info("tabix not found; bedtools will scan full JASPAR BED")
             return b
-        if not Path(f"{b}.tbi").exists():
-            log.info("tabix index not found for %s; bedtools will scan full JASPAR BED", b)
+        # Build the index on demand (cached) so we always seek, never stream the
+        # whole multi-GB file. ensure_tabix_index may relocate to scratch.
+        indexed = ensure_tabix_index(b, scratch=scratch)
+        if indexed is None:
+            log.warning("Could not index %s; bedtools will scan the full BED "
+                        "(slow). Install tabix/bgzip to enable fast seeks.", b)
             return b
+        b = indexed
 
         tmp_dir = scratch or os.environ.get("TMPDIR") or str(Path(a).parent)
+        region_bed = _merge_loci(a, tmp_dir)
         subset = Path(tmp_dir) / f"jaspar_subset_{os.getpid()}.bed"
-        cmd = ["tabix", "-R", str(a), str(b)]
+        cmd = ["tabix", "-R", str(region_bed), str(b)]
         log.info("Subsetting indexed JASPAR BED with tabix before bedtools ...")
         log.debug("tabix command: %s", " ".join(cmd))
         t0 = time.time()
         with open(subset, "w") as fh:
             proc = subprocess.run(cmd, stdout=fh, stderr=subprocess.PIPE, text=True)
+        if region_bed != str(a):
+            Path(region_bed).unlink(missing_ok=True)
         if proc.returncode != 0:
             subset.unlink(missing_ok=True)
             log.warning("tabix subset failed; falling back to full JASPAR BED: %s",
@@ -1284,14 +1424,34 @@ def bedtools_intersect_safe(v_bed, jaspar_bed, scratch=None):
         tmp_dir = scratch or os.environ.get("TMPDIR") or str(Path(a).parent)
         tmp_out = Path(tmp_dir) / f"bedtools_overlaps_{os.getpid()}.tsv"
         a_use = _sort_a(a) if sorted_stream else str(a)
-        cmd = ["bedtools", "intersect", "-a", a_use, "-b", str(b), "-wa", "-wb"]
+
+        # Full-scan fallback (no usable index): -b is still a multi-GB .gz.
+        # Pipe through multi-threaded bgzip -d so decompression — the real
+        # bottleneck of the streaming sweep — isn't single-threaded.
+        gz_fallback = (str(b).endswith(".gz")
+                       and _shutil.which("bgzip") is not None)
+        cmd = ["bedtools", "intersect", "-a", a_use,
+               "-b", ("-" if gz_fallback else str(b)), "-wa", "-wb"]
         if sorted_stream:
             cmd.append("-sorted")
-        log.debug("bedtools CLI command: %s", " ".join(cmd))
+        log.debug("bedtools CLI command: %s%s", " ".join(cmd),
+                  f"  (b piped via bgzip -d from {b})" if gz_fallback else "")
         log.debug("bedtools output temp file: %s", tmp_out)
         t0 = time.time()
-        with open(tmp_out, "w") as fh:
-            proc = subprocess.run(cmd, stdout=fh, stderr=subprocess.PIPE)
+        if gz_fallback:
+            nthreads = str(os.cpu_count() or 4)
+            with open(tmp_out, "w") as fh:
+                dec = subprocess.Popen(["bgzip", "-d", "-@", nthreads, "-c", str(b)],
+                                       stdout=subprocess.PIPE)
+                proc = subprocess.Popen(cmd, stdin=dec.stdout, stdout=fh,
+                                        stderr=subprocess.PIPE)
+                dec.stdout.close()
+                _, _stderr_b = proc.communicate()
+                dec.wait()
+                proc.stderr = _stderr_b  # normalise for the shared code below
+        else:
+            with open(tmp_out, "w") as fh:
+                proc = subprocess.run(cmd, stdout=fh, stderr=subprocess.PIPE)
         elapsed = time.time() - t0
         stderr_text = proc.stderr.decode(errors="replace")
         if a_use != str(a):
