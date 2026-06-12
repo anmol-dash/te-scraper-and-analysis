@@ -485,11 +485,12 @@ def stage_alignment(py, sdir, clustered, out_dir, family):
     return ("alignment", _run(cmd, out_dir / "log_alignment.txt"))
 
 
-def stage_grna(py, sdir, clustered, out_dir, family):
+def stage_grna(py, sdir, clustered, out_dir, family, grna_len=18, n_workers=4):
     rdir = out_dir / "grna"
     rdir.mkdir(parents=True, exist_ok=True)
     cmd = [py, str(sdir / "run_grna_analysis.py"), "--input", str(clustered),
-           "--reports-dir", str(rdir), "--family", family, "--n-greedy", "5"]
+           "--reports-dir", str(rdir), "--family", family, "--n-greedy", "5",
+           "--grna-len", str(grna_len), "--n-workers", str(n_workers)]
     return ("grna", _run(cmd, out_dir / "log_grna.txt"))
 
 
@@ -587,6 +588,10 @@ def parse_args():
                    default="phylo,subfamily,divergence,ltr_struct,motif_gain,fold,expression,grna",
                    help="Comma list of reagent-relevant Stage-11 modules.")
     p.add_argument("--max-workers", type=int, default=4)
+    p.add_argument("--grna-len", type=int, default=18,
+                   help="gRNA spacer length passed to run_grna_analysis (default: 18)")
+    p.add_argument("--grna-workers", type=int, default=4,
+                   help="Parallel workers for PAM extraction inside run_grna_analysis (default: 4)")
     p.add_argument("--skip-stage11", action="store_true")
     p.add_argument("--skip-clustering", action="store_true",
                    help="Resume from existing clustered CSV + cluster_info.json; "
@@ -661,7 +666,7 @@ def main():
         futures[ex.submit(stage_alignment, py, sdir, clustered_csv, out_dir,
                           args.family)] = "alignment"
         futures[ex.submit(stage_grna, py, sdir, clustered_csv, out_dir,
-                          args.family)] = "grna"
+                          args.family, args.grna_len, args.grna_workers)] = "grna"
         for fut in as_completed(list(futures)):
             name, rc = fut.result()
             status = "ok" if rc == 0 else f"FAILED rc={rc}"

@@ -36,6 +36,7 @@ import os
 import sys
 import warnings
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 warnings.filterwarnings("ignore")
@@ -168,6 +169,16 @@ def extract_pam_grnas(seq, grna_len=20, cas="SpCas9"):
     return results
 
 
+def _extract_chunk(args):
+    """Worker: extract PAM gRNAs for a chunk of (ridx, seq) pairs."""
+    ridx_list, seq_list, grna_len, cas = args
+    out = []
+    for ridx, seq in zip(ridx_list, seq_list):
+        for grna, strand, pos in extract_pam_grnas(seq, grna_len=grna_len, cas=cas):
+            out.append((grna, ridx, strand, pos))
+    return out
+
+
 # ── on-target quality scoring ─────────────────────────────────────────────────
 
 def on_target_score(grna: str) -> float:
@@ -201,8 +212,8 @@ def on_target_score(grna: str) -> float:
     if g[0] == "T":
         score *= 0.85
 
-    # Seed region GC (last 12 bp, positions 8–19 for 20-mer)
-    seed = g[8:] if n >= 20 else g
+    # Seed region GC (last 12 bp adjacent to PAM, regardless of guide length)
+    seed = g[-12:] if n >= 12 else g
     seed_gc = (seed.count("G") + seed.count("C")) / len(seed)
     if seed_gc < 0.30 or seed_gc > 0.80:
         score *= 0.75
@@ -291,7 +302,7 @@ def coverage_with_mismatches(grna: str, kmer_to_rows: dict,
 # ── candidate scoring ─────────────────────────────────────────────────────────
 
 def score_candidates(df, grna_len=20, cas="SpCas9", kmer_index=None,
-                     expr_col="_total_expr") -> pd.DataFrame:
+                     expr_col="_total_expr", n_workers=1) -> pd.DataFrame:
     """For each unique PAM-adjacent gRNA candidate, compute coverage metrics.
 
     Returns DataFrame with columns:
@@ -301,7 +312,7 @@ def score_candidates(df, grna_len=20, cas="SpCas9", kmer_index=None,
         pct_seq_cov, pct_expr_cov,
         rows_exact (frozenset of locus indices)
     """
-    _pp(f"  Extracting PAM-adjacent gRNA candidates ({cas}, len={grna_len})...")
+    _pp(f"  Extracting PAM-adjacent gRNA candidates ({cas}, len={grna_len}, workers={n_workers})...")
     seqs = df["Seq"].astype(str).str.upper().tolist()
     total_expr = df[expr_col].values
 
@@ -310,11 +321,17 @@ def score_candidates(df, grna_len=20, cas="SpCas9", kmer_index=None,
     cand_to_positions = defaultdict(list)  # grna → list of (row_idx, strand, pos)
 
     n = len(seqs)
-    for ridx, seq in enumerate(seqs):
-        if (ridx + 1) % 500 == 0:
-            _pp(f"    {ridx+1}/{n} sequences processed...")
-        for grna, strand, pos in extract_pam_grnas(seq, grna_len=grna_len, cas=cas):
-            cand_to_positions[grna].append((ridx, strand, pos))
+    ridx_list = list(range(n))
+    chunk_size = max(1, (n + n_workers - 1) // n_workers)
+    chunks = [
+        (ridx_list[i:i+chunk_size], seqs[i:i+chunk_size], grna_len, cas)
+        for i in range(0, n, chunk_size)
+    ]
+    with ProcessPoolExecutor(max_workers=n_workers) as ex:
+        for chunk_result in ex.map(_extract_chunk, chunks):
+            for grna, ridx, strand, pos in chunk_result:
+                cand_to_positions[grna].append((ridx, strand, pos))
+    _pp(f"    extraction complete ({n} sequences across {len(chunks)} chunks)")
 
     _pp(f"  {len(cand_to_positions):,} unique PAM-adjacent gRNA candidates")
 
@@ -792,8 +809,8 @@ def parse_args():
                    help="Output directory for figures and measured_values.tex")
     p.add_argument("--family",      default="MT2_Mm",
                    help="Family name for plot titles")
-    p.add_argument("--grna-len",    type=int, default=20,
-                   help="gRNA spacer length (default: 20)")
+    p.add_argument("--grna-len",    type=int, default=18,
+                   help="gRNA spacer length (default: 18)")
     p.add_argument("--cas",         default="SpCas9",
                    choices=list(_PAM_TYPES.keys()),
                    help="Cas protein / PAM type (default: SpCas9)")
@@ -808,6 +825,8 @@ def parse_args():
                         f"{GLOBAL_MM_INDEX_MAX_SEQS} sequences to avoid OOM; "
                         "exact coverage (used everywhere downstream) is "
                         "unaffected.")
+    p.add_argument("--n-workers", type=int, default=4,
+                   help="Parallel workers for PAM extraction (default: 4)")
     return p.parse_args()
 
 
@@ -824,6 +843,7 @@ def main():
     _pp(f"  Input:    {args.input}")
     _pp(f"  Cas:      {args.cas}  PAM: {_PAM_TYPES[args.cas][0]}")
     _pp(f"  gRNA len: {args.grna_len} bp")
+    _pp(f"  Workers:  {args.n_workers}")
     _pp(f"  Reports:  {reports_dir}")
     _pp("=" * 60)
 
@@ -855,6 +875,7 @@ def main():
     df_cands = score_candidates(
         df, grna_len=args.grna_len, cas=args.cas,
         kmer_index=kmer_index, expr_col="_total_expr",
+        n_workers=args.n_workers,
     )
 
     if df_cands.empty:
