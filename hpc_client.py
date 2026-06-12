@@ -1466,6 +1466,7 @@ echo "  Input data: OK ({quoted})"'''
             "te_go.py",
             "te_expression.py",
             "te_enrichment.py",
+            "te_notify.py",
             "te_fast.pyx",
             "setup_cython.py",
             "ui.py",
@@ -3264,6 +3265,24 @@ exit $EXIT_CODE
 
     # ── te_prep / te_enrichment remote launchers ────────────────────────────
 
+    def _send_completion_email_ssh(self, label: str, exit_code: int) -> None:
+        """Fire a completion email from the cluster for an SSH-run (non-bsub) command.
+
+        Uses the same Resend / HTTPS-proxy path as the batch job notification.
+        Silently skips if NOTIFY_EMAIL is not set or no API key is configured.
+        """
+        notify_to = str(self.params.get("NOTIFY_EMAIL", "")).strip()
+        if not notify_to:
+            return
+        result_word = "SUCCEEDED" if exit_code == 0 else f"FAILED (exit {exit_code})"
+        subject = f"GAMECA {label}: {result_word}"
+        body = f"{label} {result_word}."
+        block = self._email_notify_block(notify_to, subject, body)
+        if not block:
+            return
+        print("  Sending completion email...")
+        self.run_command(block, timeout=30)
+
     def _run_te_prep_interactive(self):
         """Interactively configure and run te_prep on the cluster."""
         print("\n" + "=" * 60)
@@ -3289,6 +3308,7 @@ exit $EXIT_CODE
         if err:
             print("[stderr]", err[:500])
         print("Exit code:", code)
+        self._send_completion_email_ssh(f"te_prep {family or build}", code)
 
     def _run_te_enrichment_interactive(self):
         """Interactively configure and run te_enrichment on the cluster."""
@@ -3321,6 +3341,7 @@ exit $EXIT_CODE
         if err:
             print("[stderr]", err[:500])
         print("Exit code:", code)
+        self._send_completion_email_ssh(f"te_enrichment {family}", code)
 
     def generate_clustering_plots(self):
         """Generate clustering plots after analysis."""

@@ -29,6 +29,9 @@ import sys
 import tempfile
 from pathlib import Path
 
+# Ensure sibling modules (te_notify, etc.) are importable regardless of cwd
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import numpy as np
 import pandas as pd
 
