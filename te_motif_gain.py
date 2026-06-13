@@ -94,7 +94,7 @@ def _fetch_dfam_consensus(family_name: str, build: str = "hg38",
         try:
             url = f"{base}/families?name={urllib.request.quote(name_try)}&format=json&limit=1"
             req = urllib.request.Request(url, headers={"User-Agent": "GAMECA/1.0"})
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with urllib.request.urlopen(req) as r:
                 data = json.loads(r.read())
             hits = data.get("results", [])
             if not hits:
@@ -104,7 +104,7 @@ def _fetch_dfam_consensus(family_name: str, build: str = "hg38",
                 continue
             seq_url = f"{base}/families/{acc}/sequence?format=json"
             req2 = urllib.request.Request(seq_url, headers={"User-Agent": "GAMECA/1.0"})
-            with urllib.request.urlopen(req2, timeout=timeout) as r2:
+            with urllib.request.urlopen(req2) as r2:
                 seq_data = json.loads(r2.read())
             seq = (seq_data.get("sequence") or seq_data.get("cons_seq") or "").strip().upper()
             if len(seq) >= 20:

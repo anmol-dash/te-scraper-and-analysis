@@ -41,7 +41,7 @@ def _chroms_via_bigbedinfo(bigbedinfo, bb):
         return []
     try:
         r = subprocess.run([bigbedinfo, "-chromList", str(bb)],
-                           capture_output=True, text=True, timeout=120)
+                           capture_output=True, text=True)
         if r.returncode != 0:
             return []
         chroms = []

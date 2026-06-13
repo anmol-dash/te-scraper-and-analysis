@@ -89,7 +89,7 @@ def bedtools_intersect_count(loci_bed: Path, ann_bed: str) -> dict:
         try:
             res = subprocess.run(
                 ["bedtools", "intersect", "-a", str(loci_bed), "-b", ann_bed, "-c"],
-                capture_output=True, text=True, timeout=600)
+                capture_output=True, text=True)
         except Exception as e:                                   # noqa: BLE001
             pp(f"    bedtools intersect failed: {e}")
             return {}
@@ -113,12 +113,12 @@ def bedtools_closest_distance(loci_bed: Path, ref_bed: str) -> dict:
         sorted_ref = Path(td) / "ref.sorted.bed"
         try:
             subprocess.run(f"sort -k1,1 -k2,2n {loci_bed} > {sorted_loci}",
-                           shell=True, check=True, timeout=120)
+                           shell=True, check=True)
             subprocess.run(f"sort -k1,1 -k2,2n {ref_bed} > {sorted_ref}",
-                           shell=True, check=True, timeout=120)
+                           shell=True, check=True)
             res = subprocess.run(
                 ["bedtools", "closest", "-d", "-a", str(sorted_loci), "-b", str(sorted_ref)],
-                capture_output=True, text=True, timeout=600)
+                capture_output=True, text=True)
         except Exception as e:                                   # noqa: BLE001
             pp(f"    bedtools closest failed: {e}")
             return {}
@@ -142,7 +142,7 @@ def liftover(loci_bed: Path, chain: str, liftover_cmd: str = "liftOver") -> tupl
         try:
             res = subprocess.run(
                 [liftover_cmd, str(loci_bed), chain, str(mapped), str(unmapped)],
-                capture_output=True, text=True, timeout=900)
+                capture_output=True, text=True)
         except Exception as e:                                   # noqa: BLE001
             pp(f"    liftOver failed: {e}")
             return set(), set(), False
@@ -232,7 +232,7 @@ def encode_search_url(assay_title: str, biosample: str,
             "Accept": "application/json",
             "User-Agent": "GAMECA/0.4 genomics-research-tool",
         })
-        with urllib.request.urlopen(req, timeout=20) as r:
+        with urllib.request.urlopen(req) as r:
             data = json.loads(r.read())
         hits = data.get("@graph", [])
         if not hits:

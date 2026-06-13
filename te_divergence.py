@@ -110,68 +110,92 @@ def kimura2p_cpg(seq_ref, seq_query, cpg_omega=10.0):
 # ── Pairwise alignment ──────────────────────────────────────────────────────
 
 def _align_pair(seq_a, seq_b):
-    """Align two DNA sequences and return (aligned_a, aligned_b).
+    """Locally align two DNA sequences with Biopython. Returns (aligned_a, aligned_b)
+    or None if no real alignment can be produced.
 
-    Uses Biopython PairwiseAligner (DNA) if available, otherwise falls back
-    to a simple diagonal comparison (for near-identical sequences).
+    NEVER pads/pseudo-aligns: a None result makes the caller record NaN rather
+    than a fabricated divergence. Local mode lets a truncated copy align to its
+    homologous stretch of the consensus without end-gap penalties.
     """
     seq_a = seq_a.upper()
     seq_b = seq_b.upper()
     try:
         from Bio import Align as _BA
-        aligner = _BA.PairwiseAligner()
-        aligner.mode               = "global"
-        aligner.match_score        = 2
-        aligner.mismatch_score     = -1
-        aligner.open_gap_score     = -5
-        aligner.extend_gap_score   = -0.5
-        alignments = aligner.align(seq_a, seq_b)
-        aln = next(iter(alignments))
-        # Extract aligned strings
-        a_str = str(aln).split("\n")[0].upper()
-        b_str = str(aln).split("\n")[2].upper() if len(str(aln).split("\n")) > 2 else seq_b
-        # If the Biopython string format changed, fall back to coordinates
-        if len(a_str) != len(b_str):
-            return _fallback_align(seq_a, seq_b)
-        return a_str, b_str
-    except Exception:
-        return _fallback_align(seq_a, seq_b)
-
-
-def _fallback_align(seq_a, seq_b):
-    """Pad shorter sequence to same length for approximate divergence."""
-    la, lb = len(seq_a), len(seq_b)
-    if la == lb:
-        return seq_a, seq_b
-    if la < lb:
-        return seq_a + "N" * (lb - la), seq_b
-    return seq_a, seq_b + "N" * (la - lb)
+    except ImportError as e:
+        raise RuntimeError(
+            "Biopython is required for divergence alignment (pip install biopython). "
+            "Refusing to pseudo-align.") from e
+    aligner = _BA.PairwiseAligner()
+    aligner.mode               = "local"
+    aligner.match_score        = 2
+    aligner.mismatch_score     = -1
+    aligner.open_gap_score     = -5
+    aligner.extend_gap_score   = -0.5
+    try:
+        aln = aligner.align(seq_a, seq_b)[0]
+        a_str = str(aln[0]).upper()
+        b_str = str(aln[1]).upper()
+    except Exception:               # noqa: BLE001 — any failure → NaN, never pad
+        return None
+    if len(a_str) != len(b_str):
+        return None
+    return a_str, b_str
 
 
 # ── Consensus building ──────────────────────────────────────────────────────
 
-def _majority_vote_consensus(seqs):
-    """Build majority-vote consensus from a list of unaligned sequences.
+def _majority_vote_consensus(seqs, sample_n=400):
+    """Build a majority-vote consensus from a REAL MAFFT alignment of the sequences.
 
-    Pads all sequences to the median length, then takes the most common
-    nucleotide at each position.
+    Subsamples up to `sample_n` representative sequences (MAFFT does not scale to
+    tens of thousands), aligns them with MAFFT, and takes the per-column majority.
+    Raises RuntimeError if MAFFT is unavailable or fails — we never pad/pseudo-align.
     """
+    import shutil
+    import subprocess
+    import tempfile
+    from collections import Counter
+
     seqs = [s.upper() for s in seqs if s and set(s.upper()) - {"N"}]
     if not seqs:
         return ""
-    lengths = [len(s) for s in seqs]
-    target = int(np.median(lengths))
-    padded = [s[:target].ljust(target, "N") if len(s) >= target
-              else s + "N" * (target - len(s)) for s in seqs]
-    consensus = []
-    for i in range(target):
-        col = [s[i] for s in padded if s[i] != "N"]
-        if col:
-            from collections import Counter
-            consensus.append(Counter(col).most_common(1)[0][0])
+    if len(seqs) == 1:
+        return seqs[0]
+    if len(seqs) > sample_n:
+        idx = np.linspace(0, len(seqs) - 1, sample_n).astype(int)
+        seqs = [seqs[i] for i in sorted(set(idx))]
+
+    exe = shutil.which("mafft")
+    if not exe:
+        raise RuntimeError(
+            "mafft not found on PATH — cannot build a real consensus and will not "
+            "pseudo-align. Install MAFFT or provide --consensus-fasta.")
+    with tempfile.TemporaryDirectory() as td:
+        fin = Path(td) / "in.fa"
+        fin.write_text("".join(f">s{i}\n{s}\n" for i, s in enumerate(seqs)))
+        res = subprocess.run([exe, "--auto", "--quiet", str(fin)],
+                             capture_output=True, text=True)
+    if res.returncode != 0:
+        raise RuntimeError(f"mafft failed ({res.returncode}): {res.stderr.strip()[:200]}")
+
+    aligned, cur = [], []
+    for line in res.stdout.splitlines():
+        if line.startswith(">"):
+            if cur:
+                aligned.append("".join(cur)); cur = []
         else:
-            consensus.append("N")
-    return "".join(consensus)
+            cur.append(line.strip().upper())
+    if cur:
+        aligned.append("".join(cur))
+    if not aligned:
+        raise RuntimeError("mafft produced no alignment output.")
+
+    L = max(len(s) for s in aligned)
+    consensus = []
+    for i in range(L):
+        col = [s[i] for s in aligned if i < len(s) and s[i] in "ACGT"]
+        consensus.append(Counter(col).most_common(1)[0][0] if col else "N")
+    return "".join(consensus).replace("-", "")
 
 
 def _load_consensuses(consensus_fasta):
@@ -277,7 +301,13 @@ def run_divergence_analysis(input_csv, reports_dir, family_name,
             pct_cpg.append(np.nan)
             continue
 
-        a_ref, a_qry = _align_pair(cons, seq)
+        pair = _align_pair(cons, seq)
+        if pair is None:
+            k2p_vals.append(np.nan)
+            aln_lens.append(0)
+            pct_cpg.append(np.nan)
+            continue
+        a_ref, a_qry = pair
         div = kimura2p_cpg(a_ref, a_qry, cpg_omega=cpg_omega)
         k2p_vals.append(div * 100 if div is not None else np.nan)
 

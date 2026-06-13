@@ -46,10 +46,12 @@ def _build_modules(args, cons_fa: Path):
 
     return [
         ("phylo",         "run_phylo_analysis.py",
-         ["--subst-rate", str(args.subst_rate),
+         ["--assembly", asm,
           "--clock-divisor", str(args.clock_divisor),
           "--intact-orf-aa", str(args.intact_orf_aa)]
-         + _opt("--mafft-cmd", args.mafft_cmd)),
+         + _opt("--subst-rate", args.subst_rate)
+         + _opt("--mafft-cmd", args.mafft_cmd)
+         + _cons),
         ("grna",          "run_grna_offtarget.py",
          ["--cas", str(args.grna_cas), "--max-mm", str(args.grna_max_mm)]
          + _opt("--background", args.grna_background)),
@@ -111,8 +113,10 @@ def main():
     p.add_argument("--skip", default=None,
                    help="Comma-separated module names to skip.")
     # Module knobs (default None → each module's own default, matching query.py).
-    p.add_argument("--subst-rate", default="2.2e-9")
-    p.add_argument("--clock-divisor", default="2")
+    p.add_argument("--subst-rate", default=None,
+                   help="Override neutral substitution rate; default is derived from "
+                        "--assembly (hg38≈2.2e-9, mm10/mm39≈4.5e-9).")
+    p.add_argument("--clock-divisor", default="1")
     p.add_argument("--intact-orf-aa", default="100")
     p.add_argument("--mafft-cmd", default=None)
     p.add_argument("--grna-cas", default="SpCas9")

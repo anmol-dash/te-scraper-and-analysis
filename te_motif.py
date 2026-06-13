@@ -160,13 +160,13 @@ def _curl_download(url, dest, timeout=120):
     any detected proxy explicitly. Returns True on success."""
     import subprocess
     proxy = _apply_network_env()
-    cmd = ["curl", "-fsSL", "--connect-timeout", "10",
-           "--max-time", str(timeout), "-o", str(dest)]
+    cmd = ["curl", "-fsSL", 
+           "-o", str(dest)]
     if proxy:
         cmd += ["--proxy", proxy]
     cmd.append(url)
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 30)
+        r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode == 0 and Path(dest).exists() and Path(dest).stat().st_size > 0:
             return True
         log.warning("curl download failed (%s): rc=%s %s",
@@ -226,12 +226,12 @@ def jaspar_source_reachable(build):
     url = JASPAR_BIGBED_URLS.get(build) or (CMMT_BASE_URL + "/")
     proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
     # 1. curl HEAD
-    cmd = ["curl", "-sI", "--connect-timeout", "8", "--max-time", "15"]
+    cmd = ["curl", "-sI"]
     if proxy:
         cmd += ["--proxy", proxy]
     cmd.append(url)
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
+        r = subprocess.run(cmd, capture_output=True, text=True)
         first = (r.stdout or "").splitlines()[:1]
         if r.returncode == 0 and first and any(c in first[0] for c in ("200", "206", "301", "302", "403")):
             return True
@@ -242,7 +242,7 @@ def jaspar_source_reachable(build):
         import urllib.request
         req = urllib.request.Request(url, method="HEAD",
                                      headers={"User-Agent": "te_motif/1.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req) as resp:
             return 200 <= resp.status < 400
     except Exception as exc:
         log.info("JASPAR source not reachable via urllib either: %s", exc)
@@ -415,7 +415,7 @@ def _get_bigbed_to_bed(jaspar_dir):
     try:
         import requests
         _apply_network_env()
-        with requests.get(url, stream=True, timeout=60) as r:
+        with requests.get(url, stream=True) as r:
             r.raise_for_status()
             with open(exe, "wb") as fh:
                 for chunk in r.iter_content(chunk_size=1024 * 1024):
@@ -496,7 +496,7 @@ def _ensure_pybigtools():
     )
     for cmd in attempts:
         try:
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            res = subprocess.run(cmd, capture_output=True, text=True)
             if res.returncode != 0:
                 log.warning("  pip install failed: %s",
                             (res.stderr or res.stdout)[-300:])
@@ -609,9 +609,9 @@ def _install_wheel_via_curl(pkg):
     cmd = [sys.executable, "-m", "pip", "install", "--quiet",
            "--disable-pip-version-check", "--no-index", str(wheel)]
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        res = subprocess.run(cmd, capture_output=True, text=True)
         if res.returncode != 0:
-            res = subprocess.run(cmd + ["--user"], capture_output=True, text=True, timeout=300)
+            res = subprocess.run(cmd + ["--user"], capture_output=True, text=True)
         if res.returncode == 0:
             log.info("  Installed %s from local wheel.", pkg)
             return True
@@ -667,7 +667,7 @@ def _build_locus_jaspar_bed_from_bigbed(build, jaspar_dir, loci_bed):
             _ex = _cf.ThreadPoolExecutor(max_workers=1)
             _fut = _ex.submit(_query_bigbed_pybigtools, bb_url, loci, out)
             try:
-                total = _fut.result(timeout=300)
+                total = _fut.result()
             except _cf.TimeoutError:
                 log.warning("  pybigtools bigBed query timed out (>300s)")
                 total = 0
@@ -765,7 +765,7 @@ def _list_cmmt_files(build):
     import re, urllib.request
     url = f"{CMMT_BASE_URL}/{build}/"
     req = urllib.request.Request(url, headers={"User-Agent": "te_motif/1.0"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with urllib.request.urlopen(req) as resp:
         html = resp.read().decode("utf-8", errors="replace")
     # Match href with single or double quotes; strip any leading path component
     files = re.findall(r"""href=["'](?:[^"']*/)?(MA\d+[\w.]+\.tsv\.gz)["']""", html)
@@ -870,7 +870,7 @@ def _download_cmmt_per_motif(build, jaspar_dir, loci_bed=None):
         rows = []
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "te_motif/1.0"})
-            with urllib.request.urlopen(req, timeout=180) as resp:
+            with urllib.request.urlopen(req) as resp:
                 with gzip.open(resp, "rt", encoding="utf-8", errors="replace") as gz:
                     for line in gz:
                         parts = line.rstrip("\n").split("\t")
@@ -985,7 +985,7 @@ def _download_jaspar_bulk_bed(build, jaspar_dir, loci_bed=None):
         t0 = time.time()
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "te_motif/1.0"})
-            with urllib.request.urlopen(req, timeout=900) as resp, \
+            with urllib.request.urlopen(req) as resp, \
                  open(raw_gz, "wb") as fh:
                 _sh.copyfileobj(resp, fh)
             mb = raw_gz.stat().st_size / 1e6

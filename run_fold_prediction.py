@@ -290,16 +290,41 @@ def find_colabfold(cmd_override: str = "") -> str:
     return ""
 
 
-def _auto_install_colabfold() -> str:
-    """Install colabfold_batch if missing. Tries pip first, then localColabFold installer."""
-    # ── 1. pip install colabfold (fast, ~500 MB) ──────────────────────────────
-    _pp("colabfold_batch not found — installing via pip (colabfold[alphafold-minus-data])...")
+def _alphafold_importable() -> bool:
+    """True if the `alphafold` module can be imported (required by colabfold_batch)."""
+    try:
+        r = subprocess.run([sys.executable, "-c", "import alphafold"],
+                           capture_output=True, text=True)
+        return r.returncode == 0
+    except Exception:               # noqa: BLE001
+        return False
+
+
+def _pip_install_colabfold_alphafold() -> bool:
+    """pip install colabfold WITH the full alphafold extra. Returns True on success."""
+    _pp("Installing colabfold[alphafold] via pip (this pulls in the alphafold module)...")
     try:
         r = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--quiet",
-             "colabfold[alphafold-minus-data]>=1.5.5"],
-            timeout=300,
-        )
+            [sys.executable, "-m", "pip", "install", "--upgrade",
+             "colabfold[alphafold]>=1.5.5"])
+        return r.returncode == 0
+    except Exception as exc:        # noqa: BLE001
+        _pp(f"  pip install colabfold[alphafold] failed: {exc}")
+        return False
+
+
+def _auto_install_colabfold() -> str:
+    """Install colabfold_batch if missing. Tries pip first, then localColabFold installer.
+
+    Installs the FULL `colabfold[alphafold]` extra (not alphafold-minus-data) so the
+    `alphafold` module colabfold_batch imports is actually present.
+    """
+    # ── 1. pip install colabfold[alphafold] (fast, ~500 MB) ───────────────────
+    _pp("colabfold_batch not found — installing via pip (colabfold[alphafold])...")
+    try:
+        r = subprocess.run(
+            [sys.executable, "-m", "pip", "install",
+             "colabfold[alphafold]>=1.5.5"])
         if r.returncode == 0:
             found = shutil.which("colabfold_batch")
             if found:
@@ -325,7 +350,7 @@ def _auto_install_colabfold() -> str:
     home = os.path.expanduser("~")
     installer = os.path.join(home, "install_colabfold_linux.sh")
     try:
-        r = subprocess.run(["wget", "-q", "-O", installer, installer_url], timeout=60)
+        r = subprocess.run(["wget", "-q", "-O", installer, installer_url])
         if r.returncode != 0:
             _pp("ERROR: failed to download localColabFold installer")
             return ""
@@ -778,10 +803,23 @@ def main():
     if not cf_cmd:
         cf_cmd = _auto_install_colabfold()
     if not cf_cmd:
-        _pp("WARNING: colabfold_batch not found and auto-install failed — skipping structure prediction.")
-        _pp("  Pass --colabfold-cmd /path/to/colabfold_batch to enable folding.")
+        _pp("FATAL: colabfold_batch not found and auto-install failed.")
+        _pp("  Tried: pip install colabfold[alphafold]  and  localColabFold installer.")
+        _pp("  Pass --colabfold-cmd /path/to/colabfold_batch, or install ColabFold manually.")
+        sys.exit(3)
     else:
         _pp(f"ColabFold found: {cf_cmd}")
+        # colabfold_batch imports the `alphafold` module at runtime — verify it's
+        # actually present (the previous run failed here with the binary present but
+        # the module missing). Force-install it; terminate if it still can't load.
+        if not _alphafold_importable():
+            _pp("  `alphafold` module not importable — installing colabfold[alphafold]...")
+            _pip_install_colabfold_alphafold()
+            if not _alphafold_importable():
+                _pp("FATAL: `alphafold` module could not be installed; colabfold_batch "
+                    "cannot run. Aborting fold prediction (no fake structures emitted).")
+                sys.exit(3)
+            _pp("  alphafold module now importable.")
         already_done = (not args.force and cf_dir.exists()
                         and any(cf_dir.glob("*.pdb")))
         if already_done:

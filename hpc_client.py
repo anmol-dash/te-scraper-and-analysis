@@ -299,7 +299,7 @@ target="/tmp/__USER___gameca"
 mkdir -p "$target" >/dev/null 2>&1 && printf '%s\n' "$target" && exit 0
 exit 1
 '''.replace("__USER__", username)
-        out, err, code = self.run_command(probe, timeout=30)
+        out, err, code = self.run_command(probe)
         if code == 0 and out.strip():
             selected = out.strip().splitlines()[-1]
             if selected.startswith("/tmp/"):
@@ -313,7 +313,7 @@ exit 1
             "Warning: could not auto-detect a shared work directory; "
             f"falling back to {fallback}."
         )
-        self.run_command(f"mkdir -p {shlex.quote(fallback)}", timeout=30)
+        self.run_command(f"mkdir -p {shlex.quote(fallback)}")
         return fallback
 
     def _try_remote_work_dir(self, candidate: str) -> bool:
@@ -321,7 +321,6 @@ exit 1
             return False
         out, err, code = self.run_command(
             f"mkdir -p {shlex.quote(candidate)} && [ -d {shlex.quote(candidate)} ] && [ -w {shlex.quote(candidate)} ] && echo OK",
-            timeout=30,
         )
         if code == 0 and "OK" in out:
             return True
@@ -463,7 +462,7 @@ exit 1
             ]
             result = _subprocess.run(
                 cmd, env=env, capture_output=True,
-                timeout=timeout, stdin=_subprocess.DEVNULL,
+                stdin=_subprocess.DEVNULL,
             )
             if result.returncode == 0:
                 return True
@@ -486,7 +485,6 @@ exit 1
         """
         try:
             channel = self._transport.open_session()
-            channel.settimeout(timeout)
             channel.exec_command(f"scp -f {shlex.quote(remote_path)}")
 
             channel.sendall(b"\x00")  # signal: ready
@@ -532,7 +530,7 @@ exit 1
     def _detect_scheduler(self):
         """Auto-detect LSF (bsub) or Slurm (sbatch) on the remote host."""
         for sched, cmd in [("lsf", "command -v bsub"), ("slurm", "command -v sbatch")]:
-            out, _, code = self.run_command(cmd, timeout=10)
+            out, _, code = self.run_command(cmd)
             if code == 0 and out.strip():
                 return sched
         return None
@@ -540,7 +538,7 @@ exit 1
     def _detect_python(self):
         """Return the name of the available python binary on the remote host."""
         for binary in ("python3", "python"):
-            out, _, code = self.run_command(f"command -v {binary}", timeout=10)
+            out, _, code = self.run_command(f"command -v {binary}")
             if code == 0 and out.strip():
                 return binary
         return "python3"  # best guess if neither found
@@ -553,9 +551,8 @@ exit 1
         Returns True if the node has outbound HTTPS access.
         """
         out, _, code = self.run_command(
-            "curl -s --connect-timeout 6 --max-time 8 -o /dev/null "
+            "curl -s -o /dev/null "
             "-w '%{http_code}' 'https://api.genome.ucsc.edu/' 2>/dev/null || echo FAIL",
-            timeout=15,
         )
         return code == 0 and out.strip() not in ("", "FAIL", "000")
 
@@ -784,7 +781,7 @@ fi
 
     def _has_tmux(self) -> bool:
         """Return True if the `tmux` binary is available on the remote host."""
-        _, _, code = self.run_command("command -v tmux >/dev/null 2>&1", timeout=10)
+        _, _, code = self.run_command("command -v tmux >/dev/null 2>&1")
         return code == 0
 
     def _parse_job_id(self, submit_output):
@@ -815,10 +812,10 @@ fi
     def _check_scheduler_live(self) -> bool:
         """Return True only if the scheduler daemon is actually reachable."""
         if self.scheduler == "slurm":
-            out, _, code = self.run_command("scontrol ping 2>&1", timeout=8)
+            out, _, code = self.run_command("scontrol ping 2>&1")
             return code == 0 and "UP" in out
         if self.scheduler == "lsf":
-            _, _, code = self.run_command("bjobs -h 2>&1", timeout=8)
+            _, _, code = self.run_command("bjobs -h 2>&1")
             return code == 0
         return False
 
@@ -859,7 +856,6 @@ fi
         raw_stream = bool(stream_output) and not summary_stream
         _log(f"Remote command start (timeout={timeout}s, stream={stream_output}): {command[:240]}")
         channel = self._transport.open_session()
-        channel.settimeout(timeout)
         channel.exec_command(self._remote_exec_command(command))
 
         # Read output
@@ -1016,7 +1012,7 @@ fi
         """Run a short diagnostic command and print all useful output."""
         print(f"\n[HPC DIAG] {label}")
         print(f"[HPC DIAG] $ {command}")
-        out, err, code = self.run_command(command, timeout=timeout, stream_output=False)
+        out, err, code = self.run_command(command, stream_output=False)
         print(f"[HPC DIAG] exit={code} stdout={len(out)}B stderr={len(err)}B")
         if out.strip():
             print("[HPC DIAG] stdout:")
@@ -1421,16 +1417,16 @@ echo "  Input data: OK ({quoted})"'''
 
         parent = remote_path.rsplit("/", 1)[0] if "/" in remote_path else "."
         remote_q = shlex.quote(remote_path)
-        self.run_command(f"mkdir -p {shlex.quote(parent)}", timeout=30)
+        self.run_command(f"mkdir -p {shlex.quote(parent)}")
         cmd = f"printf %s {shlex.quote(chunks[0])} | base64 -d > {remote_q}"
-        out, err, code = self.run_command(cmd, timeout=30)
+        out, err, code = self.run_command(cmd)
         if code != 0:
             print(f"Failed to upload {label} (chunk 1): {err}")
             return False
 
         for i, chunk in enumerate(chunks[1:], 2):
             cmd = f"printf %s {shlex.quote(chunk)} | base64 -d >> {remote_q}"
-            out, err, code = self.run_command(cmd, timeout=30)
+            out, err, code = self.run_command(cmd)
             if code != 0:
                 print(f"Failed to upload {label} (chunk {i}/{len(chunks)}): {err}")
                 return False
@@ -1550,7 +1546,7 @@ echo "  Input data: OK ({quoted})"'''
         self.remote_output_dir = _remote_path(self.remote_work_dir, self.params['BASE_OUT_DIR']) + f"/{family}"
 
         # Pre-create remote output directory so logs land inside it
-        self.run_command(f"mkdir -p {self.remote_output_dir}", timeout=20)
+        self.run_command(f"mkdir -p {self.remote_output_dir}")
 
         # Create bsub job script
         import datetime as _dt
@@ -1714,16 +1710,16 @@ exit $EXIT_CODE
         # Upload the job script
         print("\nCreating bsub job script...")
         create_script_cmd = f"cat > {job_script} << 'BSUB_SCRIPT_EOF'\n{bsub_script}\nBSUB_SCRIPT_EOF"
-        out, err, code = self.run_command(create_script_cmd, timeout=30)
+        out, err, code = self.run_command(create_script_cmd)
         if code != 0:
             print(f"Error creating job script: {err}")
             return False
 
         # Make executable
-        self.run_command(f"chmod +x {job_script}", timeout=10)
+        self.run_command(f"chmod +x {job_script}")
 
         # Remove old output files if they exist
-        self.run_command(f"rm -f {job_out} {job_err} {job_done} {job_info}", timeout=10)
+        self.run_command(f"rm -f {job_out} {job_err} {job_done} {job_info}")
 
         # Submit the job
         if cancel_event is not None and cancel_event.is_set():
@@ -1733,7 +1729,7 @@ exit $EXIT_CODE
             sched_label = self.scheduler.upper()
             print(f"\nSubmitting job via {sched_label}...")
             _log(f"Submitting scheduler command: {submit_cmd}")
-            out, err, code = self.run_command(submit_cmd, timeout=30)
+            out, err, code = self.run_command(submit_cmd)
             print("\n[HPC DIAG] Submit command completed")
             print(f"[HPC DIAG] command: {submit_cmd}")
             print(f"[HPC DIAG] exit={code} stdout={len(out)}B stderr={len(err)}B")
@@ -1778,7 +1774,7 @@ exit $EXIT_CODE
 
             launch_cmd = self._tmux_launch_cmd(session_name, job_script, job_out, job_err)
             _log(f"Submitting tmux command: {launch_cmd}")
-            out, err, code = self.run_command(launch_cmd, timeout=30)
+            out, err, code = self.run_command(launch_cmd)
             print("\n[HPC DIAG] tmux launch completed")
             print(f"[HPC DIAG] command: {launch_cmd}")
             print(f"[HPC DIAG] exit={code} stdout={len(out)}B stderr={len(err)}B")
@@ -1810,14 +1806,13 @@ exit $EXIT_CODE
             f"LOG_ERRLOG={job_error_log}\n"
             f"SUBMITTED=$(date)"
         )
-        self.run_command(f"echo '{job_info_content}' > {job_info}", timeout=10)
+        self.run_command(f"echo '{job_info_content}' > {job_info}")
         self._current_job_info_path = job_info
         self._diagnostic_command(
             "Submitted file inventory",
             f"ls -lh {shlex.quote(self.remote_work_dir)} | sed -n '1,120p'; "
             f"echo '--- job info ---'; cat {shlex.quote(job_info)} 2>&1; "
             f"echo '--- job script head ---'; sed -n '1,220p' {shlex.quote(job_script)} 2>&1",
-            timeout=30,
         )
 
         print("\n" + "=" * 60)
@@ -1909,15 +1904,15 @@ echo $EXIT_CODE > {job_done}
 exit $EXIT_CODE
 """
         create_cmd = f"cat > {shlex.quote(job_script)} << 'STAGE_SCRIPT_EOF'\n{script}\nSTAGE_SCRIPT_EOF"
-        out, err, code = self.run_command(create_cmd, timeout=30)
+        out, err, code = self.run_command(create_cmd)
         if code != 0:
             print(f"[Parallel] Error creating {stage_label} script: {err}")
             return None
-        self.run_command(f"chmod +x {shlex.quote(job_script)}", timeout=10)
+        self.run_command(f"chmod +x {shlex.quote(job_script)}")
 
         submit_cmd = self._submit_job_cmd_dep(job_script, dep_job_id)
         print(f"[Parallel] Submitting {stage_label} job…", flush=True)
-        out, err, code = self.run_command(submit_cmd, timeout=30)
+        out, err, code = self.run_command(submit_cmd)
         if code != 0:
             print(f"[Parallel] Error submitting {stage_label}: {err}")
             return None
@@ -2160,11 +2155,11 @@ exit $EXIT_CODE
         # Upload runner script
         print("\nCreating runner script...")
         create_cmd = f"cat > {runner_script} << 'RUNNER_EOF'\n{runner_content}\nRUNNER_EOF"
-        out, err, code = self.run_command(create_cmd, timeout=30)
+        out, err, code = self.run_command(create_cmd)
         if code != 0:
             print(f"Error creating runner script: {err}")
             return False
-        self.run_command(f"chmod +x {runner_script}", timeout=10)
+        self.run_command(f"chmod +x {runner_script}")
 
         # Build scheduler interactive command
         mem_mb = self.params["MEM_MB"]
@@ -2191,7 +2186,7 @@ exit $EXIT_CODE
         import time
         start_time = time.time()
         try:
-            out, err, code = self.run_command(bsub_cmd, timeout=14400, stream_output="summary")
+            out, err, code = self.run_command(bsub_cmd, stream_output="summary")
         except KeyboardInterrupt:
             print("\n\nInterrupted by user. Job may still be running on the cluster.")
             print("Use 'bjobs' on the HPC to check.")
@@ -2236,7 +2231,6 @@ exit $EXIT_CODE
             b64 = _b64.b64encode(content.encode()).decode()
             _, _, code = self.run_command(
                 f"echo {shlex.quote(b64)} | base64 -d > {shlex.quote(info_path)}",
-                timeout=15,
             )
             written = (code == 0)
         if written:
@@ -2276,12 +2270,12 @@ exit $EXIT_CODE
                 f"{self.remote_work_dir}/te_motif_job_*.info "
                 f"{self.remote_work_dir}/gameca_*.info 2>/dev/null | head -1"
             )
-            out, _, _ = self.run_command(glob_cmd, timeout=10)
+            out, _, _ = self.run_command(glob_cmd)
             latest_path = out.strip()
         if not latest_path:
             return None, None, None, None, None
 
-        content, _, ccode = self.run_command(f"cat {latest_path} 2>/dev/null", timeout=10)
+        content, _, ccode = self.run_command(f"cat {latest_path} 2>/dev/null")
         if ccode != 0 or not content.strip():
             return None, None, None, None, None
 
@@ -2311,7 +2305,7 @@ exit $EXIT_CODE
         if self.scheduler == "slurm":
             out, err, code = self.run_command(
                 f"squeue -j {job_id} --format=%T --noheader 2>&1 | head -1",
-                timeout=15)
+                )
             print(f"[HPC DIAG] scheduler state probe: scheduler=slurm job={job_id} exit={code} out={out.strip()!r} err={err.strip()!r}")
             text = out.strip().upper()
             if "RUNNING" in text:
@@ -2324,7 +2318,7 @@ exit $EXIT_CODE
             # Job gone from squeue — check sacct for final state
             acct, acct_err, acct_code = self.run_command(
                 f"sacct -j {job_id} --format=State --noheader 2>/dev/null | head -1",
-                timeout=15)
+                )
             print(f"[HPC DIAG] sacct probe: job={job_id} exit={acct_code} out={acct.strip()!r} err={acct_err.strip()!r}")
             state = acct.strip().upper()
             if "COMPLETED" in state:
@@ -2334,7 +2328,7 @@ exit $EXIT_CODE
             return "DONE"  # gone from squeue, assume finished
 
         elif self.scheduler == "lsf":
-            out, err, code = self.run_command(f"bjobs {job_id} 2>&1", timeout=15)
+            out, err, code = self.run_command(f"bjobs {job_id} 2>&1")
             print(f"[HPC DIAG] scheduler state probe: scheduler=lsf job={job_id} exit={code} out={out.strip()!r} err={err.strip()!r}")
             low = out.lower()
             if "not found" in low or "is not found" in low:
@@ -2406,26 +2400,26 @@ exit $EXIT_CODE
         if self.scheduler == "slurm":
             sq_out, sq_err, sq_rc = self.run_command(
                 "squeue -u \"$USER\" -o '%.10i %.8T %.12M %.6D %R' 2>&1 || squeue 2>&1 | head -30",
-                timeout=15)
+                )
             print(f"  squeue -u $USER  (exit {sq_rc}):")
             for ln in (sq_out or sq_err or "(no output)").rstrip().splitlines():
                 print(f"    {ln}")
         elif self.scheduler == "lsf":
-            bj_out, bj_err, bj_rc = self.run_command("bjobs 2>&1", timeout=15)
+            bj_out, bj_err, bj_rc = self.run_command("bjobs 2>&1")
             print(f"  bjobs  (exit {bj_rc}):")
             for ln in (bj_out or bj_err or "(no output)").rstrip().splitlines():
                 print(f"    {ln}")
         else:
             tx_out, tx_err, tx_rc = self.run_command(
                 "tmux list-sessions 2>&1 | grep gameca_ || echo '(no active tmux sessions)'",
-                timeout=15)
+                )
             print(f"  tmux list-sessions  (exit {tx_rc}):")
             for ln in (tx_out or tx_err or "(no output)").rstrip().splitlines():
                 print(f"    {ln}")
 
         py_out, _, _ = self.run_command(
             "ps aux 2>/dev/null | grep -E '[p]ython.*te_|[p]ython.*query' | head -10",
-            timeout=10)
+            )
         if py_out.strip():
             print("  Running python pipeline processes:")
             for ln in py_out.rstrip().splitlines():
@@ -2435,7 +2429,7 @@ exit $EXIT_CODE
 
         # ── 1. Ask scheduler first — never trust .done alone ─────────────────
         sched_state = self._get_scheduler_state(job_id)
-        done_out, _, _ = self.run_command(f"cat {job_done} 2>/dev/null", timeout=10)
+        done_out, _, _ = self.run_command(f"cat {job_done} 2>/dev/null")
         done_val = done_out.strip()
 
         print()
@@ -2475,7 +2469,7 @@ exit $EXIT_CODE
             ckpt_out, _, _ = self.run_command(
                 f"find {out_dir} -maxdepth 1 -name 'CHECKPOINT_*.txt'"
                 f" -printf '%TH:%TM  %f\\n' 2>/dev/null | sort -k2",
-                timeout=10)
+                )
             if ckpt_out.strip():
                 for cline in ckpt_out.strip().splitlines():
                     # CHECKPOINT_STAGE5_CLUSTERING.txt → "Stage5 Clustering"
@@ -2488,7 +2482,7 @@ exit $EXIT_CODE
             # What stage is currently running: last === STAGE === header in the log
             cur_stage, _, _ = self.run_command(
                 f"grep -E '^=== |^\\[.+\\] STAGE [0-9]' {job_out} 2>/dev/null | tail -1",
-                timeout=10)
+                )
             if cur_stage.strip():
                 print(f"    ▶  Currently: {cur_stage.strip()}")
 
@@ -2497,7 +2491,7 @@ exit $EXIT_CODE
                 f"find {out_dir} -maxdepth 4 -type f "
                 r"\( -name '*.csv' -o -name '*.tsv' -o -name '*.html' -o -name '*.png' \) "
                 f"-printf '%s %P\\n' 2>/dev/null | sort -k2 | head -20",
-                timeout=12)
+                )
             if results_out.strip():
                 print()
                 print("  --- Output files ---")
@@ -2533,7 +2527,7 @@ exit $EXIT_CODE
             f")'"
             f" | tail -35"
         )
-        activity_out, _, _ = self.run_command(activity_cmd, timeout=15)
+        activity_out, _, _ = self.run_command(activity_cmd)
         if activity_out.strip():
             for line in activity_out.strip().splitlines():
                 print(f"  {line}")
@@ -2555,7 +2549,7 @@ exit $EXIT_CODE
             if err_file:
                 err_tail, _, err_read_code = self.run_command(
                     f"wc -l < {err_file} 2>/dev/null; tail -40 {err_file} 2>/dev/null",
-                    timeout=15)
+                    )
                 if err_tail.strip() and err_tail.strip() != "0":
                     print()
                     print("  --- Stderr / setup errors ---")
@@ -2572,7 +2566,7 @@ exit $EXIT_CODE
             tb_out, _, _ = self.run_command(
                 f"grep -n 'Traceback\\|FATAL\\|Error:\\|Exception:\\|ERROR in stage' "
                 f"{job_out} 2>/dev/null | tail -20",
-                timeout=12)
+                )
             if tb_out.strip():
                 for line in tb_out.strip().splitlines():
                     print(f"  {line}")
@@ -2617,23 +2611,23 @@ exit $EXIT_CODE
             self._diagnostic_command(
                 "squeue all user jobs",
                 "squeue -u \"$USER\" -o '%.10i %.8T %.12M %.6D %R' 2>&1 || squeue 2>&1 | head -30",
-                timeout=15)
+                )
             self._diagnostic_command(
                 "running python pipeline processes",
                 "ps aux 2>/dev/null | grep -E '[p]ython.*te_|[p]ython.*query' | head -10 || echo '(none)'",
-                timeout=10)
+                )
         elif self.scheduler == "lsf":
             self._diagnostic_command("bjobs all", "bjobs 2>&1", timeout=15)
             self._diagnostic_command(
                 "running python pipeline processes",
                 "ps aux 2>/dev/null | grep -E '[p]ython.*te_|[p]ython.*query' | head -10 || echo '(none)'",
-                timeout=10)
+                )
         else:
             self._diagnostic_command("tmux sessions", "tmux list-sessions 2>&1", timeout=15)
             self._diagnostic_command(
                 "running python pipeline processes",
                 "ps aux 2>/dev/null | grep -E '[p]ython.*te_|[p]ython.*query' | head -10 || echo '(none)'",
-                timeout=10)
+                )
 
         if self.scheduler == "lsf":
             self._diagnostic_command("bjobs summary", f"bjobs {shlex.quote(job_id)} 2>&1", timeout=20)
@@ -2687,7 +2681,7 @@ exit $EXIT_CODE
             log_files.append((f"{output_dir}/01_data/ucsc_fetch_errors.log", "ucsc_fetch_errors.log"))
 
         for remote_file, local_name in log_files:
-            out, err, code = self.run_command(f"cat '{remote_file}' 2>/dev/null", timeout=30)
+            out, err, code = self.run_command(f"cat '{remote_file}' 2>/dev/null")
             if out.strip():
                 local_file = local_path / local_name
                 with open(local_file, 'w') as f:
@@ -2762,7 +2756,7 @@ exit $EXIT_CODE
                     stale_polls = 0
                     new_lines, _, _ = self.run_command(
                         f"sed -n '{last_line + 1},{current_line}p' {job_out} 2>/dev/null",
-                        timeout=30)
+                        )
                     if new_lines.strip():
                         for line in new_lines.rstrip().splitlines():
                             print(f"  {line}")
@@ -2790,7 +2784,7 @@ exit $EXIT_CODE
                     if final_line > last_line:
                         tail_final, _, _ = self.run_command(
                             f"sed -n '{last_line + 1},{final_line}p' {job_out} 2>/dev/null",
-                            timeout=30)
+                            )
                         if tail_final.strip():
                             for line in tail_final.rstrip().splitlines():
                                 print(f"  {line}")
@@ -2865,7 +2859,7 @@ exit $EXIT_CODE
         try:
             if self.sftp:
                 self.sftp.putfo(_io.BytesIO(script.encode()), scr)
-                self.run_command(f"chmod +x {scr}", timeout=10)
+                self.run_command(f"chmod +x {scr}")
                 print(f"      OK  → {scr}")
             else:
                 print("      SFTP not available")
@@ -2876,7 +2870,7 @@ exit $EXIT_CODE
 
         # Step 2: check SLURM
         print("\n[2/5] Checking SLURM daemon (scontrol ping) ...")
-        ping_out, ping_err, ping_code = self.run_command("scontrol ping 2>&1", timeout=8)
+        ping_out, ping_err, ping_code = self.run_command("scontrol ping 2>&1")
         slurm_up = ping_code == 0 and "UP" in ping_out
         print(f"      exit={ping_code}  output={ping_out.strip()!r}")
         print(f"      SLURM running: {'YES' if slurm_up else 'NO'}")
@@ -2904,7 +2898,7 @@ exit $EXIT_CODE
             except Exception as e:
                 print(f"      Script overwrite failed: {e}")
             print(f"\n[4/5] Submitting via sbatch ...")
-            sub_out, sub_err, sub_code = self.run_command(f"sbatch {scr}", timeout=20)
+            sub_out, sub_err, sub_code = self.run_command(f"sbatch {scr}")
             print(f"      exit={sub_code}")
             print(f"      stdout={sub_out.strip()!r}")
             print(f"      stderr={sub_err.strip()!r}")
@@ -2926,7 +2920,7 @@ exit $EXIT_CODE
             plain = "#!/bin/bash\n" + script
             try:
                 self.sftp.putfo(_io.BytesIO(plain.encode()), scr)
-                self.run_command(f"chmod +x {scr}", timeout=5)
+                self.run_command(f"chmod +x {scr}")
             except Exception as e:
                 print(f"      Script write failed: {e}")
                 return
@@ -2934,15 +2928,15 @@ exit $EXIT_CODE
                 f"setsid nohup bash {scr} >{out} 2>{err} </dev/null & "
                 f"PID=$!; disown $PID 2>/dev/null || true; echo $PID"
             )
-            pid_out, pid_err, pid_code = self.run_command(nohup_cmd, timeout=10)
+            pid_out, pid_err, pid_code = self.run_command(nohup_cmd)
             pid = pid_out.strip().split()[-1] if pid_out.strip() else None
             print(f"      exit={pid_code}  pid={pid!r}  err={pid_err.strip()!r}")
             if pid:
                 print(f"      Waiting 8s then checking log ...")
                 _time.sleep(8)
-                log_out, _, _ = self.run_command(f"cat {out} 2>/dev/null", timeout=5)
+                log_out, _, _ = self.run_command(f"cat {out} 2>/dev/null")
                 print(f"      Log contents: {log_out.strip()!r}")
-                done_out, _, _ = self.run_command(f"ls {done} 2>/dev/null", timeout=5)
+                done_out, _, _ = self.run_command(f"ls {done} 2>/dev/null")
                 print(f"      Done marker:  {'FOUND' if done_out.strip() else 'MISSING'}")
             else:
                 print("      nohup also failed — cannot run background jobs on this host")
@@ -3035,14 +3029,14 @@ exit $EXIT_CODE
             print("[SUBMIT] Writing script via base64 shell command...")
             b64 = _b64.b64encode(script.encode()).decode()
             wr_cmd = f"echo {shlex.quote(b64)} | base64 -d > {shlex.quote(job_script)}"
-            wr_out, wr_err, wr_code = self.run_command(wr_cmd, timeout=30)
+            wr_out, wr_err, wr_code = self.run_command(wr_cmd)
             if wr_code != 0:
                 print(f"[SUBMIT] FAILED to write script (exit={wr_code}): {wr_err.strip()!r}")
                 return None
             print("[SUBMIT] Base64 write OK")
             script_written = True
 
-        cx_out, cx_err, cx_code = self.run_command(f"chmod +x {shlex.quote(job_script)}", timeout=10)
+        cx_out, cx_err, cx_code = self.run_command(f"chmod +x {shlex.quote(job_script)}")
         if cx_code != 0:
             print(f"[SUBMIT] chmod failed (exit={cx_code}): {cx_err.strip()!r}")
         else:
@@ -3060,7 +3054,7 @@ exit $EXIT_CODE
         if getattr(self, "_scheduler_live", False):
             submit_cmd = self._submit_job_cmd(job_script)
             print(f"[SUBMIT] Scheduler command: {submit_cmd}")
-            sub_out, sub_err, sub_code = self.run_command(submit_cmd, timeout=60)
+            sub_out, sub_err, sub_code = self.run_command(submit_cmd)
             combined = (sub_out + "\n" + sub_err).strip()
             print(f"[SUBMIT] Scheduler exit={sub_code}")
             if sub_out.strip():
@@ -3094,7 +3088,7 @@ exit $EXIT_CODE
                 session_name = f"{job_name}_{_ts}"
                 tmux_cmd = self._tmux_launch_cmd(session_name, job_script, job_out, job_err)
                 print(f"[SUBMIT] tmux command: {tmux_cmd}")
-                tx_out, tx_err, tx_code = self.run_command(tmux_cmd, timeout=20)
+                tx_out, tx_err, tx_code = self.run_command(tmux_cmd)
                 verify_out, _, verify_code = self.run_command(
                     f"tmux has-session -t {shlex.quote(session_name)} 2>&1", timeout=15)
                 print(f"[SUBMIT] tmux exit={tx_code}  session={session_name!r}  verify_exit={verify_code}  stderr={tx_err.strip()!r}")
@@ -3114,7 +3108,7 @@ exit $EXIT_CODE
                 f"echo $!"
             )
             print(f"[SUBMIT] nohup command: {nohup_cmd}")
-            pid_out, pid_err, pid_code = self.run_command(nohup_cmd, timeout=20)
+            pid_out, pid_err, pid_code = self.run_command(nohup_cmd)
             pid = pid_out.strip().split()[-1] if pid_out.strip() else None
             print(f"[SUBMIT] nohup exit={pid_code}  PID={pid!r}  stderr={pid_err.strip()!r}")
             if pid_code != 0 or not pid or not pid.isdigit():
@@ -3281,7 +3275,7 @@ exit $EXIT_CODE
         if not block:
             return
         print("  Sending completion email...")
-        self.run_command(block, timeout=30)
+        self.run_command(block)
 
     def _run_te_prep_interactive(self):
         """Interactively configure and run te_prep on the cluster."""
@@ -3303,7 +3297,7 @@ exit $EXIT_CODE
             f"{self._python} te_prep.py --build {build} {fam_arg} {genome_arg} --out-dir {out_dir} {extra}"
         )
         print(f"\nRunning: {cmd}\n")
-        out, err, code = self.run_command(cmd, timeout=600)
+        out, err, code = self.run_command(cmd)
         print(out)
         if err:
             print("[stderr]", err[:500])
@@ -3336,7 +3330,7 @@ exit $EXIT_CODE
             f"--p-threshold {p_thresh} {extra}"
         )
         print(f"\nRunning: {cmd}\n")
-        out, err, code = self.run_command(cmd, timeout=1800)
+        out, err, code = self.run_command(cmd)
         print(out)
         if err:
             print("[stderr]", err[:500])
@@ -3468,7 +3462,7 @@ exit $EXIT_CODE
         self.run_command(f"chmod +x {script_path}")
 
         print("Generating clustering plots and consensus sequences...")
-        out, err, code = self.run_command(f"{self._python} {script_path}", timeout=600)
+        out, err, code = self.run_command(f"{self._python} {script_path}")
 
         self.run_command(f"rm -f {script_path}")
 
@@ -3623,7 +3617,7 @@ exit $EXIT_CODE
                 "grant_type": "authorization_code",
             }).encode()
             req = urllib.request.Request("https://oauth2.googleapis.com/token", data=data)
-            with urllib.request.urlopen(req, timeout=30) as r:
+            with urllib.request.urlopen(req) as r:
                 tok = _json.loads(r.read().decode())
         except Exception as e:
             print(f"  Token exchange failed: {e}")
@@ -3642,7 +3636,7 @@ exit $EXIT_CODE
                 "https://www.googleapis.com/oauth2/v2/userinfo",
                 headers={"Authorization": "Bearer " + access},
             )
-            with urllib.request.urlopen(req2, timeout=30) as r:
+            with urllib.request.urlopen(req2) as r:
                 email = _json.loads(r.read().decode()).get("email", "")
         except Exception:
             pass
@@ -3786,7 +3780,7 @@ def _send():
                   "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                                 "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                   "Accept": "application/json"}})
-    with _opener.open(req, timeout=45) as r:
+    with _opener.open(req) as r:
         resp = json.loads(r.read().decode())
     if not resp.get("id"):
         raise RuntimeError("no id in Resend response: %s" % resp)
@@ -3873,7 +3867,6 @@ if _rp:
                 resp = _req.post(
                     "https://tmpfiles.org/api/v1/upload",
                     files={"file": f},
-                    timeout=300,
                 )
             resp.raise_for_status()
             url = resp.json()["data"]["url"]
@@ -3931,7 +3924,6 @@ if _rp:
         base = f"{self.remote_work_dir}/{self.params['BASE_OUT_DIR']}"
         out, _, _ = self.run_command(
             f"ls -td {base}/*/ 2>/dev/null | head -1 | tr -d '\\n'",
-            timeout=10,
         )
         live = out.strip().rstrip('/')
         if live:
@@ -3945,7 +3937,7 @@ if _rp:
         job_done_file = f"{self.remote_work_dir}/te_analysis_job.done"
 
         # Check job completion status
-        done_out, _, _ = self.run_command(f"cat {job_done_file} 2>/dev/null", timeout=10)
+        done_out, _, _ = self.run_command(f"cat {job_done_file} 2>/dev/null")
         if not done_out.strip():
             print("\nWarning: Job may not be complete yet.")
             confirm = input("Retrieve partial results anyway? (y/n): ").strip().lower()
@@ -3967,7 +3959,7 @@ if _rp:
             remote_out = remote_out_override
         else:
             remote_out = None
-            info_out, _, _ = self.run_command(f"cat {job_info_file} 2>/dev/null", timeout=10)
+            info_out, _, _ = self.run_command(f"cat {job_info_file} 2>/dev/null")
             if info_out.strip():
                 for line in info_out.strip().split('\n'):
                     if line.startswith('OUTPUT_DIR='):
@@ -3983,7 +3975,7 @@ if _rp:
         self._save_state()
 
         # Verify remote directory exists
-        check_out, _, _ = self.run_command(f"test -d '{remote_out}' && echo 'exists'", timeout=10)
+        check_out, _, _ = self.run_command(f"test -d '{remote_out}' && echo 'exists'")
         if 'exists' not in check_out:
             print(f"\nError: Remote results directory not found: {remote_out}")
             print("The job may not have completed successfully.")
@@ -4135,7 +4127,6 @@ if _rp:
         # Determine if it's a file or directory
         type_out, _, _ = self.run_command(
             f"if [ -f '{remote_path}' ]; then echo file; elif [ -d '{remote_path}' ]; then echo dir; fi",
-            timeout=10,
         )
         path_type = type_out.strip()
         if not path_type:
@@ -4153,7 +4144,6 @@ if _rp:
             print(f"\nListing files in {remote_dir} ...")
             out, _, _ = self.run_command(
                 f"find '{remote_dir}' -type f -printf '%P\\t%s\\n' 2>/dev/null | sort",
-                timeout=30,
             )
             lines = [l for l in out.strip().split("\n") if l.strip()]
             if not lines:
@@ -4334,16 +4324,16 @@ exit 0
 
         # Write + submit the job.
         create_cmd = f"cat > {job_script} << 'GAMECA_DIAG_EOF'\n{script}\nGAMECA_DIAG_EOF"
-        out, err, code = self.run_command(create_cmd, timeout=30)
+        out, err, code = self.run_command(create_cmd)
         if code != 0:
             print(f"  Error creating script: {err}")
             return
-        self.run_command(f"chmod 700 {job_script}", timeout=10)
-        self.run_command(f"rm -f {job_out} {job_err} {job_done} {job_result}", timeout=10)
+        self.run_command(f"chmod 700 {job_script}")
+        self.run_command(f"rm -f {job_out} {job_err} {job_done} {job_result}")
 
         submit_cmd = self._submit_job_cmd(job_script)
         print(f"\n  Submitting: {submit_cmd}")
-        out, err, code = self.run_command(submit_cmd, timeout=30)
+        out, err, code = self.run_command(submit_cmd)
         job_id = self._parse_job_id(out + err)
         if code != 0:
             print(f"  Submission failed (exit {code}): {(out + err).strip()}")
@@ -4357,14 +4347,14 @@ exit 0
         deadline = _time.time() + 300
         done = False
         while _time.time() < deadline:
-            chk_out, _, chk_code = self.run_command(f"cat {job_done} 2>/dev/null", timeout=10)
+            chk_out, _, chk_code = self.run_command(f"cat {job_done} 2>/dev/null")
             if chk_code == 0 and chk_out.strip():
                 done = True
                 break
             _time.sleep(15)
 
         # Read back the server-side result line.
-        res_out, _, res_code = self.run_command(f"cat {job_result} 2>/dev/null", timeout=10)
+        res_out, _, res_code = self.run_command(f"cat {job_result} 2>/dev/null")
         result_line = res_out.strip() if res_code == 0 else ""
 
         print("\n" + "=" * 64)

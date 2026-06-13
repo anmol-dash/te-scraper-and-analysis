@@ -384,8 +384,8 @@ def _curl_bytes(url, timeout=120):
     """Fetch a URL with curl (shell=True) and return the raw response bytes."""
     import subprocess, shlex
     result = subprocess.run(
-        f"curl -s -L --connect-timeout 10 --max-time {timeout} {shlex.quote(url)}",
-        shell=True, capture_output=True, timeout=timeout + 15,
+        f"curl -s -L {shlex.quote(url)}",
+        shell=True, capture_output=True,
     )
     if result.returncode != 0:
         raise ConnectionError(
@@ -564,9 +564,9 @@ def _check_ucsc_connectivity():
     import subprocess
     try:
         r = subprocess.run(
-            "curl -s --connect-timeout 6 --max-time 8 -o /dev/null "
+            "curl -s -o /dev/null "
             "-w '%{http_code}' 'https://api.genome.ucsc.edu/'",
-            shell=True, capture_output=True, text=True, timeout=12,
+            shell=True, capture_output=True, text=True,
         )
         code = r.stdout.strip()
         if r.returncode == 0 and code not in ("", "000"):
@@ -597,9 +597,9 @@ def _curl_json(url, timeout=30):
     different libc DNS path that fails on some HPC nodes (exit 6 / exit 28).
     """
     import subprocess, json as _json, shlex
-    cmd = f"curl -s --connect-timeout 8 --max-time {timeout} {shlex.quote(url)}"
+    cmd = f"curl -s {shlex.quote(url)}"
     result = subprocess.run(
-        cmd, shell=True, capture_output=True, text=True, timeout=timeout + 8,
+        cmd, shell=True, capture_output=True, text=True,
     )
     if result.returncode != 0:
         raise ConnectionError(

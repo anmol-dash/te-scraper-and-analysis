@@ -72,7 +72,6 @@ def _connect(hostname, username, password, port=22, key_path=""):
 
     _log(f"Connecting to {hostname}:{port}...")
     transport = paramiko.Transport((hostname, port))
-    transport.banner_timeout = 60
     transport.connect()
 
     if key_path:
@@ -101,7 +100,6 @@ def _connect(hostname, username, password, port=22, key_path=""):
 def _run(transport, cmd, timeout=120):
     ch = transport.open_session()
     ch.get_pty()
-    ch.settimeout(timeout)
     ch.exec_command(f"HOME=/tmp bash -lc {shlex.quote(cmd)}")
     out, err = b"", b""
     while True:
@@ -124,14 +122,13 @@ def _upload_text(transport, content, remote_path, label):
     _, _, code = _run(
         transport,
         f"echo {shlex.quote(chunks[0])} | base64 -d > {shlex.quote(remote_path)}",
-        timeout=30,
     )
     if code != 0:
         raise RuntimeError(f"Upload failed: {label}")
     for chunk in chunks[1:]:
         _run(transport,
              f"echo {shlex.quote(chunk)} | base64 -d >> {shlex.quote(remote_path)}",
-             timeout=30)
+             )
     _log(f"  Uploaded {label} ({len(content):,} bytes)")
 
 
@@ -170,7 +167,7 @@ mkdir -p "/tmp/{username}_gameca" && printf '/tmp/{username}_gameca\\n'
 def _detect_scheduler(transport):
     out, _, _ = _run(transport,
         "command -v bsub && echo HAVE_LSF; command -v sbatch && echo HAVE_SLURM",
-        timeout=15)
+        )
     if "HAVE_LSF" in out:   return "lsf"
     if "HAVE_SLURM" in out: return "slurm"
     return "none"
@@ -329,7 +326,6 @@ exit $EXIT_CODE
     _, _, code = _run(
         transport,
         f"cat > {shlex.quote(job_sh)} << 'GAMECA_GRNA_EOF'\n{job_script}\nGAMECA_GRNA_EOF",
-        timeout=30,
     )
     if code != 0:
         _upload_text(transport, job_script, job_sh, "job script")

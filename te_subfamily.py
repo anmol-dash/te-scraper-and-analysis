@@ -74,23 +74,52 @@ def _kimura2p_cpg(seq_a, seq_b, omega=10.0):
         return None
 
 
-def _pad_align(a, b):
-    """Pad the shorter sequence with Ns to match length."""
-    la, lb = len(a), len(b)
-    if la < lb:
-        return a + "N" * (lb - la), b
-    return a, b + "N" * (la - lb)
+_SF_ALIGNER = None
+
+
+def _local_align(a, b):
+    """Local pairwise alignment via Biopython. Returns (aln_a, aln_b) or None.
+
+    NEVER pads/pseudo-aligns. Raises RuntimeError if Biopython is unavailable.
+    """
+    global _SF_ALIGNER
+    if _SF_ALIGNER is None:
+        try:
+            from Bio import Align as _BA
+        except ImportError as e:
+            raise RuntimeError(
+                "Biopython is required for subfamily K2P alignment "
+                "(pip install biopython). Refusing to pseudo-align.") from e
+        al = _BA.PairwiseAligner()
+        al.mode = "local"
+        al.match_score = 2
+        al.mismatch_score = -1
+        al.open_gap_score = -5
+        al.extend_gap_score = -0.5
+        _SF_ALIGNER = al
+    a, b = a.upper(), b.upper()
+    if not a or not b:
+        return None
+    try:
+        aln = _SF_ALIGNER.align(a, b)[0]
+        a_str, b_str = str(aln[0]).upper(), str(aln[1]).upper()
+    except Exception:               # noqa: BLE001 — any failure → NaN, never pad
+        return None
+    return (a_str, b_str) if len(a_str) == len(b_str) else None
 
 
 def _pairwise_k2p(seqs, omega=10.0):
-    """Return NxN symmetric distance matrix of CpG-corrected K2P distances."""
+    """Return NxN symmetric distance matrix of CpG-corrected K2P distances (%).
+
+    Unalignable pairs are recorded as NaN (never a fabricated default).
+    """
     n = len(seqs)
     D = np.zeros((n, n), dtype=float)
     for i in range(n):
         for j in range(i + 1, n):
-            a, b = _pad_align(seqs[i], seqs[j])
-            d = _kimura2p_cpg(a, b, omega=omega)
-            D[i, j] = D[j, i] = d * 100 if d is not None else 50.0
+            pair = _local_align(seqs[i], seqs[j])
+            d = _kimura2p_cpg(*pair, omega=omega) if pair else None
+            D[i, j] = D[j, i] = d * 100 if d is not None else np.nan
     return D
 
 
@@ -106,7 +135,7 @@ def _fetch_dfam_consensus(family_name, build="hg38", timeout=15):
     name_q = family_name.replace(" ", "+")
     url = f"https://www.dfam.org/api/families?name={name_q}&limit=5"
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
+        with urllib.request.urlopen(url) as resp:
             data = json.loads(resp.read())
         results = data.get("results", [])
         if not results:
@@ -119,7 +148,7 @@ def _fetch_dfam_consensus(family_name, build="hg38", timeout=15):
             return None
         # Fetch consensus sequence via /api/families/{acc}
         fam_url = f"https://www.dfam.org/api/families/{accession}"
-        with urllib.request.urlopen(fam_url, timeout=timeout) as resp2:
+        with urllib.request.urlopen(fam_url) as resp2:
             fam_data = json.loads(resp2.read())
         cons = fam_data.get("consensus_sequence", "")
         if cons:
@@ -131,18 +160,54 @@ def _fetch_dfam_consensus(family_name, build="hg38", timeout=15):
 
 # ── Majority-vote consensus ────────────────────────────────────────────────
 
-def _majority_vote(seqs):
+def _majority_vote(seqs, sample_n=400):
+    """Majority-vote consensus from a REAL MAFFT alignment of (a subsample of) seqs.
+
+    Raises RuntimeError if MAFFT is unavailable or fails — never pads/pseudo-aligns.
+    """
+    import shutil, subprocess, tempfile
     from collections import Counter
+
     seqs = [s.upper() for s in seqs if s and set(s.upper()) - {"N"}]
     if not seqs:
         return ""
-    target = int(np.median([len(s) for s in seqs]))
-    padded = [s[:target].ljust(target, "N") if len(s) >= target
-              else s + "N" * (target - len(s)) for s in seqs]
-    return "".join(Counter(c for c in [p[i] for p in padded] if c != "N").most_common(1)[0][0]
-                   if Counter(c for c in [p[i] for p in padded] if c != "N")
-                   else "N"
-                   for i in range(target))
+    if len(seqs) == 1:
+        return seqs[0]
+    if len(seqs) > sample_n:
+        idx = np.linspace(0, len(seqs) - 1, sample_n).astype(int)
+        seqs = [seqs[i] for i in sorted(set(idx))]
+
+    exe = shutil.which("mafft")
+    if not exe:
+        raise RuntimeError(
+            "mafft not found on PATH — cannot build a real consensus and will not "
+            "pseudo-align. Install MAFFT or provide a consensus FASTA.")
+    with tempfile.TemporaryDirectory() as td:
+        fin = Path(td) / "in.fa"
+        fin.write_text("".join(f">s{i}\n{s}\n" for i, s in enumerate(seqs)))
+        res = subprocess.run([exe, "--auto", "--quiet", str(fin)],
+                             capture_output=True, text=True)
+    if res.returncode != 0:
+        raise RuntimeError(f"mafft failed ({res.returncode}): {res.stderr.strip()[:200]}")
+
+    aligned, cur = [], []
+    for line in res.stdout.splitlines():
+        if line.startswith(">"):
+            if cur:
+                aligned.append("".join(cur)); cur = []
+        else:
+            cur.append(line.strip().upper())
+    if cur:
+        aligned.append("".join(cur))
+    if not aligned:
+        raise RuntimeError("mafft produced no alignment output.")
+
+    L = max(len(s) for s in aligned)
+    out = []
+    for i in range(L):
+        col = [s[i] for s in aligned if i < len(s) and s[i] in "ACGT"]
+        out.append(Counter(col).most_common(1)[0][0] if col else "N")
+    return "".join(out).replace("-", "")
 
 
 def _load_consensus_fasta(path):
@@ -259,13 +324,8 @@ def run_subfamily_analysis(input_csv, reports_dir, family_name,
             if not cons:
                 canonical_divs[cid] = None
                 continue
-            a, b = cons, canonical
-            la, lb = len(a), len(b)
-            if la < lb:
-                a += "N" * (lb - la)
-            else:
-                b += "N" * (la - lb)
-            d = _kimura2p_cpg(a, b, omega=cpg_omega)
+            pair = _local_align(cons, canonical)
+            d = _kimura2p_cpg(*pair, omega=cpg_omega) if pair else None
             canonical_divs[cid] = round(d * 100, 3) if d is not None else None
 
     # ── Pairwise distance matrix between cluster consensuses ─────────────────
@@ -308,7 +368,10 @@ def run_subfamily_analysis(input_csv, reports_dir, family_name,
     print(f"  Subfamily table → {sfam_csv}")
 
     # ── UPGMA tree ────────────────────────────────────────────────────────────
-    if len(ordered_ids) >= 2:
+    if len(ordered_ids) >= 2 and not np.isfinite(D).all():
+        print("  WARNING: some cluster-consensus pairs were unalignable (NaN distance); "
+              "skipping UPGMA tree rather than fabricating distances.")
+    elif len(ordered_ids) >= 2:
         try:
             from scipy.cluster.hierarchy import linkage
             from scipy.spatial.distance import squareform

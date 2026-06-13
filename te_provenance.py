@@ -36,7 +36,7 @@ _TOOLS = ["mafft", "bedtools", "liftOver", "colabfold_batch", "samtools",
 def _git_sha(repo: Path) -> str:
     try:
         return subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
-                              capture_output=True, text=True, timeout=10).stdout.strip() or "unknown"
+                              capture_output=True, text=True).stdout.strip() or "unknown"
     except Exception:
         return "unknown"
 
@@ -47,7 +47,7 @@ def _tool_version(tool: str) -> str:
         return "not found"
     for flag in ("--version", "-version", "version", "-v"):
         try:
-            r = subprocess.run([exe, flag], capture_output=True, text=True, timeout=10)
+            r = subprocess.run([exe, flag], capture_output=True, text=True)
             out = (r.stdout or r.stderr).strip().splitlines()
             if out:
                 return out[0][:80]

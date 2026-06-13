@@ -161,7 +161,7 @@ def main():
     driver_script = "\n".join(driver) + "\n"
     print(f"\nSubmitting {len(args.builds)} jobs in a single SSH session: "
           f"{', '.join(args.builds)}")
-    out, err, rc = client.run_command(driver_script, timeout=300)
+    out, err, rc = client.run_command(driver_script)
     if out:
         print(out.rstrip())
     if err.strip():

@@ -108,7 +108,7 @@ def send_completion_email(
     )
 
     try:
-        with opener.open(req, timeout=45) as r:
+        with opener.open(req) as r:
             resp = json.loads(r.read().decode())
         if resp.get("id"):
             print(f"  [notify] Completion email sent to {to} (id={resp['id']})")

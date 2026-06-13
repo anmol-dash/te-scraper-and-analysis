@@ -139,7 +139,6 @@ def query_gene(name, species_id):
             r = requests.get(
                 f"https://mygene.info/v3/query?q={q}&species={species_id}"
                 f"&fields=symbol,name,summary,go&size=1",
-                timeout=15,
             )
             if r.status_code == 200:
                 hits = r.json().get("hits", [])

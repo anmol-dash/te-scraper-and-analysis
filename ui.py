@@ -375,7 +375,7 @@ def _remote_run(client, label: str, cmd: str, timeout: int = 1800, stream: bool 
     _log(f"Starting remote step: {label} (timeout={timeout}s)")
     print(f"  {dim('$')} {dim(cmd)}")
     print(_divider())
-    out, err, code = client.run_command(full_cmd, timeout=timeout, stream_output=stream)
+    out, err, code = client.run_command(full_cmd, stream_output=stream)
     if not stream:
         if out:
             print(out)
@@ -657,7 +657,6 @@ def _step_go(client):
     # Check if enrichment results already exist on the cluster
     check_out, _, _ = client.run_command(
         f"ls {_sl.quote(enrich_dir)}/cluster_*_enrichment.csv 2>/dev/null | wc -l",
-        timeout=15,
     )
     enrich_exists = check_out.strip() not in ("", "0")
 
@@ -705,7 +704,6 @@ def _step_go(client):
         )
         exists_out, _, _ = client.run_command(
             f"test -f {_sl.quote(default_clustered)} && echo EXISTS || echo MISSING",
-            timeout=10,
         )
         clustered = ""
         if "EXISTS" in exists_out:
@@ -2438,7 +2436,6 @@ def _step_rmsk_query(client):
     _log(f"Counting sequences for repName='{family}' in {assembly}…")
     count_out, _, _ = client.run_command(
         f"zcat {rmsk_file} | awk -F'\\t' '$11==\"{family}\"' | wc -l",
-        timeout=120,
     )
     count_str = count_out.strip().split()[-1] if count_out.strip() else "?"
     try:
@@ -2487,7 +2484,6 @@ def _step_dfam_query(client):
     count_out, count_err, count_rc = client.run_command(
         f"{client._python} {client.remote_work_dir}/te_prep.py "
         f"--family {family} --build {assembly} --count-only --source dfam",
-        timeout=120,
     )
     if count_rc != 0:
         print(red(f"\n  Dfam count failed (exit {count_rc})."))

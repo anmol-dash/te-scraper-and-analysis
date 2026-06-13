@@ -71,6 +71,30 @@ _CODON_TABLE = {
 _PURINES = set("AG")
 _PYRIMIDINES = set("CT")
 
+# Neutral substitution rate (subs/site/year) keyed by genome assembly. The mouse
+# lineage substitutes ~2x faster than human, so using the human rate on mm10/mm39
+# data overestimates ages ~2x. Values are order-of-magnitude lineage estimates.
+_SUBST_RATES = {
+    "hg38": 2.2e-9, "hg19": 2.2e-9, "grch38": 2.2e-9, "grch37": 2.2e-9,
+    "t2t": 2.2e-9, "chm13": 2.2e-9, "hs1": 2.2e-9,            # human/primate ~2.2e-9
+    "mm10": 4.5e-9, "mm39": 4.5e-9, "mm9": 4.5e-9, "grcm38": 4.5e-9,
+    "grcm39": 4.5e-9,                                          # mouse ~4.5e-9
+    "rn6": 4.5e-9, "rn7": 4.5e-9,                              # rat ~ mouse-like
+}
+_DEFAULT_SUBST_RATE = 2.2e-9
+
+# Sanity ceiling on an estimated age: nothing in a genome can be older than the
+# age of the Earth. Ages above this are a bug (e.g. a saturated divergence) and
+# are recorded as NaN rather than reported.
+_MAX_PLAUSIBLE_AGE_YR = 4.5e9
+
+
+def rate_for_assembly(assembly: str, override: float | None) -> float:
+    """Pick a substitution rate: explicit --subst-rate wins, else assembly map."""
+    if override is not None:
+        return override
+    return _SUBST_RATES.get(str(assembly).lower().strip(), _DEFAULT_SUBST_RATE)
+
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -112,8 +136,21 @@ def _longest_orf_aa(seq: str) -> int:
 
 # ── divergence (Kimura 2-parameter) ──────────────────────────────────────────────
 
-def kimura2p(a: str, b: str) -> float:
-    """Kimura 2-parameter distance between two aligned, equal-length sequences."""
+# Above this Kimura distance a pair is treated as non-homologous / unalignable
+# (K2P saturates ~0.75 for random DNA; >1.0 means the two sequences are not a
+# real alignment). Such values are returned as NaN rather than emitted as a
+# "distance", so they never feed a molecular-clock age.
+_MAX_REAL_K2P = 1.0
+
+
+def kimura2p(a: str, b: str, min_sites: int = 20) -> float:
+    """Kimura 2-parameter distance between two aligned, equal-length sequences.
+
+    Returns NaN (not a number) when the pair is unusable: too few comparable
+    sites, the K2P formula saturates (1-2P-Q <= 0 or 1-2Q <= 0), or the result
+    exceeds _MAX_REAL_K2P (i.e. the two sequences are not genuinely homologous).
+    A NaN here propagates to a NaN age — we never fabricate a divergence.
+    """
     transitions = transversions = sites = 0
     for x, y in zip(a.upper(), b.upper()):
         if x in "-N" or y in "-N" or x not in "ACGT" or y not in "ACGT":
@@ -125,15 +162,18 @@ def kimura2p(a: str, b: str) -> float:
             transitions += 1
         else:
             transversions += 1
-    if sites == 0:
+    if sites < min_sites:
         return float("nan")
     P = transitions / sites
     Q = transversions / sites
-    try:
-        k = -0.5 * np.log(1 - 2 * P - Q) - 0.25 * np.log(1 - 2 * Q)
-    except (ValueError, FloatingPointError):
+    term1 = 1.0 - 2.0 * P - Q
+    term2 = 1.0 - 2.0 * Q
+    if term1 <= 0 or term2 <= 0:          # saturation — distance is undefined
         return float("nan")
-    return float(k) if np.isfinite(k) else float("nan")
+    k = -0.5 * np.log(term1) - 0.25 * np.log(term2)
+    if not np.isfinite(k) or k > _MAX_REAL_K2P:
+        return float("nan")
+    return float(k)
 
 
 # ── FASTA + alignment ─────────────────────────────────────────────────────────
@@ -156,33 +196,102 @@ def _read_fasta(path: Path) -> list:
     return records
 
 
+class AlignmentError(RuntimeError):
+    """Raised when a real alignment cannot be produced. We never pseudo-align."""
+
+
 def run_mafft(records: list, mafft_cmd: str) -> list:
-    """Align records with MAFFT. Returns list of (name, aligned_seq) or [] on failure."""
+    """Align records with MAFFT. Returns list of (name, aligned_seq).
+
+    Raises AlignmentError if MAFFT is missing or fails — we NEVER fall back to a
+    length-padded pseudo-alignment, because that produces meaningless per-site
+    comparisons (and therefore bogus divergence/age). No timeout: large inputs
+    are allowed to run to completion (subsample the input instead).
+    """
     exe = shutil.which(mafft_cmd) or shutil.which("mafft")
     if not exe:
-        _pp("  WARNING: mafft not found --- falling back to length-padded pseudo-alignment.")
-        return _pad_align(records)
+        raise AlignmentError(
+            f"mafft not found (looked for {mafft_cmd!r} and 'mafft' on PATH). "
+            "Install MAFFT or pass --mafft-cmd. Refusing to pseudo-align.")
     with tempfile.TemporaryDirectory() as td:
         fin = Path(td) / "in.fa"
         _write_fasta(records, fin)
-        try:
-            res = subprocess.run([exe, "--auto", "--quiet", str(fin)],
-                                 capture_output=True, text=True, timeout=600)
-        except Exception as e:                                    # noqa: BLE001
-            _pp(f"  WARNING: mafft failed ({e}); using pseudo-alignment.")
-            return _pad_align(records)
+        res = subprocess.run([exe, "--auto", "--quiet", str(fin)],
+                             capture_output=True, text=True)
         if res.returncode != 0:
-            _pp(f"  WARNING: mafft returncode {res.returncode}; using pseudo-alignment.")
-            return _pad_align(records)
+            raise AlignmentError(
+                f"mafft exited with code {res.returncode}: {res.stderr.strip()[:300]}")
         fout = Path(td) / "out.fa"
         fout.write_text(res.stdout)
-        return _read_fasta(fout)
+        out = _read_fasta(fout)
+        if not out:
+            raise AlignmentError("mafft produced no alignment output.")
+        return out
 
 
-def _pad_align(records: list) -> list:
-    """Trivial gap-pad to equal length so divergence math still works without MAFFT."""
-    m = max((len(s) for _, s in records), default=0)
-    return [(n, s + "-" * (m - len(s))) for n, s in records]
+# ── align all copies to the consensus in ONE pass ──────────────────────────────
+# Per-copy divergence is measured by aligning every copy onto the family consensus
+# coordinate frame with `mafft --addfragments ... --keeplength` (one MAFFT call,
+# not a 12k-way MSA and not 12k separate Smith-Waterman alignments — both of which
+# are far too slow / what previously timed out and fell back to a pseudo-alignment).
+# --keeplength projects each copy onto the consensus length, so every copy row is
+# directly comparable to the consensus row column-by-column.
+
+def align_copies_to_consensus(records: list, cons: str, mafft_cmd: str):
+    """Align all copies onto `cons` via `mafft --addfragments --keeplength`.
+
+    Returns (aligned_consensus_row, {index: aligned_copy_row}). Raises
+    AlignmentError on failure — never pads/pseudo-aligns.
+    """
+    exe = shutil.which(mafft_cmd) or shutil.which("mafft")
+    if not exe:
+        raise AlignmentError(
+            f"mafft not found (looked for {mafft_cmd!r} and 'mafft'). "
+            "Install MAFFT or pass --mafft-cmd. Refusing to pseudo-align.")
+    with tempfile.TemporaryDirectory() as td:
+        ref = Path(td) / "ref.fa"
+        ref.write_text(f">CONSENSUS\n{cons}\n")
+        frags = Path(td) / "frags.fa"
+        # Index-named fragments so we can map output rows back by order, regardless
+        # of duplicate/long locus labels (MAFFT truncates names).
+        frags.write_text("".join(
+            f">c{i}\n{s.upper().replace('-', '')}\n" for i, (_, s) in enumerate(records)))
+        res = subprocess.run(
+            [exe, "--addfragments", str(frags), "--keeplength",
+             "--thread", "-1", "--quiet", str(ref)],
+            capture_output=True, text=True)
+        if res.returncode != 0:
+            raise AlignmentError(
+                f"mafft --addfragments failed ({res.returncode}): "
+                f"{res.stderr.strip()[:300]}")
+        aligned = _read_fasta_text(res.stdout)
+    if not aligned:
+        raise AlignmentError("mafft --addfragments produced no output.")
+    # Output order: the reference (CONSENSUS) first, then the fragments in input order.
+    name_to_seq = dict(aligned)
+    cons_row = name_to_seq.get("CONSENSUS")
+    if cons_row is None:
+        raise AlignmentError("consensus row missing from mafft --addfragments output.")
+    copy_rows = {}
+    for i in range(len(records)):
+        row = name_to_seq.get(f"c{i}")
+        if row is not None:
+            copy_rows[i] = row
+    return cons_row, copy_rows
+
+
+def _read_fasta_text(text: str) -> list:
+    records, name, buf = [], None, []
+    for line in text.splitlines():
+        if line.startswith(">"):
+            if name is not None:
+                records.append((name, "".join(buf)))
+            name, buf = line[1:].strip().split()[0] if line[1:].strip() else "", []
+        else:
+            buf.append(line.strip())
+    if name is not None:
+        records.append((name, "".join(buf)))
+    return records
 
 
 def consensus_of(aln: list) -> str:
@@ -200,6 +309,43 @@ def consensus_of(aln: list) -> str:
                     counts[b] = counts.get(b, 0) + 1
         cols.append(max(counts, key=counts.get) if counts else "N")
     return "".join(cols)
+
+
+def build_family_consensus(records: list, consensus_fasta, mafft_cmd: str,
+                           sample_n: int) -> str:
+    """Return a single family consensus sequence.
+
+    Priority:
+      1. If --consensus-fasta is given, MAFFT-align those consensus sequences
+         (few, short) and take the majority — a real alignment.
+      2. Otherwise MAFFT-align a representative subsample of up to `sample_n`
+         copies and take the majority consensus.
+
+    Never pads/pseudo-aligns. Raises AlignmentError on failure so the caller can
+    fail-and-log instead of emitting garbage.
+    """
+    if consensus_fasta and Path(consensus_fasta).exists():
+        recs = _read_fasta(Path(consensus_fasta))
+        recs = [(n, s.replace("-", "")) for n, s in recs if s.strip()]
+        if not recs:
+            raise AlignmentError(f"consensus FASTA {consensus_fasta} contained no sequences.")
+        if len(recs) == 1:
+            return recs[0][1].upper()
+        _pp(f"  Building family consensus from {len(recs)} provided consensus sequences (MAFFT)...")
+        return consensus_of(run_mafft(recs, mafft_cmd))
+
+    n = len(records)
+    if n == 0:
+        raise AlignmentError("no input sequences to build a consensus from.")
+    if n <= sample_n:
+        sample = records
+    else:
+        # Deterministic, even-spread subsample across the (genome-ordered) copies.
+        idx = np.linspace(0, n - 1, sample_n).astype(int)
+        sample = [records[i] for i in sorted(set(idx))]
+    _pp(f"  Building family consensus from a {len(sample)}-copy representative MAFFT alignment "
+        f"(of {n} copies)...")
+    return consensus_of(run_mafft(sample, mafft_cmd))
 
 
 # ── NJ tree (Biopython) ─────────────────────────────────────────────────────────
@@ -321,7 +467,10 @@ def write_values(res: dict, reports: Path):
         "=" * 60, "GAMECA Phylogenetics / Divergence-Age --- Measured Values",
         f"Generated: {ts}", "=" * 60,
         f"  Family:                {res['family']}",
+        f"  Assembly / rate:       {res['assembly']}  ({res['subst_rate']:.3g} subs/site/yr, "
+        f"clock divisor {res['clock_divisor']:g})",
         f"  Copies analysed:       {res['n_copies']}",
+        f"  Usable divergence:     {res['n_usable_div']}  ({res['n_unalignable']} unalignable→NaN)",
         f"  Tree tips:             {res['n_tips']}",
         f"  Median divergence:     {res['median_div_pct']:.2f} %",
         f"  Median est. age:       {res['median_age_myr']:.2f} Myr",
@@ -344,12 +493,23 @@ def parse_args():
     p.add_argument("--input", required=True, help="CSV with a Seq column")
     p.add_argument("--reports-dir", default="./reports")
     p.add_argument("--family", default="TE")
-    p.add_argument("--subst-rate", type=float, default=2.2e-9,
-                   help="Neutral substitution rate (subs/site/year); human≈2.2e-9")
+    p.add_argument("--assembly", default="hg38",
+                   help="Genome assembly; selects the neutral substitution rate "
+                        "(hg38≈2.2e-9, mm10/mm39≈4.5e-9) unless --subst-rate is given")
+    p.add_argument("--subst-rate", type=float, default=None,
+                   help="Neutral substitution rate (subs/site/year). Overrides the "
+                        "assembly-derived rate when set")
     p.add_argument("--clock-divisor", type=float, default=1.0,
-                   help="1=consensus-based age (default); 2=paired-LTR estimate")
+                   help="1=consensus-based age (default, correct for divergence from a "
+                        "consensus); 2=paired-LTR (5'/3' LTR) estimate")
     p.add_argument("--intact-orf-aa", type=int, default=100,
                    help="Longest-ORF aa threshold to call a copy 'intact'")
+    p.add_argument("--consensus-fasta", default=None,
+                   help="Optional consensus FASTA (e.g. all_cluster_consensuses.fa); "
+                        "used to build the family consensus instead of subsampling copies")
+    p.add_argument("--consensus-sample", type=int, default=400,
+                   help="Max copies MAFFT-aligned to build the family consensus when no "
+                        "--consensus-fasta is given (default 400)")
     p.add_argument("--max-tree-tips", type=int, default=60,
                    help="Cap tips on the NJ tree for readability")
     p.add_argument("--mafft-cmd", default="mafft")
@@ -384,26 +544,59 @@ def main():
 
     records = [(_label(i, r), str(r["Seq"]).upper()) for i, r in df.iterrows()]
 
-    # 1. align all copies
-    _pp("Aligning copies (MAFFT)...")
-    aln = run_mafft(records, args.mafft_cmd)
-    cons = consensus_of(aln)
+    subst_rate = rate_for_assembly(args.assembly, args.subst_rate)
+    _pp(f"  Assembly {args.assembly} → substitution rate {subst_rate:.3g} subs/site/yr "
+        f"(clock divisor {args.clock_divisor:g})")
+
+    # 1. Build a single family consensus from a REAL alignment (provided consensus
+    #    FASTA, or a MAFFT alignment of a representative subsample). Never padded.
+    try:
+        cons = build_family_consensus(records, args.consensus_fasta,
+                                      args.mafft_cmd, args.consensus_sample)
+    except AlignmentError as e:
+        _pp(f"FATAL: cannot build family consensus — {e}")
+        sys.exit(2)
+    if not cons or set(cons.upper()) <= {"N"}:
+        _pp("FATAL: family consensus is empty/all-N; refusing to emit divergence.")
+        sys.exit(2)
     _pp(f"  Consensus length: {len(cons)} bp")
 
-    # 2. per-copy divergence + age
+    # 2. Align every copy onto the consensus in ONE mafft --addfragments pass, then
+    #    compute per-copy Kimura divergence + clock age. Unalignable / saturated
+    #    copies get NaN (never a fake number).
+    _pp("Aligning all copies to consensus (mafft --addfragments --keeplength)...")
+    try:
+        cons_row, copy_rows = align_copies_to_consensus(records, cons, args.mafft_cmd)
+    except AlignmentError as e:
+        _pp(f"FATAL: cannot align copies to consensus — {e}")
+        sys.exit(2)
+    _pp(f"  {len(copy_rows):,}/{len(records):,} copies placed on the consensus frame")
+
     _pp("Computing Kimura divergence + clock age...")
-    aln_map = dict(aln)
     div, ages, intact_flags, longest_orfs = [], [], [], []
-    for name, raw in records:
-        a = aln_map.get(name, raw)
-        k = kimura2p(a, cons)
+    n_unalignable = 0
+    for idx, (name, raw) in enumerate(records):
+        row = copy_rows.get(idx)
+        k = kimura2p(row, cons_row) if row is not None else float("nan")
+        if not np.isfinite(k):
+            n_unalignable += 1
+            age = float("nan")
+        else:
+            age = k / (subst_rate * args.clock_divisor)
+            if age > _MAX_PLAUSIBLE_AGE_YR:           # impossible — treat as NaN
+                age = float("nan")
         div.append(k)
-        ages.append((k / (args.subst_rate * args.clock_divisor)) if np.isfinite(k) else float("nan"))
+        ages.append(age)
         orf = _longest_orf_aa(raw)
         longest_orfs.append(orf)
         intact_flags.append(orf >= args.intact_orf_aa)
     div = np.array(div)
     ages = np.array(ages)
+    _pp(f"  {np.isfinite(div).sum():,}/{len(div):,} copies with a usable divergence "
+        f"({n_unalignable:,} unalignable/saturated → NaN)")
+    if not np.isfinite(div).any():
+        _pp("FATAL: no copy produced a usable divergence; refusing to report a median.")
+        sys.exit(2)
 
     df_out = df.copy()
     df_out["kimura_div"] = div
@@ -424,21 +617,33 @@ def main():
     df_out.to_csv(reports / "phylo_per_copy.csv", index=False)
     _pp(f"  Wrote {reports/'phylo_per_copy.csv'}")
 
-    # 4. tree (cluster consensuses if available, else representative copies)
+    # 4. tree (cluster consensuses if available, else representative copies).
+    #    Each tip is built from a REAL MAFFT alignment; if MAFFT is unavailable the
+    #    tree is skipped (non-fatal) — we never pseudo-align to fake a tree.
     _pp("Building NJ tree...")
-    if "Cluster" in df.columns and df["Cluster"].nunique() > 1:
-        tip_records = []
-        for cl, sub in df.groupby("Cluster"):
-            sub_aln = [(n, aln_map.get(n, s)) for n, s in
-                       [(_label(i, r), str(r["Seq"])) for i, r in sub.iterrows()]]
-            tip_records.append((f"cluster_{cl}_n{len(sub)}", consensus_of(sub_aln)))
-        _pp(f"  Tree over {len(tip_records)} cluster consensuses")
-    else:
-        tip_records = aln[: args.max_tree_tips]
-        _pp(f"  Tree over {len(tip_records)} representative copies")
-    tree_aln = run_mafft([(n, s.replace("-", "")) for n, s in tip_records], args.mafft_cmd) \
-        if "Cluster" in df.columns else tip_records
-    tree_res = build_nj_tree(tree_aln, reports / "fig_phylo_tree.pdf", args.family)
+    tree_res = {"ok": False, "n_tips": 0, "newick": ""}
+    try:
+        if "Cluster" in df.columns and df["Cluster"].nunique() > 1:
+            tip_records = []
+            for cl, sub in df.groupby("Cluster"):
+                sub_seqs = [(_label(i, r), str(r["Seq"]).upper().replace("-", ""))
+                            for i, r in sub.iterrows()]
+                if len(sub_seqs) > args.consensus_sample:
+                    sidx = np.linspace(0, len(sub_seqs) - 1, args.consensus_sample).astype(int)
+                    sub_seqs = [sub_seqs[i] for i in sorted(set(sidx))]
+                cl_cons = consensus_of(run_mafft(sub_seqs, args.mafft_cmd)) \
+                    if len(sub_seqs) > 1 else sub_seqs[0][1]
+                tip_records.append((f"cluster_{cl}_n{len(sub)}", cl_cons))
+            _pp(f"  Tree over {len(tip_records)} cluster consensuses")
+            tree_aln = run_mafft([(n, s.replace("-", "")) for n, s in tip_records],
+                                 args.mafft_cmd)
+        else:
+            reps = records[: args.max_tree_tips]
+            _pp(f"  Tree over {len(reps)} representative copies")
+            tree_aln = run_mafft([(n, s.replace("-", "")) for n, s in reps], args.mafft_cmd)
+        tree_res = build_nj_tree(tree_aln, reports / "fig_phylo_tree.pdf", args.family)
+    except AlignmentError as e:
+        _pp(f"  WARNING: skipping NJ tree — {e}")
 
     # 5. figures
     fig_divergence(div, ages, args.family, reports / "fig_phylo_divergence.pdf")
@@ -453,6 +658,11 @@ def main():
         "median_div_pct": float(np.nanmedian(div) * 100) if np.isfinite(div).any() else 0.0,
         "median_age_myr": float(np.nanmedian(ages) / 1e6) if np.isfinite(ages).any() else 0.0,
         "n_intact": int(np.sum(intact_flags)),
+        "n_usable_div": int(np.isfinite(div).sum()),
+        "n_unalignable": int(n_unalignable),
+        "subst_rate": subst_rate,
+        "clock_divisor": args.clock_divisor,
+        "assembly": args.assembly,
         "master_name": str(top.get("label", "---")) if len(master_df) else "---",
         "master_div_pct": float(top.get("kimura_div", float("nan")) * 100)
         if len(master_df) and np.isfinite(top.get("kimura_div", float("nan"))) else 0.0,

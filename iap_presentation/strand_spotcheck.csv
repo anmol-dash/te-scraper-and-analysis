@@ -1,9 +1,0 @@
-row,chr,start,stop,strand,ident_as_called,ident_if_flipped,verdict,ucsc_link
-5759,chr2,19360833,19361142,-,0.272,1.0,MISMATCH,https://genome.ucsc.edu/cgi-bin/hgTracks?db=mm10&position=chr2:19360834-19361142
-1190,chr10,65954441,65955557,-,0.235,1.0,MISMATCH,https://genome.ucsc.edu/cgi-bin/hgTracks?db=mm10&position=chr10:65954442-65955557
-8532,chr5,140529819,140530291,-,0.258,1.0,MISMATCH,https://genome.ucsc.edu/cgi-bin/hgTracks?db=mm10&position=chr5:140529820-140530291
-9983,chr7,139426864,139427171,-,0.254,1.0,MISMATCH,https://genome.ucsc.edu/cgi-bin/hgTracks?db=mm10&position=chr7:139426865-139427171
-8434,chr5,104971099,104971390,+,1.0,0.199,STRAND_OK,https://genome.ucsc.edu/cgi-bin/hgTracks?db=mm10&position=chr5:104971100-104971390
-2315,chr12,91228951,91229700,+,1.0,0.256,STRAND_OK,https://genome.ucsc.edu/cgi-bin/hgTracks?db=mm10&position=chr12:91228952-91229700
-1130,chr10,50491302,50491637,+,1.0,0.304,STRAND_OK,https://genome.ucsc.edu/cgi-bin/hgTracks?db=mm10&position=chr10:50491303-50491637
-6331,chr2,148616329,148616658,+,1.0,0.231,STRAND_OK,https://genome.ucsc.edu/cgi-bin/hgTracks?db=mm10&position=chr2:148616330-148616658

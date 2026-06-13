@@ -166,7 +166,7 @@ def search_seq_chromosomal(primer, fasta=None, timeout=120, genome_cache=None):
     with ThreadPoolExecutor(max_workers=1) as ex:
         fut = ex.submit(_search_genome_full, primer, fasta_path, stop_ev)
         try:
-            hits = fut.result(timeout=timeout)
+            hits = fut.result()
             if hits is None:
                 raise FuturesTimeoutError()
             dfh = pd.DataFrame(hits, columns=["chrom", "start", "stop", "strand"])
@@ -261,7 +261,6 @@ def design_primers(df, primer_k=18, top_global=8, top_cluster=5,
         for i, pr in enumerate(selected):
             _pp(f"  [{i+1}/{len(selected)}] {pr}")
             dfh = search_seq_chromosomal(pr, fasta=genome_fa,
-                                         timeout=primer_timeout,
                                          genome_cache=genome_cache)
             primer_hits[pr] = dfh
             dfh.to_csv(out_dir / f"{pr}_genome_hits.csv", index=False)

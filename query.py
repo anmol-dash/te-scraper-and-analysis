@@ -176,10 +176,11 @@ def parse_args(argv=None):
                         "structure predictions (default: not run if unavailable)")
     p.add_argument("--subst-rate", type=float, default=None,
                    help="Neutral substitution rate (subs/site/yr) for divergence-based age "
-                        "estimates, e.g. 2.2e-9 for human (default: 2.2e-9)")
+                        "estimates. Default: derived from --assembly "
+                        "(hg38≈2.2e-9, mm10/mm39≈4.5e-9)")
     p.add_argument("--clock-divisor", type=float, default=None,
                    help="Molecular-clock divisor applied to substitution rate "
-                        "(e.g. 2 for a generation-time correction; default: 2)")
+                        "(1 = consensus-based age, default; 2 = paired-LTR estimate)")
     p.add_argument("--intact-orf-aa", type=int, default=None,
                    help="Minimum intact ORF length (aa) to call a copy a putative "
                         "master/source element (default: 100)")
@@ -811,9 +812,9 @@ def _check_ucsc_connectivity():
     import subprocess
     try:
         r = subprocess.run(
-            "curl -s --connect-timeout 6 --max-time 8 -o /dev/null "
+            "curl -s -o /dev/null "
             "-w '%{http_code}' 'https://api.genome.ucsc.edu/'",
-            shell=True, capture_output=True, text=True, timeout=12,
+            shell=True, capture_output=True, text=True,
         )
         code = r.stdout.strip()
         if r.returncode == 0 and code not in ("", "000"):
@@ -841,9 +842,9 @@ def _curl_json(url, timeout=30):
     that fails on some HPC nodes (exit 6 = can't resolve, exit 28 = timeout).
     """
     import subprocess, json as _json, shlex
-    cmd = f"curl -s --connect-timeout 8 --max-time {timeout} {shlex.quote(url)}"
+    cmd = f"curl -s {shlex.quote(url)}"
     result = subprocess.run(
-        cmd, shell=True, capture_output=True, text=True, timeout=timeout + 8,
+        cmd, shell=True, capture_output=True, text=True,
     )
     if result.returncode != 0:
         raise ConnectionError(
@@ -1959,8 +1960,7 @@ def run_motif_stage_full(args, out_dir, dirs, family_name,
                         try:
                             _r = _requests.get(
                                 f"https://mygene.info/v3/query?q={_q}"
-                                f"&species={SPECIES_ID}&fields=symbol,name,summary,go&size=1",
-                                timeout=15)
+                                f"&species={SPECIES_ID}&fields=symbol,name,summary,go&size=1")
                             if _r.status_code == 200:
                                 _hits = _r.json().get("hits",[])
                                 if _hits: return _hits[0]
@@ -2189,8 +2189,8 @@ def _run_standout_analysis(args, out_dir, dirs, family_name, stage_times):
     _opt = lambda flag, val: [flag, str(val)] if val is not None else []
     _opt_list = lambda flag, vals: ([flag] + [str(v) for v in vals]) if vals else []
 
-    _subst_rate     = _g("subst_rate", "2.2e-9")
-    _clock_divisor  = _g("clock_divisor", "2")
+    _subst_rate     = getattr(args, "subst_rate", None)   # None → phylo derives rate from --assembly
+    _clock_divisor  = _g("clock_divisor", "1")
     _intact_orf_aa  = _g("intact_orf_aa", "100")
     _mafft_cmd      = getattr(args, "mafft_cmd", None)
     _grna_cas       = _g("grna_cas", "SpCas9")
@@ -2210,9 +2210,11 @@ def _run_standout_analysis(args, out_dir, dirs, family_name, stage_times):
 
     _MODULES = [
         ("phylo",         "run_phylo_analysis.py",
-         ["--subst-rate", str(_subst_rate), "--clock-divisor", str(_clock_divisor),
+         ["--assembly", _assembly_arg, "--clock-divisor", str(_clock_divisor),
           "--intact-orf-aa", str(_intact_orf_aa)]
-         + _opt("--mafft-cmd", _mafft_cmd)),
+         + _opt("--subst-rate", _subst_rate)
+         + _opt("--mafft-cmd", _mafft_cmd)
+         + (["--consensus-fasta", str(cons_fa)] if cons_fa.exists() else [])),
         ("grna",          "run_grna_offtarget.py",
          ["--cas", str(_grna_cas), "--max-mm", str(_grna_max_mm)]
          + _opt("--background", _grna_background)),

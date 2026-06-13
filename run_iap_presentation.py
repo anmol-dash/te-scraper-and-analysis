@@ -167,7 +167,7 @@ def _ucsc_seq(assembly, chrom, start0, end, timeout=20):
     import urllib.request
     url = (f"https://api.genome.ucsc.edu/getData/sequence"
            f"?genome={assembly};chrom={chrom};start={start0};end={end}")
-    with urllib.request.urlopen(url, timeout=timeout) as r:
+    with urllib.request.urlopen(url) as r:
         data = json.loads(r.read().decode())
     return data.get("dna", "").upper()
 

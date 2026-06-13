@@ -97,7 +97,6 @@ def _connect(hostname: str, username: str, password: str,
 
     _log(f"Connecting to {hostname}:{port}...")
     transport = paramiko.Transport((hostname, port))
-    transport.banner_timeout = 60
     transport.connect()
 
     # Key auth first
@@ -131,7 +130,6 @@ def _run(transport: paramiko.Transport, cmd: str, timeout: int = 120) -> tuple:
     """Run a command; return (stdout, stderr, exit_code)."""
     ch = transport.open_session()
     ch.get_pty()
-    ch.settimeout(timeout)
     ch.exec_command(f"HOME=/tmp bash -lc {shlex.quote(cmd)}")
     out, err = b"", b""
     while True:
@@ -164,7 +162,6 @@ def _upload_text(transport: paramiko.Transport, content: str,
     _, _, code = _run(
         transport,
         f"echo {shlex.quote(chunks[0])} | base64 -d > {shlex.quote(remote_path)}",
-        timeout=30,
     )
     if code != 0:
         raise RuntimeError(f"Upload of {label} chunk 1 failed (exit {code})")
@@ -173,7 +170,6 @@ def _upload_text(transport: paramiko.Transport, content: str,
         _, _, code = _run(
             transport,
             f"echo {shlex.quote(chunk)} | base64 -d >> {shlex.quote(remote_path)}",
-            timeout=30,
         )
         if code != 0:
             raise RuntimeError(f"Upload of {label} chunk {i}/{len(chunks)} failed")
@@ -203,7 +199,7 @@ def _upload_file(transport: paramiko.Transport, local_path: Path,
 def _detect_scheduler(transport: paramiko.Transport) -> str:
     out, _, _ = _run(transport,
         "command -v bsub && echo HAVE_LSF; command -v sbatch && echo HAVE_SLURM",
-        timeout=15)
+        )
     if "HAVE_LSF" in out:
         _log("  Scheduler: LSF (bsub)")
         return "lsf"
@@ -407,7 +403,6 @@ exit $EXIT_CODE
         _, _, code = _run(
             transport,
             f"cat > {shlex.quote(job_sh)} << 'GAMECA_SCRIPT_EOF'\n{job_script}\nGAMECA_SCRIPT_EOF",
-            timeout=30,
         )
         if code != 0:
             # Fallback: upload via base64
