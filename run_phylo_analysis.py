@@ -237,25 +237,31 @@ def run_mafft(records: list, mafft_cmd: str) -> list:
 # --keeplength projects each copy onto the consensus length, so every copy row is
 # directly comparable to the consensus row column-by-column.
 
-def align_copies_to_consensus(records: list, cons: str, mafft_cmd: str):
-    """Align all copies onto `cons` via `mafft --addfragments --keeplength`.
+def align_cluster_to_consensus(records: list, mafft_cmd: str):
+    """Place every copy on a common frame and derive a real consensus.
 
-    Returns (aligned_consensus_row, {index: aligned_copy_row}). Raises
-    AlignmentError on failure — never pads/pseudo-aligns.
+    Uses the longest copy as a compact seed reference, then `mafft --addfragments
+    --keeplength` to project every copy onto the seed's coordinates in ONE pass
+    (no slow N-way MSA). The consensus is then the per-column majority over the
+    aligned copies. Returns (consensus_row, {pos: aligned_copy_row}).
+
+    Raises AlignmentError on failure — never pads/pseudo-aligns.
     """
     exe = shutil.which(mafft_cmd) or shutil.which("mafft")
     if not exe:
         raise AlignmentError(
             f"mafft not found (looked for {mafft_cmd!r} and 'mafft'). "
             "Install MAFFT or pass --mafft-cmd. Refusing to pseudo-align.")
+    clean = [(i, s.upper().replace("-", "")) for i, (_, s) in enumerate(records)]
+    clean = [(i, s) for i, s in clean if s]
+    if not clean:
+        raise AlignmentError("no non-empty sequences in cluster.")
+    seed_i, seed_seq = max(clean, key=lambda t: len(t[1]))
     with tempfile.TemporaryDirectory() as td:
         ref = Path(td) / "ref.fa"
-        ref.write_text(f">CONSENSUS\n{cons}\n")
+        ref.write_text(f">SEED\n{seed_seq}\n")
         frags = Path(td) / "frags.fa"
-        # Index-named fragments so we can map output rows back by order, regardless
-        # of duplicate/long locus labels (MAFFT truncates names).
-        frags.write_text("".join(
-            f">c{i}\n{s.upper().replace('-', '')}\n" for i, (_, s) in enumerate(records)))
+        frags.write_text("".join(f">c{i}\n{s}\n" for i, s in clean))
         res = subprocess.run(
             [exe, "--addfragments", str(frags), "--keeplength",
              "--thread", "-1", "--quiet", str(ref)],
@@ -267,16 +273,24 @@ def align_copies_to_consensus(records: list, cons: str, mafft_cmd: str):
         aligned = _read_fasta_text(res.stdout)
     if not aligned:
         raise AlignmentError("mafft --addfragments produced no output.")
-    # Output order: the reference (CONSENSUS) first, then the fragments in input order.
     name_to_seq = dict(aligned)
-    cons_row = name_to_seq.get("CONSENSUS")
-    if cons_row is None:
-        raise AlignmentError("consensus row missing from mafft --addfragments output.")
-    copy_rows = {}
-    for i in range(len(records)):
-        row = name_to_seq.get(f"c{i}")
-        if row is not None:
-            copy_rows[i] = row
+    copy_rows = {i: name_to_seq[f"c{i}"] for i, _ in clean if f"c{i}" in name_to_seq}
+    if not copy_rows:
+        raise AlignmentError("no copy rows in mafft --addfragments output.")
+    # Real consensus = per-column majority base over the aligned copies (with
+    # --keeplength every row is the seed length, so columns line up).
+    L = max(len(r) for r in copy_rows.values())
+    cons_chars = []
+    rows = list(copy_rows.values())
+    for col in range(L):
+        counts = {}
+        for r in rows:
+            if col < len(r):
+                b = r[col].upper()
+                if b in "ACGT":
+                    counts[b] = counts.get(b, 0) + 1
+        cons_chars.append(max(counts, key=counts.get) if counts else "N")
+    cons_row = "".join(cons_chars)
     return cons_row, copy_rows
 
 
@@ -548,36 +562,43 @@ def main():
     _pp(f"  Assembly {args.assembly} → substitution rate {subst_rate:.3g} subs/site/yr "
         f"(clock divisor {args.clock_divisor:g})")
 
-    # 1. Build a single family consensus from a REAL alignment (provided consensus
-    #    FASTA, or a MAFFT alignment of a representative subsample). Never padded.
-    try:
-        cons = build_family_consensus(records, args.consensus_fasta,
-                                      args.mafft_cmd, args.consensus_sample)
-    except AlignmentError as e:
-        _pp(f"FATAL: cannot build family consensus — {e}")
-        sys.exit(2)
-    if not cons or set(cons.upper()) <= {"N"}:
-        _pp("FATAL: family consensus is empty/all-N; refusing to emit divergence.")
-        sys.exit(2)
-    _pp(f"  Consensus length: {len(cons)} bp")
-
-    # 2. Align every copy onto the consensus in ONE mafft --addfragments pass, then
-    #    compute per-copy Kimura divergence + clock age. Unalignable / saturated
-    #    copies get NaN (never a fake number).
-    _pp("Aligning all copies to consensus (mafft --addfragments --keeplength)...")
-    try:
-        cons_row, copy_rows = align_copies_to_consensus(records, cons, args.mafft_cmd)
-    except AlignmentError as e:
-        _pp(f"FATAL: cannot align copies to consensus — {e}")
-        sys.exit(2)
-    _pp(f"  {len(copy_rows):,}/{len(records):,} copies placed on the consensus frame")
-
-    _pp("Computing Kimura divergence + clock age...")
-    div, ages, intact_flags, longest_orfs = [], [], [], []
+    # 1+2. Per-copy Kimura divergence. To keep the reference compact and biologically
+    #      meaningful (a heterogeneous family — solo LTRs + full-length internals —
+    #      has no single sensible consensus), each cluster gets its OWN consensus,
+    #      built fresh from a MAFFT subsample of that cluster's real copies; its
+    #      copies are then placed on that consensus with `mafft --addfragments
+    #      --keeplength`. No single-family 33 kb mosaic, no pseudo-alignment.
+    div_by_idx = {}
     n_unalignable = 0
-    for idx, (name, raw) in enumerate(records):
-        row = copy_rows.get(idx)
-        k = kimura2p(row, cons_row) if row is not None else float("nan")
+
+    if "Cluster" in df.columns:
+        groups = list(df.groupby("Cluster").groups.items())
+        _pp(f"Per-cluster divergence over {len(groups)} clusters "
+            f"(consensus from up to {args.consensus_sample} copies each)...")
+    else:
+        groups = [("all", df.index)]
+        _pp("No Cluster column — single reference consensus for all copies...")
+
+    for cid, idx_labels in groups:
+        members = [(int(i), records[df.index.get_loc(i)]) for i in idx_labels]
+        recs = [(f"c{pos}", rec[1]) for pos, (i, rec) in enumerate(members)]
+        try:
+            cons_row, copy_rows = align_cluster_to_consensus(recs, args.mafft_cmd)
+        except AlignmentError as e:
+            _pp(f"  cluster {cid}: FATAL — cannot align ({e})")
+            sys.exit(2)
+        _pp(f"  cluster {cid}: {len(members)} copies, consensus {len(cons_row)} bp, "
+            f"{len(copy_rows)} placed")
+        for pos, (orig_i, rec) in enumerate(members):
+            row = copy_rows.get(pos)
+            k = kimura2p(row, cons_row) if row is not None else float("nan")
+            div_by_idx[orig_i] = k
+
+    _pp("Computing clock ages...")
+    div, ages, intact_flags, longest_orfs = [], [], [], []
+    for pos, (name, raw) in enumerate(records):
+        orig_i = df.index[pos]
+        k = div_by_idx.get(orig_i, float("nan"))
         if not np.isfinite(k):
             n_unalignable += 1
             age = float("nan")

@@ -26,7 +26,7 @@ biopython>=1.81,<2.0
 pysam>=0.22,<0.24
 MOODS-python>=1.9.4              # on-demand JASPAR PWM scanning (te_moods_scan.py)
 CIAlign>=1.0,<2.0
-colabfold[alphafold-minus-data]>=1.5.5
+colabfold[alphafold-minus-data]>=1.5.5  # AlphaFold2 via ColabFold (weights not bundled)
 pybigtools>=0.3
 
 # SSH client for HPC mode
