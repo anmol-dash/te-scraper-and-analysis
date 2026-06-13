@@ -325,6 +325,44 @@ def consensus_of(aln: list) -> str:
     return "".join(cols)
 
 
+def _seq_features(seq: str) -> np.ndarray:
+    """3-mer frequency vector (64 features) for a DNA sequence."""
+    seq = seq.upper()
+    bases = "ACGT"
+    kmers = [a + b + c for a in bases for b in bases for c in bases]
+    kmap = {k: i for i, k in enumerate(kmers)}
+    v = np.zeros(64, dtype=np.float32)
+    n = len(seq) - 2
+    if n > 0:
+        for i in range(n):
+            km = seq[i:i + 3]
+            if km in kmap:
+                v[kmap[km]] += 1
+        v /= n
+    return v
+
+
+def auto_cluster_sequences(records: list, target_size: int = 500) -> list:
+    """K-means on 3-mer composition. Returns int labels list."""
+    n = len(records)
+    k = max(2, int(np.ceil(n / target_size)))
+    _pp(f"  Auto-clustering {n:,} sequences into {k} clusters "
+        f"(target ~{target_size}/cluster)...")
+    feats = np.vstack([_seq_features(s) for _, s in records])
+    try:
+        from sklearn.cluster import MiniBatchKMeans
+        labels = MiniBatchKMeans(n_clusters=k, random_state=42, n_init=3,
+                                 batch_size=min(1024, n)).fit_predict(feats).tolist()
+    except ImportError:
+        gc = np.array([sum(s.count(b) for b in "GC") / max(len(s), 1)
+                       for _, s in records])
+        order = np.argsort(gc)
+        labels = [0] * n
+        for rank, idx in enumerate(order):
+            labels[idx] = min(k - 1, int(rank * k / n))
+    return labels
+
+
 def build_family_consensus(records: list, consensus_fasta, mafft_cmd: str,
                            sample_n: int) -> str:
     """Return a single family consensus sequence.
@@ -527,6 +565,9 @@ def parse_args():
     p.add_argument("--max-tree-tips", type=int, default=60,
                    help="Cap tips on the NJ tree for readability")
     p.add_argument("--mafft-cmd", default="mafft")
+    p.add_argument("--auto-cluster-size", type=int, default=500,
+                   help="Target copies per auto-cluster when no Cluster column is present "
+                        "(default 500; prevents MAFFT OOM on large families)")
     return p.parse_args()
 
 
@@ -573,12 +614,18 @@ def main():
     n_unalignable = 0
 
     if "Cluster" in df.columns:
-        groups = list(df.groupby("Cluster").groups.items())
+        cluster_col = "Cluster"
+        groups = list(df.groupby(cluster_col).groups.items())
         _pp(f"Per-cluster divergence over {len(groups)} clusters "
             f"(consensus from up to {args.consensus_sample} copies each)...")
     else:
-        groups = [("all", df.index)]
-        _pp("No Cluster column — single reference consensus for all copies...")
+        _pp("No Cluster column — auto-clustering by 3-mer composition...")
+        auto_labels = auto_cluster_sequences(records, target_size=args.auto_cluster_size)
+        df["_auto_cluster"] = auto_labels
+        cluster_col = "_auto_cluster"
+        groups = list(df.groupby(cluster_col).groups.items())
+        _pp(f"  → {len(groups)} auto-clusters, "
+            f"largest {max(len(v) for _, v in groups):,} copies")
 
     for cid, idx_labels in groups:
         members = [(int(i), records[df.index.get_loc(i)]) for i in idx_labels]
@@ -646,9 +693,8 @@ def main():
     _pp("Building NJ tree...")
     tree_res = {"ok": False, "n_tips": 0, "newick": ""}
     try:
-        tip_records = ([(f"cluster_{cid}_n{int((df['Cluster'] == cid).sum())}", cons)
-                        for cid, cons in cluster_consensus.items() if cons]
-                       if "Cluster" in df.columns else [])
+        tip_records = [(f"cluster_{cid}_n{int((df[cluster_col] == cid).sum())}", cons)
+                       for cid, cons in cluster_consensus.items() if cons]
         if len(tip_records) >= 3:
             _pp(f"  Tree over {len(tip_records)} cluster consensuses")
             tree_aln = run_mafft(tip_records, args.mafft_cmd)
