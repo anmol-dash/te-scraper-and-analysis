@@ -143,35 +143,45 @@ def build_scanner(pfms, pvalue=1e-4, bg=None, pseudocount=0.8, window=7):
 
 # ── per-process worker (multiprocessing) ────────────────────────────────────
 
-_W = {}  # per-worker globals: scanner, meta, widths, fasta handle
+_W = {}  # per-worker globals: scanner, meta, widths, fasta handle (optional)
 
 
 def _worker_init(genome_fa, pfm_path, pvalue, pseudocount):
-    import pysam
     pfms = parse_jaspar_pfms(pfm_path)
     scanner, meta, widths = build_scanner(pfms, pvalue=pvalue, pseudocount=pseudocount)
     _W["scanner"] = scanner
     _W["meta"] = meta
     _W["widths"] = widths
-    _W["fa"] = pysam.FastaFile(genome_fa)
+    if genome_fa is not None:
+        import pysam
+        _W["fa"] = pysam.FastaFile(genome_fa)
 
 
 def _scan_chunk(chunk):
-    """Scan a list of (chrom, start, stop) loci. Returns list of result tuples."""
-    fa = _W["fa"]; scanner = _W["scanner"]; meta = _W["meta"]; widths = _W["widths"]
-    chroms = set(fa.references)
+    """Scan a list of (chrom, start, stop[, seq]) loci. Returns list of result tuples.
+
+    When a 4th element (seq) is present the FASTA handle is not consulted.
+    """
+    fa = _W.get("fa"); scanner = _W["scanner"]; meta = _W["meta"]; widths = _W["widths"]
+    chroms = set(fa.references) if fa is not None else set()
     out = []
-    for chrom, start, stop in chunk:
-        c = chrom if chrom in chroms else (
-            chrom[3:] if chrom.startswith("chr") and chrom[3:] in chroms else
-            ("chr" + chrom) if ("chr" + chrom) in chroms else None)
-        if c is None:
-            continue
-        start = max(0, int(start)); stop = int(stop)
-        try:
-            seq = fa.fetch(c, start, stop)
-        except (KeyError, ValueError):
-            continue
+    for item in chunk:
+        if len(item) == 4:
+            chrom, start, stop, seq = item
+            start = max(0, int(start)); stop = int(stop)
+            c = chrom
+        else:
+            chrom, start, stop = item
+            c = chrom if chrom in chroms else (
+                chrom[3:] if chrom.startswith("chr") and chrom[3:] in chroms else
+                ("chr" + chrom) if ("chr" + chrom) in chroms else None)
+            if c is None:
+                continue
+            start = max(0, int(start)); stop = int(stop)
+            try:
+                seq = fa.fetch(c, start, stop)
+            except (KeyError, ValueError):
+                continue
         if not seq:
             continue
         results = scanner.scan(seq)
@@ -187,6 +197,77 @@ def _scan_chunk(chunk):
     return out
 
 
+# ── UCSC sequence fallback ──────────────────────────────────────────────────
+
+def _fetch_sequences_ucsc(chr_vals, start_vals, stop_vals, assembly, n_workers=4):
+    """Fetch sequences from the UCSC getData/sequence API using curl.
+
+    Uses curl via shell=True so DNS routes through /bin/sh, which works on HPC
+    nodes where Python's socket resolver fails. No timeout — retries indefinitely
+    with exponential back-off on rate-limits and transient errors.
+    Returns a list of sequences in the same order as the input iterables.
+    """
+    import subprocess, json as _json, shlex, threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    loci = list(zip(chr_vals, start_vals, stop_vals))
+    n = len(loci)
+    seqs = [None] * n
+    _lock = threading.Lock()
+
+    def _curl_json(url):
+        cmd = f"curl -s {shlex.quote(url)}"
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        if r.returncode != 0:
+            raise ConnectionError(f"curl exit={r.returncode}: {(r.stderr or r.stdout).strip()[:120]}")
+        try:
+            return _json.loads(r.stdout)
+        except _json.JSONDecodeError as exc:
+            raise ValueError(f"JSON parse: {exc} body={r.stdout[:80]!r}")
+
+    def _fetch_one(i):
+        chrom, start, stop = loci[i]
+        url = (f"https://api.genome.ucsc.edu/getData/sequence?"
+               f"genome={assembly};chrom={chrom};start={int(start)};end={int(stop)}")
+        attempt = 0
+        while True:
+            try:
+                import time as _time
+                _time.sleep(0.4)
+                res = _curl_json(url)
+                if res.get("statusCode") == 429:
+                    wait = min(120, 30 * 2 ** attempt)
+                    log.warning("UCSC rate-limited [%d] — sleeping %ds", i, wait)
+                    _time.sleep(wait)
+                    attempt += 1
+                    continue
+                if "error" in res:
+                    raise ValueError(res["error"])
+                dna = res.get("dna", "")
+                if not dna:
+                    raise ValueError("empty dna field")
+                return i, dna.upper()
+            except Exception as exc:
+                wait = min(120, 2 ** attempt)
+                log.warning("UCSC fetch [%d] attempt %d failed (%s) — retry in %ds",
+                            i, attempt + 1, exc, wait)
+                import time as _time
+                _time.sleep(wait)
+                attempt += 1
+
+    log.info("UCSC: fetching %d sequences for assembly=%s (%d workers) …", n, assembly, n_workers)
+    done = 0
+    with ThreadPoolExecutor(max_workers=n_workers) as exe:
+        futures = {exe.submit(_fetch_one, i): i for i in range(n)}
+        for fut in as_completed(futures):
+            i, seq = fut.result()
+            seqs[i] = seq
+            done += 1
+            if done % 50 == 0 or done == n:
+                log.info("UCSC: %d/%d sequences fetched", done, n)
+    return seqs
+
+
 # ── public entry point ──────────────────────────────────────────────────────
 
 def ensure_fai(genome_fa):
@@ -200,28 +281,63 @@ def ensure_fai(genome_fa):
 
 
 def scan_loci(loci_df, genome_fa, pfm_path, chr_col, start_col, stop_col,
-              pvalue=1e-4, threads=None, pseudocount=0.8, chunk_size=64):
+              pvalue=1e-4, threads=None, pseudocount=0.8, chunk_size=64,
+              seq_col=None, assembly=None):
     """Scan all loci in loci_df against the JASPAR PFMs.
+
+    If seq_col is given, sequences are taken directly from that DataFrame column
+    and genome_fa is not needed (pass None). Otherwise genome_fa must be an
+    indexed FASTA path.
 
     Returns a DataFrame with columns
         [chr_col, start_col, stop_col,
          Motif_chr, Motif_start, Motif_end, Motif_name, Motif_score, Motif_strand]
     i.e. the same locus x motif-hit schema the bedtools path produced.
     """
-    genome_fa = str(genome_fa)
-    if not os.path.exists(genome_fa):
-        raise FileNotFoundError(f"Genome FASTA not found: {genome_fa}")
-    ensure_fai(genome_fa)
+    using_seq_col = seq_col is not None and seq_col in loci_df.columns
+    if using_seq_col:
+        genome_fa = None
+        total_bp = loci_df[seq_col].astype(str).str.len().sum()
+        log.info("MOODS: %d loci, %.2f Mb of pre-loaded sequence, p<%.0e (seq_col=%s)",
+                 len(loci_df), total_bp / 1e6, pvalue, seq_col)
+    elif genome_fa is not None:
+        genome_fa = str(genome_fa)
+        if not os.path.exists(genome_fa):
+            raise FileNotFoundError(f"Genome FASTA not found: {genome_fa}")
+        ensure_fai(genome_fa)
+        total_bp = sum(int(r[stop_col]) - int(r[start_col])
+                       for _, r in loci_df[[start_col, stop_col]].iterrows())
+        log.info("MOODS: %d loci, %.2f Mb of locus sequence, p<%.0e",
+                 len(loci_df), total_bp / 1e6, pvalue)
+    else:
+        # No FASTA, no seq col — fall back to UCSC API download
+        if assembly is None:
+            raise ValueError("assembly must be supplied for UCSC fallback (e.g. 'mm10', 'hg38')")
+        log.info("MOODS: no genome FASTA or seq column — falling back to UCSC API (assembly=%s)", assembly)
+        seqs = _fetch_sequences_ucsc(
+            loci_df[chr_col].astype(str),
+            loci_df[start_col].astype(int),
+            loci_df[stop_col].astype(int),
+            assembly=assembly,
+        )
+        loci_df = loci_df.copy()
+        loci_df["_seq_ucsc"] = seqs
+        seq_col = "_seq_ucsc"
+        using_seq_col = True
+        genome_fa = None
 
     pfms = parse_jaspar_pfms(pfm_path)
-    total_bp = sum(int(r[stop_col]) - int(r[start_col])
-                   for _, r in loci_df[[start_col, stop_col]].iterrows())
-    log.info("MOODS: %d PFMs, %d loci, %.2f Mb of locus sequence, p<%.0e",
-             len(pfms), len(loci_df), total_bp / 1e6, pvalue)
+    log.info("MOODS: %d PFMs loaded", len(pfms))
 
-    loci = list(zip(loci_df[chr_col].astype(str),
-                    loci_df[start_col].astype(int),
-                    loci_df[stop_col].astype(int)))
+    if using_seq_col:
+        loci = list(zip(loci_df[chr_col].astype(str),
+                        loci_df[start_col].astype(int),
+                        loci_df[stop_col].astype(int),
+                        loci_df[seq_col].astype(str)))
+    else:
+        loci = list(zip(loci_df[chr_col].astype(str),
+                        loci_df[start_col].astype(int),
+                        loci_df[stop_col].astype(int)))
     chunks = [loci[i:i + chunk_size] for i in range(0, len(loci), chunk_size)]
 
     if threads is None:
@@ -265,7 +381,14 @@ def _main():
     import argparse
     ap = argparse.ArgumentParser(description="MOODS on-demand JASPAR scan of TE loci")
     ap.add_argument("--input", required=True, help="clustered CSV or BED of TE loci")
-    ap.add_argument("--genome-fa", required=True, help="indexed reference FASTA")
+    ap.add_argument("--genome-fa", default=None,
+                    help="indexed reference FASTA (not needed when --seq-col is used)")
+    ap.add_argument("--seq-col", default=None,
+                    help="CSV column containing pre-extracted sequences (e.g. Seq); "
+                         "auto-detected from Seq/seq/sequence if present")
+    ap.add_argument("--assembly", default=None,
+                    help="UCSC assembly name (e.g. mm10, hg38) — used as fallback when "
+                         "neither --genome-fa nor a sequence column is available")
     ap.add_argument("--jaspar-pfm", required=True, help="JASPAR raw PFM bundle")
     ap.add_argument("--out", default="moods_overlaps.tsv")
     ap.add_argument("--pvalue", type=float, default=1e-4)
@@ -279,9 +402,9 @@ def _main():
     if p.suffix.lower() in (".bed", ".tsv") and "," not in p.read_text(errors="ignore")[:200]:
         df = pd.read_csv(p, sep="\t", header=None).iloc[:, :3]
         df.columns = ["chr", "start", "stop"]
+        seq_col = None
     else:
         df = pd.read_csv(p)
-        # detect coord columns
         def fc(cands):
             for c in cands:
                 if c in df.columns:
@@ -290,9 +413,15 @@ def _main():
         sc = fc(["start", "Start", "chromStart"])
         ec = fc(["stop", "Stop", "End", "end", "chromEnd"])
         df = df.rename(columns={cc: "chr", sc: "start", ec: "stop"})
+        # auto-detect sequence column
+        seq_col = args.seq_col or fc(["Seq", "seq", "sequence"])
+
+    if seq_col is None and args.genome_fa is None and args.assembly is None:
+        ap.error("Provide --genome-fa, a CSV with a Seq column, or --assembly for UCSC fallback")
 
     out = scan_loci(df, args.genome_fa, args.jaspar_pfm, "chr", "start", "stop",
-                    pvalue=args.pvalue, threads=args.threads)
+                    pvalue=args.pvalue, threads=args.threads, seq_col=seq_col,
+                    assembly=args.assembly)
     out.to_csv(args.out, sep="\t", index=False)
     print(f"Wrote {len(out)} hits -> {args.out}")
 

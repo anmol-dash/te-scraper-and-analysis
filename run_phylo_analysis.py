@@ -569,6 +569,7 @@ def main():
     #      copies are then placed on that consensus with `mafft --addfragments
     #      --keeplength`. No single-family 33 kb mosaic, no pseudo-alignment.
     div_by_idx = {}
+    cluster_consensus = {}      # cid -> ungapped consensus (reused for the NJ tree)
     n_unalignable = 0
 
     if "Cluster" in df.columns:
@@ -589,6 +590,7 @@ def main():
             sys.exit(2)
         _pp(f"  cluster {cid}: {len(members)} copies, consensus {len(cons_row)} bp, "
             f"{len(copy_rows)} placed")
+        cluster_consensus[cid] = cons_row.replace("-", "")
         for pos, (orig_i, rec) in enumerate(members):
             row = copy_rows.get(pos)
             k = kimura2p(row, cons_row) if row is not None else float("nan")
@@ -638,31 +640,21 @@ def main():
     df_out.to_csv(reports / "phylo_per_copy.csv", index=False)
     _pp(f"  Wrote {reports/'phylo_per_copy.csv'}")
 
-    # 4. tree (cluster consensuses if available, else representative copies).
-    #    Each tip is built from a REAL MAFFT alignment; if MAFFT is unavailable the
-    #    tree is skipped (non-fatal) — we never pseudo-align to fake a tree.
+    # 4. NJ tree over the per-cluster consensuses we ALREADY built above (no extra
+    #    slow MSA). If MAFFT is unavailable the tree is skipped (non-fatal) — we
+    #    never pseudo-align to fake a tree.
     _pp("Building NJ tree...")
     tree_res = {"ok": False, "n_tips": 0, "newick": ""}
     try:
-        if "Cluster" in df.columns and df["Cluster"].nunique() > 1:
-            tip_records = []
-            for cl, sub in df.groupby("Cluster"):
-                sub_seqs = [(_label(i, r), str(r["Seq"]).upper().replace("-", ""))
-                            for i, r in sub.iterrows()]
-                if len(sub_seqs) > args.consensus_sample:
-                    sidx = np.linspace(0, len(sub_seqs) - 1, args.consensus_sample).astype(int)
-                    sub_seqs = [sub_seqs[i] for i in sorted(set(sidx))]
-                cl_cons = consensus_of(run_mafft(sub_seqs, args.mafft_cmd)) \
-                    if len(sub_seqs) > 1 else sub_seqs[0][1]
-                tip_records.append((f"cluster_{cl}_n{len(sub)}", cl_cons))
+        tip_records = ([(f"cluster_{cid}_n{int((df['Cluster'] == cid).sum())}", cons)
+                        for cid, cons in cluster_consensus.items() if cons]
+                       if "Cluster" in df.columns else [])
+        if len(tip_records) >= 3:
             _pp(f"  Tree over {len(tip_records)} cluster consensuses")
-            tree_aln = run_mafft([(n, s.replace("-", "")) for n, s in tip_records],
-                                 args.mafft_cmd)
+            tree_aln = run_mafft(tip_records, args.mafft_cmd)
+            tree_res = build_nj_tree(tree_aln, reports / "fig_phylo_tree.pdf", args.family)
         else:
-            reps = records[: args.max_tree_tips]
-            _pp(f"  Tree over {len(reps)} representative copies")
-            tree_aln = run_mafft([(n, s.replace("-", "")) for n, s in reps], args.mafft_cmd)
-        tree_res = build_nj_tree(tree_aln, reports / "fig_phylo_tree.pdf", args.family)
+            _pp(f"  Only {len(tip_records)} cluster consensuses — skipping NJ tree.")
     except AlignmentError as e:
         _pp(f"  WARNING: skipping NJ tree — {e}")
 
