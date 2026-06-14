@@ -375,16 +375,92 @@ def _auto_install_colabfold() -> str:
     return ""
 
 
+def _aligned_fasta_to_a3m(records: list, query_idx: int) -> str:
+    """Convert a list of (name, aligned_seq) pairs to a3m format for one query.
+
+    Query columns (non-gap in query): uppercase target residue or '-'.
+    Insertion columns (gap in query): lowercase target residue, skipped if target also gaps.
+    """
+    qseq = records[query_idx][1]
+    lines = [f">{records[query_idx][0]}", qseq.replace("-", "")]
+    for j, (hname, hseq) in enumerate(records):
+        if j == query_idx:
+            continue
+        out = []
+        for q, t in zip(qseq, hseq):
+            if q == "-":
+                if t != "-":
+                    out.append(t.lower())   # insertion relative to query
+            else:
+                out.append(t if t != "-" else "-")
+        lines += [f">{hname}", "".join(out)]
+    return "\n".join(lines) + "\n"
+
+
+def run_mafft(fasta_path: Path, a3m_dir: Path) -> bool:
+    """Align ORF protein sequences with MAFFT; write per-query a3m files for ColabFold."""
+    mafft = shutil.which("mafft")
+    if not mafft:
+        _pp("  ERROR: mafft not found on PATH — install with: conda install -c bioconda mafft")
+        return False
+
+    aligned_path = fasta_path.with_suffix(".mafft.fasta")
+    cmd = [mafft, "--auto", "--amino", "--quiet", str(fasta_path)]
+    _pp(f"  $ {' '.join(cmd)} > {aligned_path.name}")
+    with open(aligned_path, "w") as fh:
+        result = subprocess.run(cmd, stdout=fh, stderr=subprocess.PIPE, text=True)
+    if result.returncode != 0:
+        _pp(f"  ERROR: MAFFT failed:\n{result.stderr.strip()}")
+        return False
+
+    records, name, buf = [], None, []
+    for line in aligned_path.read_text().splitlines():
+        if line.startswith(">"):
+            if name is not None:
+                records.append((name, "".join(buf)))
+            name, buf = line[1:].strip(), []
+        else:
+            buf.append(line.strip().upper())
+    if name is not None:
+        records.append((name, "".join(buf)))
+
+    if not records:
+        _pp("  ERROR: MAFFT produced no output.")
+        return False
+
+    a3m_dir.mkdir(parents=True, exist_ok=True)
+    for i, (qname, _) in enumerate(records):
+        (a3m_dir / f"{qname}.a3m").write_text(_aligned_fasta_to_a3m(records, i))
+    _pp(f"  Wrote {len(records)} a3m files to {a3m_dir.name}/")
+    return True
+
+
 def run_colabfold(fasta_path: Path, cf_dir: Path, cmd: str,
-                  num_recycles: int = 3, num_models: int = 1) -> bool:
-    """Run colabfold_batch. Returns True on success."""
+                  num_recycles: int = 3, num_models: int = 1,
+                  singularity_image: str = "", use_gpu: bool = True,
+                  a3m_dir: Path = None) -> bool:
+    """Run colabfold_batch, optionally with a pre-computed MAFFT MSA or inside Singularity."""
     cf_dir.mkdir(parents=True, exist_ok=True)
-    args = [
-        cmd, str(fasta_path), str(cf_dir),
+    if a3m_dir is not None:
+        input_arg = str(a3m_dir)
+        msa_args  = ["--msa-mode", "custom"]
+    else:
+        input_arg = str(fasta_path)
+        msa_args  = ["--msa-mode", "MMseqs2-UniRef-Environmental"]
+    colabfold_args = [
+        cmd, input_arg, str(cf_dir),
         "--num-recycle", str(num_recycles),
         "--num-models",  str(num_models),
-        "--msa-mode",    "MMseqs2-UniRef-Environmental",
-    ]
+    ] + msa_args
+    if singularity_image:
+        sing_prefix = ["singularity", "exec"]
+        if use_gpu:
+            sing_prefix.append("--nv")
+        sing_prefix += ["--bind", f"{fasta_path.parent}:{fasta_path.parent}",
+                        singularity_image]
+        args = sing_prefix + colabfold_args
+    else:
+        args = colabfold_args
     _pp(f"  $ {' '.join(args)}")
     result = subprocess.run(args, text=True)
     return result.returncode == 0
@@ -721,6 +797,14 @@ def parse_args():
                    help="Build a majority consensus per Cluster in --input and fold it (#11)")
     p.add_argument("--colabfold-cmd", default="",
                    help="Path to colabfold_batch (auto-detected if blank)")
+    p.add_argument("--use-mafft",     action="store_true",
+                   help="Align ORFs locally with MAFFT and pass the MSA to colabfold_batch "
+                        "via --msa-mode custom, instead of the online MMseqs2 API.")
+    p.add_argument("--singularity-image", default="",
+                   help="Path to ColabFold .sif file; runs via 'singularity exec [--nv] <sif> colabfold_batch'. "
+                        "Bypasses the host alphafold-module check (useful when host GCC is too old).")
+    p.add_argument("--no-gpu",        action="store_true",
+                   help="Omit --nv from the singularity exec call (CPU-only mode)")
     p.add_argument("--num-recycles",  type=int, default=3)
     p.add_argument("--num-models",    type=int, default=1)
     p.add_argument("--force",         action="store_true",
@@ -799,35 +883,52 @@ def main():
     # ── 5. ColabFold ────────────────────────────────────────────────────────────
     cf_cmd = find_colabfold(args.colabfold_cmd)
     fold_results: dict = {}
+    sif = args.singularity_image
+    use_gpu = not args.no_gpu
 
     if not cf_cmd:
-        cf_cmd = _auto_install_colabfold()
+        if sif:
+            cf_cmd = "colabfold_batch"   # resolved inside the container
+        else:
+            cf_cmd = _auto_install_colabfold()
     if not cf_cmd:
         _pp("FATAL: colabfold_batch not found and auto-install failed.")
         _pp("  Tried: pip install colabfold[alphafold]  and  localColabFold installer.")
         _pp("  Pass --colabfold-cmd /path/to/colabfold_batch, or install ColabFold manually.")
+        _pp("  Or use --singularity-image /path/to/colabfold.sif to bypass host GCC issues.")
         sys.exit(3)
     else:
-        _pp(f"ColabFold found: {cf_cmd}")
-        # colabfold_batch imports the `alphafold` module at runtime — verify it's
-        # actually present (the previous run failed here with the binary present but
-        # the module missing). Force-install it; terminate if it still can't load.
-        if not _alphafold_importable():
-            _pp("  `alphafold` module not importable — installing colabfold[alphafold]...")
-            _pip_install_colabfold_alphafold()
+        _pp(f"ColabFold found: {cf_cmd}" + (f"  (via Singularity: {sif})" if sif else ""))
+        # When using Singularity the alphafold module lives inside the container —
+        # skip the host-side importability check entirely.
+        if not sif:
             if not _alphafold_importable():
-                _pp("FATAL: `alphafold` module could not be installed; colabfold_batch "
-                    "cannot run. Aborting fold prediction (no fake structures emitted).")
-                sys.exit(3)
-            _pp("  alphafold module now importable.")
+                _pp("  `alphafold` module not importable — installing colabfold[alphafold]...")
+                _pip_install_colabfold_alphafold()
+                if not _alphafold_importable():
+                    _pp("FATAL: `alphafold` module could not be installed; colabfold_batch "
+                        "cannot run. Aborting fold prediction (no fake structures emitted).")
+                    _pp("  TIP: re-run with --singularity-image /path/to/colabfold.sif "
+                        "to bypass host GCC/Python dependency issues.")
+                    sys.exit(3)
+                _pp("  alphafold module now importable.")
         already_done = (not args.force and cf_dir.exists()
                         and any(cf_dir.glob("*.pdb")))
         if already_done:
             _pp("  [cache] ColabFold output exists --- parsing without re-running")
         else:
+            a3m_dir = None
+            if args.use_mafft:
+                a3m_dir = reports / "mafft_a3m"
+                _pp("Running MAFFT alignment...")
+                if not run_mafft(fasta_path, a3m_dir):
+                    _pp("FATAL: MAFFT failed; cannot build custom MSA for ColabFold.")
+                    sys.exit(3)
             _pp("Running ColabFold (this may take several minutes)...")
             ok = run_colabfold(fasta_path, cf_dir, cf_cmd,
-                               args.num_recycles, args.num_models)
+                               args.num_recycles, args.num_models,
+                               singularity_image=sif, use_gpu=use_gpu,
+                               a3m_dir=a3m_dir)
             if not ok:
                 _pp("WARNING: ColabFold exited with non-zero status; "
                     "attempting to parse partial results.")

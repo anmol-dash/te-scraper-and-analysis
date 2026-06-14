@@ -111,7 +111,7 @@ _STAGE11_MODULES = [
          primary_output="fig_benchmark.png",            needs_consensus=False),
     dict(key="motif_gain",     runner="run_motif_gain.py",
          extra=[],          # --assembly injected at runtime
-         primary_output="motif_gain_measured_values.tex", needs_consensus=True),
+         primary_output="motif_gain_values.tex", needs_consensus=True),
 ]
 
 # Macro names to extract from each module's *_values.tex for report_numbers.txt.
@@ -590,7 +590,7 @@ def collect_stage11_meta(family: str, stage11_dir: Path) -> dict:
         "ltr_struct":    stage11_dir / "ltr_struct_values.tex",
         "subfamily":     stage11_dir / "subfamily_values.tex",
         "benchmark":     stage11_dir / "benchmark_values.tex",
-        "motif_gain":    stage11_dir / "motif_gain_measured_values.tex",
+        "motif_gain":    stage11_dir / "motif_gain_values.tex",
     }
     result: dict = {}
     for mod, path in tex_file_map.items():

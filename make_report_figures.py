@@ -109,6 +109,15 @@ STANDOUT_GROUPS = [
                  "benchmark_table.csv", "benchmark_values.tex"],
         needs_consensus=False,
     ),
+    dict(
+        key="motif_gain",
+        runner="run_motif_gain.py",
+        extra=[],
+        outputs=["fig_motif_gains_bar.png", "fig_motif_gains_heatmap.png",
+                 "motif_gain_per_copy.csv", "motif_gain_summary.csv",
+                 "motif_gain_values.tex"],
+        needs_consensus=True,
+    ),
 ]
 
 # Modules whose outputs live in expression_plots/ instead of reports/
@@ -130,7 +139,6 @@ PASSTHROUGH_MODULES = [
     "multiassembly_measured_values.tex",
     "fold_measured_values.tex",
     "provenance_measured_values.tex",
-    "motif_gain_measured_values.tex",
 ]
 
 
@@ -187,7 +195,7 @@ def ensure_standout_group(group, clustered_csv, reports_dir, cons_fa,
     if group.get("needs_consensus") and cons_fa and cons_fa.exists():
         cmd += ["--consensus-fasta", str(cons_fa)]
     cmd += group["extra"]
-    if assembly and group["key"] in ("divergence", "subfamily"):
+    if assembly and group["key"] in ("divergence", "subfamily", "motif_gain"):
         cmd += ["--assembly", assembly]
 
     ok = _run_module(group["key"], runner, cmd, reports_dir)
