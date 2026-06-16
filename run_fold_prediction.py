@@ -521,18 +521,21 @@ def run_colabfold(fasta_path: Path, cf_dir: Path, cmd: str,
         "--num-models",  str(num_models),
     ] + msa_args
     # ColabFold downloads ~4 GB of AlphaFold params into its --data dir on first
-    # run. The image default (/cache) is read-only under Singularity, so point it
-    # at a writable host dir under the (bind-mounted) reports folder. It persists
-    # across runs, so the download happens only once per reports-dir.
-    data_dir = fasta_path.parent / "colabfold_params"
+    # run. The image default (/cache) is read-only under Singularity, so keep the
+    # weights alongside the code (te-scraper-and-analysis/colabfold_params) so the
+    # repo folder is self-contained. It persists, so the download happens once.
+    data_dir = Path(__file__).resolve().parent / "colabfold_params"
     data_dir.mkdir(parents=True, exist_ok=True)
     colabfold_args += ["--data", str(data_dir)]
     if singularity_image:
         sing_prefix = ["singularity", "exec"]
         if use_gpu:
             sing_prefix.append("--nv")
-        sing_prefix += ["--bind", f"{fasta_path.parent}:{fasta_path.parent}",
-                        singularity_image]
+        # Bind every host path the run reads/writes: the reports dir (input fasta,
+        # a3m, outputs) and the params dir (weights), de-duplicated.
+        bind_paths = sorted({str(fasta_path.parent), str(data_dir)})
+        bind_arg = ",".join(f"{p}:{p}" for p in bind_paths)
+        sing_prefix += ["--bind", bind_arg, singularity_image]
         args = sing_prefix + colabfold_args
     else:
         args = colabfold_args
