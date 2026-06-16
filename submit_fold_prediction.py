@@ -13,6 +13,7 @@ Usage:
         [--top-n 5] \\
         [--source-seqs 100] \\
         [--colabfold-cmd colabfold_batch] \\
+        [--singularity-image colabfold.sif [--singularity-source colabfold.def]] \\
         [--gpu] \\
         [--scheduler lsf|slurm|auto]
 
@@ -49,6 +50,7 @@ _SCRIPT_DIR  = Path(__file__).resolve().parent
 _UPLOAD_FILES = [
     "run_fold_prediction.py",
     "requirements.txt",
+    "colabfold.def",          # used when --singularity-source colabfold.def
 ]
 
 
@@ -239,6 +241,16 @@ def parse_args():
                    help="Build + fold a per-cluster consensus (#11)")
     p.add_argument("--colabfold-cmd",  default="colabfold_batch",
                    help="colabfold_batch executable on the cluster")
+    p.add_argument("--singularity-image", default="",
+                   help="Run ColabFold inside this .sif on the cluster (built "
+                        "automatically if missing). Skips the host colabfold_batch "
+                        "check/install entirely.")
+    p.add_argument("--singularity-source", default="",
+                   help="Source to build the .sif from when it is missing: a "
+                        "docker:///library:// URI or 'colabfold.def' (uploaded with "
+                        "the job). Blank = run_fold_prediction.py's default docker URI.")
+    p.add_argument("--build-singularity", action="store_true",
+                   help="Force (re)build of --singularity-image even if it exists.")
     p.add_argument("--num-recycles",   type=int, default=3)
     p.add_argument("--num-models",     type=int, default=1)
     p.add_argument("--gpu",            action="store_true",
@@ -268,14 +280,20 @@ def main():
     work_dir  = _select_work_dir(transport, username)
 
     # ── ColabFold availability check ──────────────────────────────────────────
+    # When running inside a Singularity image, colabfold_batch lives in the
+    # container — skip the host-side check/install entirely.
     _install_colabfold = False
-    cf_found = _check_colabfold(transport, args.colabfold_cmd, work_dir)
+    cf_found = None if args.singularity_image else \
+        _check_colabfold(transport, args.colabfold_cmd, work_dir)
+    if args.singularity_image:
+        _log(f"  Using Singularity image: {args.singularity_image} "
+             "(host colabfold_batch check skipped)")
     if cf_found:
         _log(f"  colabfold_batch found: {cf_found}")
         if cf_found != args.colabfold_cmd:
             _log(f"  (updating --colabfold-cmd to {cf_found})")
             args.colabfold_cmd = cf_found
-    else:
+    elif not args.singularity_image:
         _log(f"  colabfold_batch not found on {args.host}")
         if sys.stdin.isatty():
             resp = input(
@@ -330,6 +348,20 @@ def main():
     cons_flag = (f"--consensus-fasta {shlex.quote(args.consensus_fasta)} "
                  if args.consensus_fasta else "")
     per_cluster_flag = "--per-cluster " if args.per_cluster else ""
+
+    # Singularity: forward the image + (optional) build source. The run script
+    # builds the .sif on the cluster if it is missing. Without a GPU node (--gpu)
+    # the container must run CPU-only, so pass --no-gpu in that case.
+    sing_flag = ""
+    if args.singularity_image:
+        sing_flag = f"--singularity-image {shlex.quote(args.singularity_image)} "
+        if args.singularity_source:
+            sing_flag += f"--singularity-source {shlex.quote(args.singularity_source)} "
+        if args.build_singularity:
+            sing_flag += "--build-singularity "
+        if not args.gpu:
+            sing_flag += "--no-gpu "
+
     analysis_args = (
         f"--input {shlex.quote(csv_remote)} "
         f"--reports-dir {shlex.quote(args.reports_dir)} "
@@ -337,7 +369,7 @@ def main():
         f"--min-aa {args.min_aa} "
         f"--top-n {args.top_n} "
         f"--source-seqs {args.source_seqs} "
-        f"{cons_flag}{per_cluster_flag}"
+        f"{cons_flag}{per_cluster_flag}{sing_flag}"
         f"--colabfold-cmd {shlex.quote(args.colabfold_cmd)} "
         f"--num-recycles {args.num_recycles} "
         f"--num-models {args.num_models} "
@@ -398,8 +430,8 @@ mkdir -p "$NUMBA_CACHE_DIR"
 
 mkdir -p {shlex.quote(args.reports_dir)}
 {colabfold_install_block}
-# Verify colabfold is accessible
-if ! command -v {shlex.quote(args.colabfold_cmd)} >/dev/null 2>&1; then
+# Verify colabfold is accessible (host check is irrelevant when using a container)
+if [ -z "{args.singularity_image}" ] && ! command -v {shlex.quote(args.colabfold_cmd)} >/dev/null 2>&1; then
     echo "[$(date)] WARNING: {args.colabfold_cmd} not found in PATH."
     echo "  The ORF map will still be generated; structure prediction will be skipped."
     echo "  Install ColabFold:  pip install colabfold[alphafold]"

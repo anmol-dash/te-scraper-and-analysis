@@ -92,7 +92,9 @@ def _build_modules(args, cons_fa: Path):
          ["--assembly", asm]
          + _cons),
         ("expression",    "te_expression.py",
-         ["--out-dir", str(args.reports_dir.parent)]),
+         ["--out-dir", str(args.reports_dir.parent)]
+         + _opt("--expr-pattern", args.expr_pattern)
+         + _opt_list("--stage-cols", args.expr_stage_cols)),
     ]
 
 

@@ -5,7 +5,7 @@
   "identifier": "com.gameca.gameca",
   "build": {
     "beforeDevCommand": "pnpm --dir frontend dev",
-    "beforeBuildCommand": "bash scripts/build-sidecar.sh && pnpm --dir frontend build",
+    "beforeBuildCommand": "pwsh -NonInteractive -File scripts/build-python.ps1 && pnpm --dir frontend build",
     "devUrl": "http://localhost:1420",
     "frontendDist": "../frontend/dist"
   },

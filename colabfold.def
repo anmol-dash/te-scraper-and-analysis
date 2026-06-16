@@ -1,0 +1,55 @@
+Bootstrap: docker
+From: nvidia/cuda:12.2.2-cudnn8-runtime-ubuntu22.04
+
+# ColabFold Apptainer/Singularity image for GAMECA fold prediction (#11).
+#
+# Build:
+#   apptainer build colabfold.sif colabfold.def
+#   (unprivileged HPC: singularity build --fakeroot colabfold.sif colabfold.def)
+#
+# Run (handled automatically by run_fold_prediction.py):
+#   run_fold_prediction.py --singularity-image colabfold.sif ...
+#       -> singularity exec --nv colabfold.sif colabfold_batch <fasta> <out> ...
+#
+# This is the repo-local equivalent of the default --singularity-source docker
+# URI: build from it when your cluster cannot pull ghcr.io, or to pin/patch the
+# stack yourself. Pass it explicitly with:
+#   --singularity-source colabfold.def
+
+%labels
+    Maintainer  GAMECA
+    Application ColabFold
+    Version     1.5.5
+
+%help
+    colabfold_batch inside CUDA 12.2 + cuDNN8. Use --nv for GPU; the image also
+    runs CPU-only (slow) without --nv. The `alphafold` module ColabFold imports
+    is installed here, so no host-side Python/GCC stack is required.
+
+%post
+    set -eu
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        ca-certificates git wget python3 python3-pip python3-venv
+    rm -rf /var/lib/apt/lists/*
+
+    python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel
+
+    # ColabFold + the full alphafold extra (the module colabfold_batch imports).
+    python3 -m pip install --no-cache-dir "colabfold[alphafold]>=1.5.5"
+
+    # GPU-enabled JAX matching the CUDA 12 base. colabfold[alphafold] pulls a
+    # CPU jaxlib; this overrides it with the CUDA build so --nv runs on GPU.
+    python3 -m pip install --no-cache-dir --upgrade \
+        "jax[cuda12_pip]==0.4.23" \
+        -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+
+%environment
+    export PATH=/usr/local/bin:$PATH
+    # Recommended ColabFold/JAX GPU memory settings.
+    export TF_FORCE_UNIFIED_MEMORY=1
+    export XLA_PYTHON_CLIENT_MEM_FRACTION=4.0
+
+%runscript
+    exec colabfold_batch "$@"

@@ -375,6 +375,69 @@ def _auto_install_colabfold() -> str:
     return ""
 
 
+# ── Singularity / Apptainer image management ────────────────────────────────────
+
+# Official ColabFold container (ships colabfold_batch + a CUDA-enabled JAX/alphafold
+# stack). Override with --singularity-source if your cluster needs a different tag
+# or you maintain your own .def file.
+DEFAULT_SIF_SOURCE = "docker://ghcr.io/sokrypton/colabfold:1.5.5-cuda12.2.2"
+
+
+def _singularity_runtime() -> str:
+    """Return 'apptainer' or 'singularity' (whichever is on PATH), or '' if neither."""
+    for exe in ("apptainer", "singularity"):
+        if shutil.which(exe):
+            return exe
+    return ""
+
+
+def ensure_singularity_image(sif_path: str, source: str = DEFAULT_SIF_SOURCE,
+                             force: bool = False) -> str:
+    """Make sure `sif_path` exists, building it from `source` if needed.
+
+    `source` may be a docker:// (or library://) URI, or a path to a .def file —
+    `<runtime> build <sif> <source>` handles both. Returns the .sif path on
+    success, or '' on failure.
+    """
+    sif = Path(sif_path).expanduser()
+    if sif.is_file() and not force:
+        _pp(f"  Singularity image present: {sif}")
+        return str(sif)
+
+    runtime = _singularity_runtime()
+    if not runtime:
+        _pp("FATAL: neither `apptainer` nor `singularity` is on PATH — cannot "
+            "build or run the ColabFold container.")
+        return ""
+
+    if force and sif.is_file():
+        _pp(f"  --build-singularity: rebuilding existing image {sif}")
+    else:
+        _pp(f"  Singularity image not found at {sif} — building from {source}")
+
+    sif.parent.mkdir(parents=True, exist_ok=True)
+    # `build` from a .def file needs --fakeroot on unprivileged HPC; building from
+    # a docker:// URI does not. Add --fakeroot only for .def sources.
+    build_cmd = [runtime, "build"]
+    if str(source).endswith(".def"):
+        build_cmd.append("--fakeroot")
+    build_cmd += [str(sif), str(source)]
+    _pp(f"  $ {' '.join(build_cmd)}")
+    _pp("  (first build pulls a multi-GB image and can take 10-30 min)")
+    try:
+        result = subprocess.run(build_cmd)
+    except FileNotFoundError as exc:
+        _pp(f"FATAL: failed to invoke {runtime}: {exc}")
+        return ""
+    if result.returncode != 0 or not sif.is_file():
+        _pp(f"FATAL: {runtime} build failed (exit {result.returncode}); no image at {sif}.")
+        _pp("  Check that the source URI/tag exists and that you have build "
+            "permissions (some clusters require `--fakeroot` or a build node).")
+        return ""
+    _pp(f"  Built ColabFold image: {sif}")
+    return str(sif)
+
+
 def _aligned_fasta_to_a3m(records: list, query_idx: int) -> str:
     """Convert a list of (name, aligned_seq) pairs to a3m format for one query.
 
@@ -802,7 +865,15 @@ def parse_args():
                         "via --msa-mode custom, instead of the online MMseqs2 API.")
     p.add_argument("--singularity-image", default="",
                    help="Path to ColabFold .sif file; runs via 'singularity exec [--nv] <sif> colabfold_batch'. "
-                        "Bypasses the host alphafold-module check (useful when host GCC is too old).")
+                        "Bypasses the host alphafold-module check (useful when host GCC is too old). "
+                        "If the file does not exist it is built automatically from --singularity-source.")
+    p.add_argument("--singularity-source", default=DEFAULT_SIF_SOURCE,
+                   help="Source to build the .sif from when --singularity-image is missing: a "
+                        "docker:///library:// URI or a path to a .def file. "
+                        f"Default: {DEFAULT_SIF_SOURCE}")
+    p.add_argument("--build-singularity", action="store_true",
+                   help="Force (re)build of the --singularity-image from --singularity-source, "
+                        "even if the .sif already exists.")
     p.add_argument("--no-gpu",        action="store_true",
                    help="Omit --nv from the singularity exec call (CPU-only mode)")
     p.add_argument("--num-recycles",  type=int, default=3)
@@ -881,15 +952,26 @@ def main():
         plot_orf_map(source_df, orfs, args.family, orf_map_path)
 
     # ── 5. ColabFold ────────────────────────────────────────────────────────────
-    cf_cmd = find_colabfold(args.colabfold_cmd)
     fold_results: dict = {}
     sif = args.singularity_image
     use_gpu = not args.no_gpu
 
-    if not cf_cmd:
-        if sif:
-            cf_cmd = "colabfold_batch"   # resolved inside the container
-        else:
+    # When a Singularity/Apptainer image is requested, colabfold_batch lives
+    # *inside* the container, so the in-container command is always the bare
+    # "colabfold_batch" name — never a host path. Build the image first if it
+    # is missing (or --build-singularity was passed).
+    if sif or args.build_singularity:
+        if not sif:
+            _pp("FATAL: --build-singularity requires --singularity-image <path.sif>")
+            sys.exit(3)
+        sif = ensure_singularity_image(sif, args.singularity_source,
+                                       force=args.build_singularity)
+        if not sif:
+            sys.exit(3)
+        cf_cmd = "colabfold_batch"       # resolved inside the container
+    else:
+        cf_cmd = find_colabfold(args.colabfold_cmd)
+        if not cf_cmd:
             cf_cmd = _auto_install_colabfold()
     if not cf_cmd:
         _pp("FATAL: colabfold_batch not found and auto-install failed.")

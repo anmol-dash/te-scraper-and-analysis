@@ -88,6 +88,9 @@ def parse_args():
                    help="Explicit expression column names")
     p.add_argument("--stage-labels", nargs="+",    default=None,
                    help="Display labels for --stage-cols (same length)")
+    p.add_argument("--expr-pattern", default=None,
+                   help="Regex — columns whose name matches are used for bar plots. "
+                        "Without --stage-cols or --expr-pattern, bar plots are skipped.")
     p.add_argument("--log1p",        action="store_true", default=True,
                    help="Apply log1p transform to expression values (default: on)")
     p.add_argument("--no-log1p",     dest="log1p", action="store_false")
@@ -685,7 +688,7 @@ def _de_between_clusters(df, cl_col, expr_cols, log1p, expr_dir):
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def run_expression_analysis(input_csv, out_dir, stage_cols=None, stage_labels=None,
-                             log1p=True, force=False):
+                             log1p=True, force=False, expr_pattern=None):
     """
     Generate per-cluster expression plots and statistics.
 
@@ -714,12 +717,24 @@ def run_expression_analysis(input_csv, out_dir, stage_cols=None, stage_labels=No
     cluster_ids = sorted([c for c in df[cl_col].unique() if c >= 0])
     print(f"  {len(cluster_ids)} clusters: {cluster_ids}")
 
+    explicit = bool(stage_cols or expr_pattern)
+
     if stage_cols:
         missing = [c for c in stage_cols if c not in df.columns]
         if missing:
             print(f"FATAL: Expression columns not found: {missing}")
             sys.exit(1)
-        expr_cols = stage_cols
+        expr_cols = list(stage_cols)
+    elif expr_pattern:
+        import re as _re
+        try:
+            _pat = _re.compile(expr_pattern)
+        except _re.error as e:
+            print(f"FATAL: --expr-pattern is not a valid regex: {e}")
+            sys.exit(1)
+        expr_cols = [c for c in _auto_expr_cols(df) if _pat.search(c)]
+        if not expr_cols:
+            print(f"  WARNING: --expr-pattern {expr_pattern!r} matched no columns — skipping bar plots")
     else:
         expr_cols = _auto_expr_cols(df)
 
@@ -735,14 +750,20 @@ def run_expression_analysis(input_csv, out_dir, stage_cols=None, stage_labels=No
     print("\n  --- Boxplots ---")
     _boxplots(df, cl_col, expr_cols, labels, log1p, expr_dir)
 
-    print("\n  --- Stage profile ---")
-    _plot_stage_profile(df, cl_col, expr_cols, labels, log1p, expr_dir)
+    if explicit:
+        print("\n  --- Stage profile ---")
+        _plot_stage_profile(df, cl_col, expr_cols, labels, log1p, expr_dir)
+    else:
+        print("\n  --- Stage profile [SKIP: use --stage-cols or --expr-pattern to enable bar plots] ---")
 
     print("\n  --- Chromosomal expression ---")
     _plot_chromosomal_expression(df, cl_col, expr_cols, labels, log1p, expr_dir)
 
-    print("\n  --- Primer expression ---")
-    _plot_primer_expression(df, cl_col, expr_cols, labels, log1p, expr_dir, out_dir)
+    if explicit:
+        print("\n  --- Primer expression ---")
+        _plot_primer_expression(df, cl_col, expr_cols, labels, log1p, expr_dir, out_dir)
+    else:
+        print("\n  --- Primer expression [SKIP: use --stage-cols or --expr-pattern to enable bar plots] ---")
 
     print("\n  --- Extended stats ---")
     _compute_stats(df, cl_col, expr_cols, labels, log1p, expr_dir)
@@ -771,6 +792,7 @@ def main():
         stage_labels = args.stage_labels,
         log1p        = args.log1p,
         force        = args.force,
+        expr_pattern = args.expr_pattern,
     )
     if args.notify_email:
         from te_notify import send_completion_email
