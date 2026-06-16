@@ -137,6 +137,12 @@ def main():
     p.add_argument("--colabfold-cmd", default=None)
     p.add_argument("--min-ltr-identity", default=None)
     p.add_argument("--cpg-omega", default=None)
+    # te_expression knobs (used by the "expression" module).
+    p.add_argument("--expr-pattern", default=None,
+                   help="Glob/regex for expression count columns; passed to te_expression.py "
+                        "(default None → its own auto-detection).")
+    p.add_argument("--expr-stage-cols", nargs="*", default=None,
+                   help="Explicit expression stage column names; passed to te_expression.py.")
     args = p.parse_args()
 
     input_csv = Path(args.input).resolve()
