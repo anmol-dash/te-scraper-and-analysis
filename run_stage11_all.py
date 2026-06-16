@@ -52,6 +52,8 @@ def _build_modules(args, cons_fa: Path):
          + _opt("--subst-rate", args.subst_rate)
          + _opt("--mafft-cmd", args.mafft_cmd)
          + _cons),
+        ("consensus_distance", "plot_consensus_distance.py",
+         _opt("--mafft-cmd", args.mafft_cmd)),
         ("grna",          "run_grna_offtarget.py",
          ["--cas", str(args.grna_cas), "--max-mm", str(args.grna_max_mm)]
          + _opt("--background", args.grna_background)),

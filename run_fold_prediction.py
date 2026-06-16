@@ -528,7 +528,14 @@ def run_colabfold(fasta_path: Path, cf_dir: Path, cmd: str,
     data_dir.mkdir(parents=True, exist_ok=True)
     colabfold_args += ["--data", str(data_dir)]
     if singularity_image:
-        sing_prefix = ["singularity", "exec"]
+        # --cleanenv + PYTHONNOUSERSITE=1: the container bind-mounts $HOME by
+        # default, and since its Python is also 3.9 the host's
+        # ~/.local/lib/python3.9/site-packages shadows the container's pinned
+        # jax/haiku — a too-new host jax then breaks colabfold with
+        # "module 'jax' has no attribute 'linear_util'". Hiding user-site (and
+        # clearing PYTHONPATH) forces the container's own pinned stack.
+        sing_prefix = ["singularity", "exec", "--cleanenv",
+                       "--env", "PYTHONNOUSERSITE=1,PYTHONPATH="]
         if use_gpu:
             sing_prefix.append("--nv")
         # Bind every host path the run reads/writes: the reports dir (input fasta,
