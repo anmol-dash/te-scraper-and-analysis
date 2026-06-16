@@ -229,38 +229,52 @@ def align_cluster_to_consensus(seqs: list, mafft_cmd: str):
     return cons_row, [rows.get(i) for i in range(len(seqs))]
 
 
-def align_to_reference(seqs: list, reference: str, mafft_cmd: str, batch: int = 1000):
-    """Project each sequence onto a FIXED reference with --keeplength, in batches.
+def map_cluster_to_global(cluster_cons: str, global_cons: str, mafft_cmd: str):
+    """Pairwise-align a cluster consensus to the global consensus and return a list
+    (len == len(cluster_cons)) giving, for each cluster-consensus position, the
+    aligned global-consensus base ('A'/'C'/'G'/'T') or None (gap / non-ACGT).
 
-    Returns a list (len == len(seqs)) of aligned rows (reference length) or None.
+    This is the cheap step that makes global distance tractable: we align the 25
+    cluster consensuses to the global consensus ONCE each (two short sequences),
+    instead of MAFFT-adding all ~12k copies onto a 10 kb reference. Each copy is
+    already aligned to its cluster consensus (seed frame), so projecting through
+    this per-position map gives every copy a real distance to the global
+    consensus over only its homologous region.
     """
-    exe = _mafft_exe(mafft_cmd)
-    ref_clean = reference.upper().replace("-", "")
-    out_rows = [None] * len(seqs)
-    n = len(seqs)
-    for start in range(0, n, batch):
-        chunk = [(i, seqs[i].upper().replace("-", ""))
-                 for i in range(start, min(start + batch, n))]
-        chunk = [(i, s) for i, s in chunk if s]
-        if not chunk:
+    aln = dict(run_mafft([("G", global_cons), ("C", cluster_cons)], mafft_cmd))
+    aG, aC = aln.get("G", ""), aln.get("C", "")
+    mapping = [None] * len(cluster_cons)
+    c_pos = 0
+    for col in range(min(len(aG), len(aC))):
+        cb = aC[col]
+        if cb != "-":
+            if c_pos < len(mapping):
+                gb = aG[col].upper()
+                mapping[c_pos] = gb if gb in "ACGT" else None
+            c_pos += 1
+    return mapping
+
+
+def global_distance_for_cluster(cons_row: str, member_rows: dict,
+                                global_cons: str, mafft_cmd: str, max_k2p: float):
+    """Kimura distance to the global consensus for every copy in one cluster.
+
+    cons_row     : cluster consensus in seed-frame coordinates.
+    member_rows  : {copy_idx: aligned_row} in the SAME seed frame (== cons_row len).
+    Returns {copy_idx: k2p_or_nan}.
+    """
+    mapping = map_cluster_to_global(cons_row, global_cons, mafft_cmd)
+    mapped = [(p, gb) for p, gb in enumerate(mapping) if gb is not None]
+    gstr = "".join(gb for _, gb in mapped)
+    positions = [p for p, _ in mapped]
+    out = {}
+    for i, row in member_rows.items():
+        if row is None:
+            out[i] = float("nan")
             continue
-        with tempfile.TemporaryDirectory() as td:
-            ref = Path(td) / "ref.fa"
-            ref.write_text(f">GLOBAL\n{ref_clean}\n")
-            frags = Path(td) / "frags.fa"
-            frags.write_text("".join(f">c{i}\n{s}\n" for i, s in chunk))
-            res = subprocess.run(
-                [exe, "--addfragments", str(frags), "--keeplength",
-                 "--thread", "-1", "--quiet", str(ref)],
-                capture_output=True, text=True)
-            if res.returncode != 0:
-                raise AlignmentError(f"global mafft --addfragments failed "
-                                     f"({res.returncode}): {res.stderr.strip()[:300]}")
-            aligned = dict(_read_fasta_text(res.stdout))
-        for i, _ in chunk:
-            out_rows[i] = aligned.get(f"c{i}")
-        _pp(f"    global alignment: {min(start + batch, n):,}/{n:,} copies")
-    return out_rows
+        cstr = "".join(row[p] if p < len(row) else "-" for p in positions)
+        out[i] = kimura2p(cstr, gstr, max_k2p=max_k2p)
+    return out
 
 
 # ── clustering source ─────────────────────────────────────────────────────────
@@ -404,9 +418,12 @@ def main():
 
     seqs = df["Seq"].astype(str).str.upper().tolist()
     cluster_dist = np.full(len(df), np.nan)
-    cluster_consensuses = {}
+    cluster_consensuses = {}        # cid -> seed-frame cluster consensus (cons_row)
+    cluster_member_rows = {}        # cid -> {copy_idx: aligned row in seed frame}
 
-    # 1. per-cluster consensus + distance
+    # 1. per-cluster consensus + distance. Keep the aligned copy rows: the global
+    #    step projects them through a cheap consensus→consensus map (below) rather
+    #    than re-aligning every copy to a giant family-wide reference.
     _pp("Aligning each cluster to its own consensus (MAFFT --addfragments)...")
     for cid, sub in df.groupby("__cluster"):
         idx = sub.index.to_list()
@@ -416,7 +433,9 @@ def main():
         except AlignmentError as e:
             _pp(f"  cluster {cid}: SKIP — {e}")
             continue
-        cluster_consensuses[cid] = cons_row.replace("-", "")
+        cluster_consensuses[cid] = cons_row
+        member_rows = {idx[j]: rows[j] for j in range(len(idx))}
+        cluster_member_rows[cid] = member_rows
         good = 0
         for j, i in enumerate(idx):
             row = rows[j]
@@ -429,13 +448,13 @@ def main():
             f"{good} good distances")
     df["dist_cluster"] = cluster_dist
 
-    # 2. global consensus (majority over MAFFT of the cluster consensuses) + distance
+    # 2. global consensus = majority over MAFFT of the cluster consensuses.
     _pp("Building global (family-wide) consensus...")
-    cons_recs = [(str(cid), s) for cid, s in cluster_consensuses.items() if s]
+    cons_recs = [(str(cid), s.replace("-", "")) for cid, s in cluster_consensuses.items() if s]
     if len(cons_recs) >= 2:
         if len(cons_recs) > args.global_sample:
-            idx = np.linspace(0, len(cons_recs) - 1, args.global_sample).astype(int)
-            cons_recs = [cons_recs[i] for i in sorted(set(idx))]
+            sidx = np.linspace(0, len(cons_recs) - 1, args.global_sample).astype(int)
+            cons_recs = [cons_recs[i] for i in sorted(set(sidx))]
         global_consensus = _consensus_of(run_mafft(cons_recs, args.mafft_cmd))
     elif cons_recs:
         global_consensus = cons_recs[0][1]
@@ -443,12 +462,18 @@ def main():
         sys.exit("ERROR: no cluster consensus could be built; cannot make global consensus.")
     _pp(f"  Global consensus: {len(global_consensus)} bp")
 
-    _pp("Aligning every copy to the global consensus...")
-    global_rows = align_to_reference(seqs, global_consensus, args.mafft_cmd)
+    # 3. global distance per copy, via the cheap per-cluster→global projection.
+    _pp("Projecting copies onto the global consensus (per-cluster map)...")
     global_dist = np.full(len(df), np.nan)
-    for i, row in enumerate(global_rows):
-        if row is not None:
-            global_dist[i] = kimura2p(row, global_consensus, max_k2p=args.max_k2p)
+    for cid, cons_row in cluster_consensuses.items():
+        gd = global_distance_for_cluster(cons_row, cluster_member_rows[cid],
+                                         global_consensus, args.mafft_cmd, args.max_k2p)
+        good = 0
+        for i, k in gd.items():
+            global_dist[i] = k
+            if np.isfinite(k):
+                good += 1
+        _pp(f"  cluster {cid}: {good} good global distances")
     df["dist_global"] = global_dist
 
     # save the per-copy table
