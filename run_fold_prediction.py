@@ -504,12 +504,17 @@ def run_colabfold(fasta_path: Path, cf_dir: Path, cmd: str,
                   a3m_dir: Path = None) -> bool:
     """Run colabfold_batch, optionally with a pre-computed MAFFT MSA or inside Singularity."""
     cf_dir.mkdir(parents=True, exist_ok=True)
+    # ColabFold ≥1.5 renamed the MSA modes (old: "MMseqs2-UniRef-Environmental"/
+    # "custom"; new: "mmseqs2_uniref_env"/"mmseqs2_uniref"/"single_sequence").
     if a3m_dir is not None:
+        # Pre-computed MAFFT MSA: ColabFold reads the .a3m files straight from the
+        # input directory. --msa-mode only governs *generating* an MSA, and "custom"
+        # no longer exists — so omit it entirely (also keeps the run fully offline).
         input_arg = str(a3m_dir)
-        msa_args  = ["--msa-mode", "custom"]
+        msa_args  = []
     else:
         input_arg = str(fasta_path)
-        msa_args  = ["--msa-mode", "MMseqs2-UniRef-Environmental"]
+        msa_args  = ["--msa-mode", "mmseqs2_uniref_env"]
     colabfold_args = [
         cmd, input_arg, str(cf_dir),
         "--num-recycle", str(num_recycles),
