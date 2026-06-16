@@ -520,6 +520,13 @@ def run_colabfold(fasta_path: Path, cf_dir: Path, cmd: str,
         "--num-recycle", str(num_recycles),
         "--num-models",  str(num_models),
     ] + msa_args
+    # ColabFold downloads ~4 GB of AlphaFold params into its --data dir on first
+    # run. The image default (/cache) is read-only under Singularity, so point it
+    # at a writable host dir under the (bind-mounted) reports folder. It persists
+    # across runs, so the download happens only once per reports-dir.
+    data_dir = fasta_path.parent / "colabfold_params"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    colabfold_args += ["--data", str(data_dir)]
     if singularity_image:
         sing_prefix = ["singularity", "exec"]
         if use_gpu:
