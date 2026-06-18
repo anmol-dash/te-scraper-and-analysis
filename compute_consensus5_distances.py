@@ -1,29 +1,39 @@
 #!/usr/bin/env python3
 """
-compute_consensus5_distances.py --- MAFFT consensus distances for ALL copies,
-grouped by the 5 UMAP/HDBSCAN clusters in clusters5.csv.
+compute_consensus5_distances.py --- CIAlign-cleaned consensus distances for ALL
+copies, grouped by the 5 UMAP/HDBSCAN clusters in clusters5.csv.
 
-For every copy it computes:
-  dist_cluster : Kimura-2P distance to its OWN cluster's consensus (1 of 5)
-  dist_global  : Kimura-2P distance to the family-wide (global) consensus
+Why CIAlign: a raw MAFFT consensus built on the longest copy's frame is bloated
+(thousands of insertion columns present in only a handful of copies -> a
+multi-kb "consensus" that is mostly gaps). CIAlign removes insertions, crops
+poorly aligned ends, and drops divergent sequences, leaving a short core
+consensus that actually represents the cluster. Distances are then measured to
+that cleaned consensus.
 
-Method (one MAFFT pass per cluster, never a pseudo-alignment):
-  per cluster -> longest copy is the seed; every copy is projected onto it with
-  `mafft --addfragments --keeplength`; the consensus is the per-column majority.
-  The global consensus is the majority over the MAFFT alignment of the 5 cluster
-  consensuses; each copy's global distance is read through a cheap
-  consensus->consensus position map (no 12k-copy family-wide MAFFT).
+Per cluster:
+  1. MAFFT --auto MSA of a sample of the cluster (--msa-sample copies).
+  2. CIAlign cleans the MSA  -> cleaned alignment + cleaned (core) consensus.
+  3. EVERY copy is projected onto the cleaned consensus with
+     `mafft --addfragments --keeplength` -> Kimura-2P dist_cluster.
 
-Unlike the per-subfamily script, NOTHING is dropped for saturation: --max-k2p
-defaults high so every alignable copy keeps a real distance. Copies MAFFT cannot
-place at all are reported in the coverage summary and left blank.
+Global:
+  the 5 cleaned cluster consensuses are MSA'd + CIAlign-cleaned -> cleaned global
+  consensus; each copy's dist_global is read through a cheap cleaned-cluster ->
+  cleaned-global position map (no 12k-copy family-wide MAFFT).
 
-Requires: numpy, pandas, and MAFFT on PATH. No matplotlib / sklearn / umap.
+Outputs:
+  --out                 consensus_distance_5clust.csv  (TE_ID, cluster,
+                        dist_cluster, dist_global)
+  --aln-dir/            cluster_<c>_cleaned.fasta, cluster_<c>_consensus.fasta,
+                        global_cleaned.fasta, global_consensus.fasta
+
+Requires: numpy, pandas, MAFFT and CIAlign on PATH. No matplotlib / sklearn.
 
 Usage:
     python compute_consensus5_distances.py \
         --input clusters5.csv \
-        --out consensus_distance_5clust.csv \
+        --out   consensus_distance_5clust.csv \
+        --aln-dir cleaned_aln \
         --threads ${SLURM_CPUS_PER_TASK:-8}
 """
 import argparse
@@ -71,16 +81,17 @@ def kimura2p(a, b, min_sites=20, max_k2p=5.0):
     return float(k)
 
 
-# ── MAFFT helpers ─────────────────────────────────────────────────────────────
+# ── FASTA / MAFFT / CIAlign helpers ───────────────────────────────────────────
 class AlignmentError(RuntimeError):
     pass
 
 
-def _mafft_exe(cmd):
-    exe = shutil.which(cmd) or shutil.which("mafft")
-    if not exe:
-        raise AlignmentError(f"mafft not found (looked for {cmd!r} and 'mafft').")
-    return exe
+def _exe(cmd, alt=None):
+    e = shutil.which(cmd) or (shutil.which(alt) if alt else None)
+    if not e:
+        raise AlignmentError(f"{cmd!r} not found on PATH"
+                             + (f" (nor {alt!r})" if alt else "") + ".")
+    return e
 
 
 def _read_fasta_text(text):
@@ -98,8 +109,13 @@ def _read_fasta_text(text):
     return records
 
 
-def run_mafft(records, cmd, threads):
-    exe = _mafft_exe(cmd)
+def _ungap(s):
+    return "".join(c for c in s.upper() if c in "ACGT")
+
+
+def run_mafft_msa(records, cmd, threads):
+    """Plain MAFFT --auto MSA of (name, seq) -> list of (name, aligned_seq)."""
+    exe = _exe(cmd, "mafft")
     with tempfile.TemporaryDirectory() as td:
         fin = Path(td) / "in.fa"
         fin.write_text("".join(f">{n}\n{s}\n" for n, s in records))
@@ -114,88 +130,74 @@ def run_mafft(records, cmd, threads):
         return out
 
 
-def _consensus_of(aln):
-    if not aln:
-        return ""
-    L = max(len(s) for _, s in aln)
-    cols = []
-    for i in range(L):
-        counts = {}
-        for _, s in aln:
-            if i < len(s):
-                b = s[i].upper()
-                if b in "ACGT":
-                    counts[b] = counts.get(b, 0) + 1
-        cols.append(max(counts, key=counts.get) if counts else "-")
-    return "".join(cols).replace("-", "")
+def run_cialign(aln_records, stem, aln_dir, cmd, keep_consensus_in_aln=False):
+    """Clean a MAFFT MSA with CIAlign. Writes <stem>_cleaned.fasta and
+    <stem>_consensus.fasta into aln_dir; returns the cleaned (core) consensus
+    string (gaps stripped)."""
+    exe = _exe(cmd, "cialign")
+    aln_dir = Path(aln_dir)
+    aln_dir.mkdir(parents=True, exist_ok=True)
+    out_stem = aln_dir / stem
+    with tempfile.TemporaryDirectory() as td:
+        fin = Path(td) / "msa.fa"
+        fin.write_text("".join(f">{n}\n{s}\n" for n, s in aln_records))
+        cmd_v = [exe, "--infile", str(fin), "--outfile_stem", str(out_stem),
+                 "--remove_insertions", "--crop_ends", "--remove_divergent",
+                 "--make_consensus"]
+        res = subprocess.run(cmd_v, capture_output=True, text=True)
+        if res.returncode != 0:
+            raise AlignmentError(f"CIAlign failed ({res.returncode}): "
+                                 f"{(res.stderr or res.stdout).strip()[:300]}")
+    cons_fa = Path(f"{out_stem}_consensus.fasta")
+    if not cons_fa.exists():
+        raise AlignmentError(f"CIAlign produced no consensus ({cons_fa}).")
+    recs = _read_fasta_text(cons_fa.read_text())
+    # pick the record named like a consensus, else the longest
+    cand = [r for r in recs if "consensus" in r[0].lower()] or recs
+    cons = max(cand, key=lambda r: len(_ungap(r[1])))[1]
+    return _ungap(cons)
 
 
-def align_cluster_to_consensus(seqs, cmd, threads):
-    """Project every sequence onto a cluster consensus in ONE MAFFT pass."""
-    exe = _mafft_exe(cmd)
-    clean = [(i, s.upper().replace("-", "")) for i, s in enumerate(seqs)]
+def project_onto_reference(seqs, ref, cmd, threads):
+    """Project every sequence onto a given reference (the cleaned consensus) in
+    ONE MAFFT pass. Returns [aligned_row_or_None] of len == len(seqs), each row
+    in ref-frame coordinates (== len(ref)) thanks to --keeplength."""
+    exe = _exe(cmd, "mafft")
+    clean = [(i, _ungap(s)) for i, s in enumerate(seqs)]
     clean = [(i, s) for i, s in clean if s]
     if not clean:
-        raise AlignmentError("no non-empty sequences in cluster.")
-    seed_i, seed_seq = max(clean, key=lambda t: len(t[1]))
+        raise AlignmentError("no non-empty sequences to project.")
     with tempfile.TemporaryDirectory() as td:
-        ref = Path(td) / "ref.fa"
-        ref.write_text(f">SEED\n{seed_seq}\n")
+        refp = Path(td) / "ref.fa"
+        refp.write_text(f">REF\n{ref}\n")
         frags = Path(td) / "frags.fa"
         frags.write_text("".join(f">c{i}\n{s}\n" for i, s in clean))
         res = subprocess.run(
             [exe, "--addfragments", str(frags), "--keeplength",
-             "--thread", str(threads), "--quiet", str(ref)],
+             "--thread", str(threads), "--quiet", str(refp)],
             capture_output=True, text=True)
         if res.returncode != 0:
             raise AlignmentError(f"mafft --addfragments failed ({res.returncode}): "
                                  f"{res.stderr.strip()[:300]}")
         aligned = dict(_read_fasta_text(res.stdout))
     rows = {i: aligned[f"c{i}"] for i, _ in clean if f"c{i}" in aligned}
-    if not rows:
-        raise AlignmentError("no copy rows in mafft --addfragments output.")
-    L = max(len(r) for r in rows.values())
-    cons = []
-    rlist = list(rows.values())
-    for col in range(L):
-        counts = {}
-        for r in rlist:
-            if col < len(r):
-                b = r[col].upper()
-                if b in "ACGT":
-                    counts[b] = counts.get(b, 0) + 1
-        cons.append(max(counts, key=counts.get) if counts else "N")
-    return "".join(cons), [rows.get(i) for i in range(len(seqs))]
+    return [rows.get(i) for i in range(len(seqs))]
 
 
-def map_cluster_to_global(cluster_cons, global_cons, cmd, threads):
-    aln = dict(run_mafft([("G", global_cons), ("C", cluster_cons)], cmd, threads))
-    aG, aC = aln.get("G", ""), aln.get("C", "")
-    mapping = [None] * len(cluster_cons)
-    c_pos = 0
-    for col in range(min(len(aG), len(aC))):
-        if aC[col] != "-":
-            if c_pos < len(mapping):
-                gb = aG[col].upper()
-                mapping[c_pos] = gb if gb in "ACGT" else None
-            c_pos += 1
+def map_consensus(src_cons, dst_cons, cmd, threads):
+    """Pairwise-align src consensus to dst consensus; return, per src position,
+    the aligned dst base ('ACGT') or None."""
+    aln = dict(run_mafft_msa([("D", dst_cons), ("S", src_cons)], cmd, threads))
+    aD, aS = aln.get("D", ""), aln.get("S", "")
+    mapping = [None] * len(src_cons)
+    pos = 0
+    for col in range(min(len(aD), len(aS))):
+        if aS[col] != "-":
+            if pos < len(mapping):
+                b = aD[col].upper()
+                mapping[pos] = b if b in "ACGT" else None
+            pos += 1
     return mapping
-
-
-def global_distance_for_cluster(cons_row, member_rows, global_cons, cmd,
-                                threads, max_k2p):
-    mapping = map_cluster_to_global(cons_row, global_cons, cmd, threads)
-    mapped = [(p, gb) for p, gb in enumerate(mapping) if gb is not None]
-    gstr = "".join(gb for _, gb in mapped)
-    positions = [p for p, _ in mapped]
-    out = {}
-    for i, row in member_rows.items():
-        if row is None:
-            out[i] = float("nan")
-            continue
-        cstr = "".join(row[p] if p < len(row) else "-" for p in positions)
-        out[i] = kimura2p(cstr, gstr, max_k2p=max_k2p)
-    return out
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
@@ -205,22 +207,31 @@ def parse_args():
     p.add_argument("--input", default="clusters5.csv",
                    help="CSV with TE_ID, Seq, Cluster columns.")
     p.add_argument("--out", default="consensus_distance_5clust.csv")
+    p.add_argument("--aln-dir", default="cleaned_aln",
+                   help="Directory for CIAlign cleaned alignments + consensuses.")
     p.add_argument("--cluster-col", default="Cluster")
+    p.add_argument("--msa-sample", type=int, default=250,
+                   help="Max copies per cluster MSA'd before CIAlign (default 250). "
+                        "ALL copies are still scored against the cleaned consensus.")
     p.add_argument("--max-k2p", type=float, default=5.0,
                    help="Drop distances above this (default 5.0 = keep everything).")
-    p.add_argument("--global-sample", type=int, default=400,
-                   help="Max cluster consensuses MAFFT-aligned for the global consensus.")
     p.add_argument("--threads", type=int, default=8)
     p.add_argument("--mafft-cmd", default="mafft")
+    p.add_argument("--cialign-cmd", default="CIAlign")
+    p.add_argument("--seed", type=int, default=42)
     return p.parse_args()
 
 
 def main():
     args = parse_args()
+    rng = np.random.default_rng(args.seed)
     _pp("=" * 60)
-    _pp("5-cluster consensus distances (MAFFT)")
-    _pp(f"  input={args.input}  out={args.out}  threads={args.threads}")
+    _pp("5-cluster CIAlign-cleaned consensus distances")
+    _pp(f"  input={args.input}  out={args.out}  aln-dir={args.aln_dir}")
+    _pp(f"  msa-sample={args.msa_sample}  threads={args.threads}")
     _pp("=" * 60)
+    # fail fast if tools are missing
+    _exe(args.mafft_cmd, "mafft"); _exe(args.cialign_cmd, "cialign")
 
     df = pd.read_csv(args.input)
     df.columns = [str(c).strip() for c in df.columns]
@@ -235,47 +246,65 @@ def main():
     cluster_dist = np.full(len(df), np.nan)
     cluster_cons, cluster_rows = {}, {}
 
-    _pp("Aligning each cluster to its consensus (MAFFT --addfragments)...")
     for cid, sub in df.groupby("__cluster"):
         idx = sub.index.to_list()
+        # 1. MSA of a sample, 2. CIAlign clean -> core consensus
+        if len(idx) > args.msa_sample:
+            sidx = rng.choice(idx, size=args.msa_sample, replace=False)
+        else:
+            sidx = idx
+        sample_recs = [(f"s{i}", seqs[i]) for i in sidx]
         try:
-            cons_row, rows = align_cluster_to_consensus(
-                [seqs[i] for i in idx], args.mafft_cmd, args.threads)
+            raw = run_mafft_msa(sample_recs, args.mafft_cmd, args.threads)
+            cons = run_cialign(raw, f"cluster_{cid}", args.aln_dir, args.cialign_cmd)
         except AlignmentError as e:
             _pp(f"  cluster {cid}: SKIP — {e}")
             continue
-        cluster_cons[cid] = cons_row
+        if len(cons) < 20:
+            _pp(f"  cluster {cid}: SKIP — cleaned consensus too short ({len(cons)} bp)")
+            continue
+        cluster_cons[cid] = cons
+        # 3. project ALL copies onto the cleaned consensus
+        rows = project_onto_reference([seqs[i] for i in idx], cons,
+                                      args.mafft_cmd, args.threads)
         cluster_rows[cid] = {idx[j]: rows[j] for j in range(len(idx))}
         good = 0
         for j, i in enumerate(idx):
             if rows[j] is not None:
-                k = kimura2p(rows[j], cons_row, max_k2p=args.max_k2p)
+                k = kimura2p(rows[j], cons, max_k2p=args.max_k2p)
                 cluster_dist[i] = k
                 good += int(np.isfinite(k))
-        _pp(f"  cluster {cid}: {len(idx)} copies, cons {len(cons_row)} bp, "
+        _pp(f"  cluster {cid}: {len(idx)} copies, cleaned cons {len(cons)} bp, "
             f"{good} distances")
     df["dist_cluster"] = cluster_dist
 
-    _pp("Building global consensus from the 5 cluster consensuses...")
-    cons_recs = [(str(cid), s.replace("-", "")) for cid, s in cluster_cons.items() if s]
+    # global: MSA + CIAlign of the 5 cleaned cluster consensuses
+    _pp("Building cleaned global consensus from the cluster consensuses...")
+    cons_recs = [(f"cluster_{cid}", s) for cid, s in cluster_cons.items() if s]
     if len(cons_recs) >= 2:
-        if len(cons_recs) > args.global_sample:
-            sidx = np.linspace(0, len(cons_recs) - 1, args.global_sample).astype(int)
-            cons_recs = [cons_recs[i] for i in sorted(set(sidx))]
-        global_cons = _consensus_of(run_mafft(cons_recs, args.mafft_cmd, args.threads))
+        raw_g = run_mafft_msa(cons_recs, args.mafft_cmd, args.threads)
+        global_cons = run_cialign(raw_g, "global", args.aln_dir, args.cialign_cmd)
+        if len(global_cons) < 20:  # CIAlign can over-trim 5 short seqs
+            global_cons = _ungap(max((s for _, s in cons_recs), key=len))
+            _pp("  (CIAlign over-trimmed; using longest cluster consensus as global)")
     elif cons_recs:
         global_cons = cons_recs[0][1]
     else:
         sys.exit("ERROR: no cluster consensus; cannot build global consensus.")
-    _pp(f"  Global consensus: {len(global_cons)} bp")
+    _pp(f"  Cleaned global consensus: {len(global_cons)} bp")
 
-    _pp("Projecting copies onto the global consensus...")
+    _pp("Projecting copies onto the cleaned global consensus...")
     global_dist = np.full(len(df), np.nan)
-    for cid, cons_row in cluster_cons.items():
-        gd = global_distance_for_cluster(cons_row, cluster_rows[cid], global_cons,
-                                         args.mafft_cmd, args.threads, args.max_k2p)
-        for i, k in gd.items():
-            global_dist[i] = k
+    for cid, cons in cluster_cons.items():
+        mapping = map_consensus(cons, global_cons, args.mafft_cmd, args.threads)
+        mapped = [(p, gb) for p, gb in enumerate(mapping) if gb is not None]
+        gstr = "".join(gb for _, gb in mapped)
+        positions = [p for p, _ in mapped]
+        for i, row in cluster_rows[cid].items():
+            if row is None:
+                continue
+            cstr = "".join(row[p] if p < len(row) else "-" for p in positions)
+            global_dist[i] = kimura2p(cstr, gstr, max_k2p=args.max_k2p)
     df["dist_global"] = global_dist
 
     out_cols = ["TE_ID", "__cluster", "dist_cluster", "dist_global"]
@@ -286,6 +315,7 @@ def main():
     ng = int(np.isfinite(df["dist_global"]).sum())
     _pp("=" * 60)
     _pp(f"DONE -> {args.out}")
+    _pp(f"  cleaned alignments + consensuses in: {args.aln_dir}/")
     _pp(f"  cluster-distance coverage: {nc:,}/{n:,} ({100*nc/n:.1f}%)")
     _pp(f"  global-distance  coverage: {ng:,}/{n:,} ({100*ng/n:.1f}%)")
 
