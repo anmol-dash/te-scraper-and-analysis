@@ -1,0 +1,9 @@
+============================================================
+GAMECA Antisense / Bidirectional Promoter --- Measured Values
+Generated: 2026-06-16 18:16:24
+============================================================
+  Family:                  IAP
+  Copies:                  12577
+  Bidirectional (>=0.4):   7536
+  Median bidir. score:     0.500
+  Stranded expression:     no

@@ -1,0 +1,14 @@
+============================================================
+GAMECA gRNA Off-Target / Specificity-Coverage --- Measured Values
+Generated: 2026-06-16 18:07:35
+============================================================
+  Family:               IAP
+  Cas / PAM:            SpCas9
+  Family copies:        12577
+  Candidate guides:     400
+  Pareto-frontier:      7
+
+  ── Best coverage/specificity guide ──
+  Guide:                TTTTTTTTTTTTTTTTTTAA
+  Coverage:             2 / 12577 (0.0%)
+  Off-target sites:     0

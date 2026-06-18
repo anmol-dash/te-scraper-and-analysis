@@ -1,0 +1,501 @@
+GAMECA Stage 11 Standalone Log
+Family:   IAP
+Assembly: mm10
+Input:    /home/amodz/anmol/iapultracombo_tot_counts.csv
+Python:   /home/amodz/anmol/miniconda3/bin/python3
+Started:  2026-06-16 17:59:44
+============================================================
+
+============================================================
+[phylo]
+============================================================
+CMD: /home/amodz/anmol/miniconda3/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/run_phylo_analysis.py --input /home/amodz/anmol/iapultracombo_tot_counts.csv --reports-dir /home/amodz/anmol/iap_pres_nomotif/stage11v6 --family IAP --assembly mm10 --clock-divisor 1 --intact-orf-aa 100
+
+[17:59:53] ============================================================
+[17:59:53] GAMECA Phylogenetics / Divergence-Age --- IAP
+[17:59:53]   Input:   /home/amodz/anmol/iapultracombo_tot_counts.csv
+[17:59:53]   Reports: /home/amodz/anmol/iap_pres_nomotif/stage11v6
+[17:59:53] ============================================================
+[17:59:53]   12,577 copies with sequence
+[17:59:54]   Assembly mm10 → substitution rate 4.5e-09 subs/site/yr (clock divisor 1)
+[17:59:54] No Cluster column — auto-clustering by 3-mer composition...
+[17:59:54]   Auto-clustering 12,577 sequences into 26 clusters (target ~500/cluster)...
+[18:01:00]   → 26 auto-clusters, largest 1,647 copies
+[18:01:03]   cluster 0: 475 copies, consensus 415 bp, 475 placed
+[18:01:08]   cluster 1: 750 copies, consensus 622 bp, 750 placed
+[18:01:37]   cluster 2: 945 copies, consensus 2394 bp, 945 placed
+[18:01:40]   cluster 3: 838 copies, consensus 370 bp, 838 placed
+[18:01:48]   cluster 4: 423 copies, consensus 1294 bp, 423 placed
+[18:01:54]   cluster 5: 416 copies, consensus 1204 bp, 416 placed
+[18:01:57]   cluster 6: 240 copies, consensus 708 bp, 240 placed
+[18:02:00]   cluster 7: 88 copies, consensus 66 bp, 88 placed
+[18:02:04]   cluster 8: 992 copies, consensus 575 bp, 992 placed
+[18:02:43]   cluster 9: 531 copies, consensus 3748 bp, 531 placed
+[18:02:47]   cluster 10: 303 copies, consensus 847 bp, 303 placed
+[18:02:50]   cluster 11: 439 copies, consensus 419 bp, 439 placed
+[18:03:00]   cluster 12: FATAL — cannot align (mafft --addfragments failed (1): Error while loading conda entry point: conda-libmamba-solver (libicui18n.so.75: cannot open shared object file: No such file or directory))
+
+[EXIT 2  197s]
+
+============================================================
+[consensus_distance]
+============================================================
+CMD: /home/amodz/anmol/miniconda3/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/plot_consensus_distance.py --input /home/amodz/anmol/iapultracombo_tot_counts.csv --reports-dir /home/amodz/anmol/iap_pres_nomotif/stage11v6 --family IAP
+
+[18:03:01] ============================================================
+[18:03:01] Consensus-distance figures — IAP
+[18:03:01]   Input:   /home/amodz/anmol/iapultracombo_tot_counts.csv
+[18:03:01]   Out:     /home/amodz/anmol/iap_pres_nomotif/stage11v6
+[18:03:01] ============================================================
+[18:03:01]   12,577 copies in 25 clusters (dropped 0 copies in clusters < 10).
+[18:03:01] Aligning each cluster to its own consensus (MAFFT --addfragments)...
+[18:03:12]   cluster IAP-d-int: SKIP — mafft --addfragments failed (1): Error while loading conda entry point: conda-libmamba-solver (libicui18n.so.75: cannot open shared object file: No such file or directory)
+[18:03:23]   cluster IAP1-MM_I-int: 67 copies, cons 3849 bp, 39 good distances
+[18:03:25]   cluster IAP1-MM_LTR: 49 copies, cons 315 bp, 29 good distances
+[18:03:28]   cluster IAPA_MM-int: 80 copies, cons 522 bp, 51 good distances
+[18:03:30]   cluster IAPEY2_LTR: 88 copies, cons 365 bp, 52 good distances
+[18:03:50]   cluster IAPEY3-int: SKIP — mafft --addfragments failed (1): Error while loading conda entry point: conda-libmamba-solver (libicui18n.so.75: cannot open shared object file: No such file or directory)
+[18:03:53]   cluster IAPEY3C_LTR: 76 copies, cons 310 bp, 72 good distances
+[18:03:55]   cluster IAPEY3_LTR: 54 copies, cons 340 bp, 38 good distances
+[18:04:05]   cluster IAPEY4_I-int: SKIP — mafft --addfragments failed (1): Error while loading conda entry point: conda-libmamba-solver (libicui18n.so.75: cannot open shared object file: No such file or directory)
+[18:04:07]   cluster IAPEY4_LTR: 70 copies, cons 327 bp, 69 good distances
+[18:04:16]   cluster IAPEY5_I-int: 44 copies, cons 3573 bp, 22 good distances
+[18:04:18]   cluster IAPEY5_LTR: 41 copies, cons 324 bp, 33 good distances
+[18:04:21]   cluster IAPEY_LTR: 110 copies, cons 390 bp, 97 good distances
+[18:04:37]   cluster IAPEy-int: SKIP — mafft --addfragments failed (1): Error while loading conda entry point: conda-libmamba-solver (libicui18n.so.75: cannot open shared object file: No such file or directory)
+[18:04:56]   cluster IAPEz-int: SKIP — mafft --addfragments failed (1): Error while loading conda entry point: conda-libmamba-solver (libicui18n.so.75: cannot open shared object file: No such file or directory)
+[18:05:01]   cluster IAPLTR1_Mm: 1431 copies, cons 514 bp, 1021 good distances
+[18:05:06]   cluster IAPLTR1a_Mm: 1540 copies, cons 466 bp, 1195 good distances
+[18:05:11]   cluster IAPLTR2_Mm: 834 copies, cons 637 bp, 477 good distances
+[18:05:14]   cluster IAPLTR2a: 364 copies, cons 575 bp, 301 good distances
+[18:05:20]   cluster IAPLTR2a2_Mm: 833 copies, cons 708 bp, 449 good distances
+[18:05:23]   cluster IAPLTR2b: 345 copies, cons 356 bp, 168 good distances
+[18:05:25]   cluster IAPLTR3: 51 copies, cons 348 bp, 36 good distances
+[18:05:42]   cluster IAPLTR3-int: SKIP — mafft --addfragments failed (1): Error while loading conda entry point: conda-libmamba-solver (libicui18n.so.75: cannot open shared object file: No such file or directory)
+[18:05:44]   cluster IAPLTR4: 69 copies, cons 397 bp, 23 good distances
+[18:05:48]   cluster IAPLTR4_I: 25 copies, cons 1685 bp, 13 good distances
+[18:05:48] Building global (family-wide) consensus...
+[18:05:59]   Global consensus: 4813 bp
+[18:05:59] Projecting copies onto the global consensus (per-cluster map)...
+[18:06:02]   cluster IAP1-MM_I-int: 33 good global distances
+[18:06:04]   cluster IAP1-MM_LTR: 22 good global distances
+[18:06:06]   cluster IAPA_MM-int: 38 good global distances
+[18:06:08]   cluster IAPEY2_LTR: 51 good global distances
+[18:06:10]   cluster IAPEY3C_LTR: 17 good global distances
+[18:06:12]   cluster IAPEY3_LTR: 38 good global distances
+[18:06:15]   cluster IAPEY4_LTR: 46 good global distances
+[18:06:17]   cluster IAPEY5_I-int: 22 good global distances
+[18:06:19]   cluster IAPEY5_LTR: 20 good global distances
+[18:06:21]   cluster IAPEY_LTR: 48 good global distances
+[18:06:24]   cluster IAPLTR1_Mm: 730 good global distances
+[18:06:26]   cluster IAPLTR1a_Mm: 546 good global distances
+[18:06:29]   cluster IAPLTR2_Mm: 425 good global distances
+[18:06:31]   cluster IAPLTR2a: 176 good global distances
+[18:06:33]   cluster IAPLTR2a2_Mm: 373 good global distances
+[18:06:35]   cluster IAPLTR2b: 165 good global distances
+[18:06:38]   cluster IAPLTR3: 35 good global distances
+[18:06:40]   cluster IAPLTR4: 0 good global distances
+[18:06:42]   cluster IAPLTR4_I: 11 good global distances
+[18:06:42]   Wrote /home/amodz/anmol/iap_pres_nomotif/stage11v6/consensus_distance_per_copy.csv
+[18:06:42]   Cluster-consensus: 4,185/12,577 copies usable (8392 unalignable/saturated dropped).
+[18:06:42]   Global-consensus:  2,796/12,577 copies usable (9781 unalignable/saturated dropped).
+[18:06:45]   Saved /home/amodz/anmol/iap_pres_nomotif/stage11v6/fig_cluster_consensus_distance.pdf
+[18:06:46]   Saved /home/amodz/anmol/iap_pres_nomotif/stage11v6/fig_global_consensus_distance.pdf
+[18:06:46] ============================================================
+[18:06:46] DONE
+[18:06:46]   /home/amodz/anmol/iap_pres_nomotif/stage11v6/fig_cluster_consensus_distance.pdf
+[18:06:46]   /home/amodz/anmol/iap_pres_nomotif/stage11v6/fig_global_consensus_distance.pdf
+[18:06:46]   /home/amodz/anmol/iap_pres_nomotif/stage11v6/consensus_distance_per_copy.csv
+
+[EXIT 0  226s]
+
+============================================================
+[grna]
+============================================================
+CMD: /home/amodz/anmol/miniconda3/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/run_grna_offtarget.py --input /home/amodz/anmol/iapultracombo_tot_counts.csv --reports-dir /home/amodz/anmol/iap_pres_nomotif/stage11v6 --family IAP --cas SpCas9 --max-mm 2
+
+[18:06:47] ============================================================
+[18:06:47] GAMECA gRNA Off-Target --- IAP (SpCas9)
+[18:06:47] ============================================================
+[18:06:47]   12577 family copies
+[18:06:58]   400 candidate guides from consensus/copies
+[18:06:58] Indexing family copy landscape...
+[18:06:59]     Indexing family 400/12577...
+[18:07:00]     Indexing family 800/12577...
+[18:07:01]     Indexing family 1200/12577...
+[18:07:02]     Indexing family 1600/12577...
+[18:07:04]     Indexing family 2000/12577...
+[18:07:05]     Indexing family 2400/12577...
+[18:07:06]     Indexing family 2800/12577...
+[18:07:07]     Indexing family 3200/12577...
+[18:07:08]     Indexing family 3600/12577...
+[18:07:10]     Indexing family 4000/12577...
+[18:07:11]     Indexing family 4400/12577...
+[18:07:12]     Indexing family 4800/12577...
+[18:07:13]     Indexing family 5200/12577...
+[18:07:14]     Indexing family 5600/12577...
+[18:07:15]     Indexing family 6000/12577...
+[18:07:16]     Indexing family 6400/12577...
+[18:07:17]     Indexing family 6800/12577...
+[18:07:18]     Indexing family 7200/12577...
+[18:07:19]     Indexing family 7600/12577...
+[18:07:21]     Indexing family 8000/12577...
+[18:07:22]     Indexing family 8400/12577...
+[18:07:23]     Indexing family 8800/12577...
+[18:07:24]     Indexing family 9200/12577...
+[18:07:25]     Indexing family 9600/12577...
+[18:07:26]     Indexing family 10000/12577...
+[18:07:27]     Indexing family 10400/12577...
+[18:07:28]     Indexing family 10800/12577...
+[18:07:30]     Indexing family 11200/12577...
+[18:07:31]     Indexing family 11600/12577...
+[18:07:32]     Indexing family 12000/12577...
+[18:07:33]     Indexing family 12400/12577...
+[18:07:34]   No --background given --- off-target = within-family paralog multiplicity.
+[18:07:34] Scoring 400 guides (max_mm=2)...
+[18:07:34]   Wrote /home/amodz/anmol/iap_pres_nomotif/stage11v6/grna_offtarget_guides.csv (7 on Pareto frontier)
+[18:07:34]   Saved /home/amodz/anmol/iap_pres_nomotif/stage11v6/fig_grna_offtarget_pareto.pdf
+[18:07:34]   Saved /home/amodz/anmol/iap_pres_nomotif/stage11v6/fig_grna_offtarget_top.pdf
+[18:07:35]   Saved /home/amodz/anmol/iap_pres_nomotif/stage11v6/fig_grna_offtarget_mm.pdf
+[18:07:35]   Written grna_offtarget_measured_values.tex and grna_offtarget_report.txt
+[18:07:35] ============================================================
+[18:07:35] DONE
+
+============================================================
+MEASURED VALUES (paste into chat):
+============================================================
+============================================================
+GAMECA gRNA Off-Target / Specificity-Coverage --- Measured Values
+Generated: 2026-06-16 18:07:35
+============================================================
+  Family:               IAP
+  Cas / PAM:            SpCas9
+  Family copies:        12577
+  Candidate guides:     400
+  Pareto-frontier:      7
+
+  ── Best coverage/specificity guide ──
+  Guide:                TTTTTTTTTTTTTTTTTTAA
+  Coverage:             2 / 12577 (0.0%)
+  Off-target sites:     0
+
+[EXIT 0  50s]
+
+============================================================
+[transduction]
+============================================================
+CMD: /home/amodz/anmol/miniconda3/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/run_transduction.py --input /home/amodz/anmol/iapultracombo_tot_counts.csv --reports-dir /home/amodz/anmol/iap_pres_nomotif/stage11v6 --family IAP --tail-bp 150 --min-shared 3
+
+[18:07:37] ============================================================
+[18:07:37] GAMECA 3' Transduction --- IAP
+[18:07:37] ============================================================
+[18:07:39]   12577 copies; consensus tail 150 bp
+[18:15:28]   25 candidate transduction lineages (>= 2 copies, >= 3 shared k-mers)
+[18:15:35]   Saved /home/amodz/anmol/iap_pres_nomotif/stage11v6/fig_transduction_groups.pdf
+[18:15:35]   Saved /home/amodz/anmol/iap_pres_nomotif/stage11v6/fig_transduction_polya.pdf
+[18:15:35]   Written transduction_measured_values.tex and transduction_report.txt
+[18:15:35] ============================================================
+[18:15:35] DONE
+
+============================================================
+MEASURED VALUES (paste into chat):
+============================================================
+============================================================
+GAMECA 3' Transduction --- Measured Values
+Generated: 2026-06-16 18:15:35
+============================================================
+  Family:               IAP
+  Copies:               12577
+  Transduction lineages:25
+  Largest lineage:      12470 copies
+  Copies in a lineage:  12553
+  With poly-A signal:   2938
+  Median poly-A tail:   1 bp
+
+[EXIT 0  480s]
+
+============================================================
+[antisense]
+============================================================
+CMD: /home/amodz/anmol/miniconda3/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/run_antisense_promoter.py --input /home/amodz/anmol/iapultracombo_tot_counts.csv --reports-dir /home/amodz/anmol/iap_pres_nomotif/stage11v6 --family IAP --promoter-bp 200
+
+[18:15:36] ============================================================
+[18:15:36] GAMECA Antisense / Bidirectional Promoter --- IAP
+[18:15:36] ============================================================
+[18:15:38]   No stranded expression columns --- using sequence bidirectionality only.
+[18:15:38]   Wrote /home/amodz/anmol/iap_pres_nomotif/stage11v6/antisense_per_copy.csv
+[18:16:24]   Saved /home/amodz/anmol/iap_pres_nomotif/stage11v6/fig_antisense_motifs.pdf
+[18:16:24]   Saved /home/amodz/anmol/iap_pres_nomotif/stage11v6/fig_antisense_expr.pdf
+[18:16:24]   Written antisense_measured_values.tex and antisense_report.txt
+[18:16:24] ============================================================
+[18:16:24] DONE
+
+============================================================
+MEASURED VALUES (paste into chat):
+============================================================
+============================================================
+GAMECA Antisense / Bidirectional Promoter --- Measured Values
+Generated: 2026-06-16 18:16:24
+============================================================
+  Family:                  IAP
+  Copies:                  12577
+  Bidirectional (>=0.4):   7536
+  Median bidir. score:     0.500
+  Stranded expression:     no
+
+[EXIT 0  50s]
+
+============================================================
+[ctcf_tad]
+============================================================
+CMD: /home/amodz/anmol/miniconda3/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/run_ctcf_tad.py --input /home/amodz/anmol/iapultracombo_tot_counts.csv --reports-dir /home/amodz/anmol/iap_pres_nomotif/stage11v6 --family IAP --motif-mismatch 3
+
+[18:16:26] ============================================================
+[18:16:26] GAMECA CTCF / TAD --- IAP
+[18:16:26] ============================================================
+[18:16:26]   12577 loci
+[18:16:59]   CTCF core-motif scan: 6571/12577 copies hit (<= 3 mismatch)
+[18:17:00]   Wrote /home/amodz/anmol/iap_pres_nomotif/stage11v6/ctcf_tad_per_copy.csv
+[18:17:00]   Saved /home/amodz/anmol/iap_pres_nomotif/stage11v6/fig_ctcf_overlap.pdf
+[18:17:00]   Saved /home/amodz/anmol/iap_pres_nomotif/stage11v6/fig_ctcf_tad_distance.pdf
+[18:17:00]   Written ctcf_tad_measured_values.tex and ctcf_tad_report.txt
+[18:17:00] ============================================================
+[18:17:00] DONE
+
+============================================================
+MEASURED VALUES (paste into chat):
+============================================================
+============================================================
+GAMECA CTCF / TAD --- Measured Values
+Generated: 2026-06-16 18:17:00
+============================================================
+  Family:               IAP
+  Copies:               12577
+  CTCF core motif:      6571
+  CTCF ChIP overlap:    n/a (no peaks file)
+  Boundary-proximal:    n/a (no TAD file)
+  Median TAD distance:  n/a
+
+[EXIT 0  35s]
+
+============================================================
+[epigenetic]
+============================================================
+CMD: /home/amodz/anmol/miniconda3/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/run_epigenetic_overlay.py --input /home/amodz/anmol/iapultracombo_tot_counts.csv --reports-dir /home/amodz/anmol/iap_pres_nomotif/stage11v6 --family IAP
+
+[18:17:01] ============================================================
+[18:17:01] GAMECA Epigenetic Overlay --- IAP
+[18:17:01] ============================================================
+[18:17:02]   12577 loci
+[18:17:02]   No --tracks provided. Use --preset K562 (or GM12878/HeLa-S3/IMR-90/H1-hESC) to auto-download ENCODE tracks, or pass --tracks NAME=path.bed.
+[18:17:02]   Wrote /home/amodz/anmol/iap_pres_nomotif/stage11v6/epigenetic_per_copy.csv
+[18:17:03]   Saved /home/amodz/anmol/iap_pres_nomotif/stage11v6/fig_epigenetic_overlap.pdf
+[18:17:03]   Saved /home/amodz/anmol/iap_pres_nomotif/stage11v6/fig_epigenetic_heatmap.pdf
+[18:17:03]   Written epigenetic_measured_values.tex and epigenetic_report.txt
+[18:17:03] ============================================================
+[18:17:03] DONE
+
+============================================================
+MEASURED VALUES (paste into chat):
+============================================================
+============================================================
+GAMECA Epigenetic Overlay --- Measured Values
+Generated: 2026-06-16 18:17:03
+============================================================
+  Family:        IAP
+  Copies:        12577
+  Tracks used:   0  (none)
+
+[EXIT 0  2s]
+
+============================================================
+[ortholog]
+============================================================
+CMD: /home/amodz/anmol/miniconda3/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/run_ortholog_insertion.py --input /home/amodz/anmol/iapultracombo_tot_counts.csv --reports-dir /home/amodz/anmol/iap_pres_nomotif/stage11v6 --family IAP
+
+[18:17:04] ============================================================
+[18:17:04] GAMECA Ortholog Insertion --- IAP
+[18:17:04] ============================================================
+[18:17:04]   12577 loci
+[18:17:04]   No chains available. Use --species panTro6 rheMac10 mm39 to auto-download, or pass --chains SPECIES=chain.
+[18:17:04]   Wrote /home/amodz/anmol/iap_pres_nomotif/stage11v6/ortholog_per_copy.csv
+[18:17:05]   Saved /home/amodz/anmol/iap_pres_nomotif/stage11v6/fig_ortholog_presence.pdf
+[18:17:05]   Saved /home/amodz/anmol/iap_pres_nomotif/stage11v6/fig_ortholog_summary.pdf
+[18:17:05]   Written ortholog_measured_values.tex and ortholog_report.txt
+[18:17:05] ============================================================
+[18:17:05] DONE
+
+============================================================
+MEASURED VALUES (paste into chat):
+============================================================
+============================================================
+GAMECA Ortholog Insertion --- Measured Values
+Generated: 2026-06-16 18:17:05
+============================================================
+  Family:              IAP
+  Copies:              12577
+  Target species:      0  (none)
+  Lineage-specific:    n/a (no chains)
+
+[EXIT 0  2s]
+
+============================================================
+[multiassembly]
+============================================================
+CMD: /home/amodz/anmol/miniconda3/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/run_multiassembly_liftover.py --input /home/amodz/anmol/iapultracombo_tot_counts.csv --reports-dir /home/amodz/anmol/iap_pres_nomotif/stage11v6 --family IAP --source-assembly mm10
+
+[18:17:06] ============================================================
+[18:17:06] GAMECA Multi-Assembly Liftover --- IAP (from mm10)
+[18:17:06] ============================================================
+[18:17:06]   12577 loci
+[18:17:06]   No chains available. Use --target-assemblies hg19 t2t to auto-download, or pass --chains ASM=chain.
+[18:17:07]   Wrote /home/amodz/anmol/iap_pres_nomotif/stage11v6/multiassembly_per_copy.csv
+[18:17:07]   Saved /home/amodz/anmol/iap_pres_nomotif/stage11v6/fig_multiassembly_mapping.pdf
+[18:17:07]   Saved /home/amodz/anmol/iap_pres_nomotif/stage11v6/fig_multiassembly_coords.pdf
+[18:17:07]   Written multiassembly_measured_values.tex and multiassembly_report.txt
+[18:17:07] ============================================================
+[18:17:07] DONE
+
+============================================================
+MEASURED VALUES (paste into chat):
+============================================================
+============================================================
+GAMECA Multi-Assembly Liftover --- Measured Values
+Generated: 2026-06-16 18:17:07
+============================================================
+  Family:           IAP
+  Source assembly:  mm10
+  Copies:           12577
+  Target assemblies:0  (none)
+
+[EXIT 0  2s]
+
+============================================================
+[divergence]
+============================================================
+CMD: /home/amodz/anmol/miniconda3/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/run_divergence.py --input /home/amodz/anmol/iapultracombo_tot_counts.csv --reports-dir /home/amodz/anmol/iap_pres_nomotif/stage11v6 --family IAP --assembly mm10
+
+
+=== DIVERGENCE ANALYSIS (IAP) ===
+  12,577 loci × 12 columns
+  SKIP: need 'Cluster' and 'Seq' columns
+
+[EXIT 0  1s]
+
+============================================================
+[ltr_struct]
+============================================================
+CMD: /home/amodz/anmol/miniconda3/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/run_ltr_struct.py --input /home/amodz/anmol/iapultracombo_tot_counts.csv --reports-dir /home/amodz/anmol/iap_pres_nomotif/stage11v6 --family IAP
+
+
+=== LTR STRUCTURAL ANNOTATION (IAP) ===
+  12,577 loci
+  Annotating (min_ltr_identity=0.65)...
+    500/12577
+    1000/12577
+    1500/12577
+    2000/12577
+    2500/12577
+    3000/12577
+    3500/12577
+    4000/12577
+    4500/12577
+    5000/12577
+    5500/12577
+    6000/12577
+    6500/12577
+    7000/12577
+    7500/12577
+    8000/12577
+    8500/12577
+    9000/12577
+    9500/12577
+    10000/12577
+    10500/12577
+    11000/12577
+    11500/12577
+    12000/12577
+    12500/12577
+  Annotated CSV → /home/amodz/anmol/iap_pres_nomotif/stage11v6/ltr_struct_annotated.csv
+  full-length: 0  solo-LTR: 0  PBS: 1  PPT: 11,721
+  Summary CSV → /home/amodz/anmol/iap_pres_nomotif/stage11v6/ltr_struct_summary.csv
+  LaTeX values → /home/amodz/anmol/iap_pres_nomotif/stage11v6/ltr_struct_values.tex
+
+[EXIT 0  74s]
+
+============================================================
+[subfamily]
+============================================================
+CMD: /home/amodz/anmol/miniconda3/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/run_subfamily.py --input /home/amodz/anmol/iapultracombo_tot_counts.csv --reports-dir /home/amodz/anmol/iap_pres_nomotif/stage11v6 --family IAP --assembly mm10
+
+
+=== SUBFAMILY RESOLUTION (IAP) ===
+  SKIP: need 'Cluster' and 'Seq' columns
+
+[EXIT 0  10s]
+
+============================================================
+[benchmark]
+============================================================
+CMD: /home/amodz/anmol/miniconda3/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/run_benchmark.py --input /home/amodz/anmol/iapultracombo_tot_counts.csv --reports-dir /home/amodz/anmol/iap_pres_nomotif/stage11v6 --family IAP --assembly mm10
+
+
+=== BENCHMARKING (IAP / mm10) ===
+  No pipeline_diagnostic.log found — timing columns will be empty
+  Table → /home/amodz/anmol/iap_pres_nomotif/stage11v6/benchmark_table.csv
+  Steps plot → /home/amodz/anmol/iap_pres_nomotif/stage11v6/fig_benchmark_steps.png
+  LaTeX values → /home/amodz/anmol/iap_pres_nomotif/stage11v6/benchmark_values.tex
+  GAMECA user steps:   1
+  Manual workflow steps: 23
+
+[EXIT 0  39s]
+
+============================================================
+[motif_gain]
+============================================================
+CMD: /home/amodz/anmol/miniconda3/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/run_motif_gain.py --input /home/amodz/anmol/iapultracombo_tot_counts.csv --reports-dir /home/amodz/anmol/iap_pres_nomotif/stage11v6 --family IAP --assembly mm10
+
+[18:19:12] ============================================================
+[18:19:12] GAMECA TF Motif Gain/Loss  ---  IAP
+[18:19:12] ============================================================
+[18:19:12]   12577 loci loaded  |  cluster col: None
+[18:19:12]   WARNING: /home/amodz/motif_analysis/all_overlaps.tsv not found or empty — motif gain requires Stage 8 output.
+[18:19:13]   Wrote placeholder outputs  (all_overlaps.tsv not found at /home/amodz/motif_analysis/all_overlaps.tsv)
+
+[EXIT 0  2s]
+
+============================================================
+[expression]
+============================================================
+CMD: /home/amodz/anmol/miniconda3/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/te_expression.py --input /home/amodz/anmol/iapultracombo_tot_counts.csv --reports-dir /home/amodz/anmol/iap_pres_nomotif/stage11v6 --family IAP --out-dir /home/amodz/anmol/iap_pres_nomotif
+
+============================================================
+GAMECA — Expression Analysis
+  Input:  /home/amodz/anmol/iapultracombo_tot_counts.csv
+  OutDir: /home/amodz/anmol/iap_pres_nomotif
+============================================================
+  [SKIP] Expression plots already exist (use --force to re-run)
+
+[EXIT 0  1s]
+
+============================================================
+STAGE 11 SUMMARY
+============================================================
+  phylo                FAILED rc=2        197s
+  consensus_distance   OK                 226s
+  grna                 OK                 50s
+  transduction         OK                 480s
+  antisense            OK                 50s
+  ctcf_tad             OK                 35s
+  epigenetic           OK                 2s
+  ortholog             OK                 2s
+  multiassembly        OK                 2s
+  divergence           OK                 1s
+  ltr_struct           OK                 74s
+  subfamily            OK                 10s
+  benchmark            OK                 39s
+  motif_gain           OK                 2s
+  expression           OK                 1s
+
+Done: ok=14 failed=1 skipped=0
+Finished: 2026-06-16 18:19:14

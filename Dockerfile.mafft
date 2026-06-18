@@ -1,0 +1,8 @@
+# Minimal image for the consensus-distance step: MAFFT + numpy/pandas/matplotlib.
+FROM python:3.11-slim-bookworm
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends mafft \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir numpy pandas matplotlib
+ENV MPLBACKEND=Agg MPLCONFIGDIR=/tmp/mpl
+WORKDIR /app

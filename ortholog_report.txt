@@ -1,0 +1,8 @@
+============================================================
+GAMECA Ortholog Insertion --- Measured Values
+Generated: 2026-06-16 18:17:05
+============================================================
+  Family:              IAP
+  Copies:              12577
+  Target species:      0  (none)
+  Lineage-specific:    n/a (no chains)
