@@ -220,7 +220,11 @@ def make_fold_script(family: str, outdir: str, queue: str,
 
 def submit(script_text: str, dry_run: bool,
            dependency_job_id: str | None = None) -> str | None:
-    """Write script to a temp file and bsub it.  Returns the LSF job ID string."""
+    """Write script to a temp file and bsub it.  Returns the LSF job ID string.
+
+    The -w 'done(JOBID)' expression uses parentheses which are special in
+    bash, so the whole dependency string is double-quoted in the shell command.
+    """
     import tempfile
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".sh", delete=False, prefix="gameca_"
@@ -229,19 +233,18 @@ def submit(script_text: str, dry_run: bool,
         tmp = fh.name
     os.chmod(tmp, 0o755)
 
-    cmd = ["bsub"]
     if dependency_job_id:
-        cmd += ["-w", f"done({dependency_job_id})"]
-    cmd += ["<", tmp]   # bsub reads from stdin
+        shell_cmd = f'bsub -w "done({dependency_job_id})" < {tmp}'
+    else:
+        shell_cmd = f"bsub < {tmp}"
 
     if dry_run:
         print(f"\n{'='*60}")
-        print(f"[DRY RUN] Would submit:\n{script_text}")
-        print(f"Command: bsub {'<' + tmp}")
+        print(f"[DRY RUN] Would run: {shell_cmd}")
+        print(f"Script:\n{script_text}")
+        os.unlink(tmp)
         return "DRY_RUN_ID"
 
-    # bsub < file needs shell=True (stdin redirect)
-    shell_cmd = " ".join(cmd[:-2]) + f" < {tmp}"
     result = subprocess.run(shell_cmd, shell=True, capture_output=True, text=True)
     os.unlink(tmp)
 
@@ -266,6 +269,13 @@ def main():
     p.add_argument("--outdir",        default=DEFAULT_OUTDIR)
     p.add_argument("--queue",         default=DEFAULT_QUEUE)
     p.add_argument("--colabfold-cmd", default=DEFAULT_COLABFOLD)
+    p.add_argument("--fold-only",     action="store_true",
+                   help="Submit only the fold (ColabFold) jobs, dependent on "
+                        "already-running main jobs.  Requires --main-job-ids.")
+    p.add_argument("--main-job-ids",  default="",
+                   help="Comma-separated list of LSF job IDs for already-submitted "
+                        "main jobs, in the same order as FAMILIES.  Used with "
+                        "--fold-only to re-submit fold jobs after a quoting failure.")
     args = p.parse_args()
 
     workdir = str(Path(__file__).resolve().parent)
@@ -279,32 +289,61 @@ def main():
     print(f"ColabFold   : {args.colabfold_cmd}")
     print(f"Notify      : {NOTIFY_EMAIL}")
     print(f"Families    : {len(FAMILIES)}")
-    print(f"Total jobs  : {len(FAMILIES) * 2}  ({len(FAMILIES)} main + {len(FAMILIES)} fold)")
+    if args.fold_only:
+        print(f"Mode        : fold-only (re-submitting ColabFold jobs against existing main jobs)")
+    else:
+        print(f"Total jobs  : {len(FAMILIES) * 2}  ({len(FAMILIES)} main + {len(FAMILIES)} fold)")
     print()
 
     submitted = []
     failed    = []
 
-    for family in FAMILIES:
-        print(f"[{family}]")
+    # ── fold-only mode: resubmit fold jobs against already-running main jobs ──
+    if args.fold_only:
+        raw_ids = [x.strip() for x in args.main_job_ids.split(",") if x.strip()]
+        if len(raw_ids) != len(FAMILIES):
+            sys.exit(
+                f"ERROR: --main-job-ids has {len(raw_ids)} entries but there are "
+                f"{len(FAMILIES)} families.  Provide one job ID per family in order:\n"
+                + "\n".join(f"  {i+1}. {f}" for i, f in enumerate(FAMILIES))
+            )
+        for family, main_id in zip(FAMILIES, raw_ids):
+            print(f"[{family}]  main={main_id}")
+            fold_script = make_fold_script(family, args.outdir, args.queue,
+                                           workdir, args.colabfold_cmd)
+            fold_id = submit(fold_script, args.dry_run, dependency_job_id=main_id)
+            if fold_id is None:
+                print(f"  !! Failed to submit fold job for {family}")
+                failed.append(f"{family}(fold)")
+                submitted.append((family, main_id, None))
+            else:
+                submitted.append((family, main_id, fold_id))
+            print()
 
-        main_script = make_main_script(family, args.outdir, args.queue, workdir)
-        fold_script = make_fold_script(family, args.outdir, args.queue,
-                                       workdir, args.colabfold_cmd)
+    # ── normal mode: submit both main and fold jobs ───────────────────────────
+    else:
+        for family in FAMILIES:
+            print(f"[{family}]")
 
-        main_id = submit(main_script, args.dry_run)
-        if main_id is None:
-            print(f"  !! Failed to submit main job for {family}")
-            failed.append(family)
-            continue
+            main_script = make_main_script(family, args.outdir, args.queue, workdir)
+            fold_script = make_fold_script(family, args.outdir, args.queue,
+                                           workdir, args.colabfold_cmd)
 
-        fold_id = submit(fold_script, args.dry_run, dependency_job_id=main_id)
-        if fold_id is None:
-            print(f"  !! Failed to submit fold job for {family} (main={main_id} still running)")
-            failed.append(f"{family}(fold)")
-            submitted.append((family, main_id, None))
-        else:
-            submitted.append((family, main_id, fold_id))
+            main_id = submit(main_script, args.dry_run)
+            if main_id is None:
+                print(f"  !! Failed to submit main job for {family}")
+                failed.append(family)
+                continue
+
+            fold_id = submit(fold_script, args.dry_run, dependency_job_id=main_id)
+            if fold_id is None:
+                print(f"  !! Failed to submit fold job for {family} (main={main_id} still running)")
+                failed.append(f"{family}(fold)")
+                submitted.append((family, main_id, None))
+            else:
+                submitted.append((family, main_id, fold_id))
+
+            print()
 
         print()
 

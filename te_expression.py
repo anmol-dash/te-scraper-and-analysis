@@ -4,9 +4,11 @@ te_expression.py  —  GAMECA step E: Expression Analysis
 ─────────────────────────────────────────────────────────────────────────────
 Generates per-cluster expression plots and statistics from a clustered CSV.
 
-Auto-detects expression columns as any numeric column that is not a known
-coordinate / cluster / embedding column. Columns can also be specified
-explicitly via --stage-cols.
+Auto-detects expression columns as any column (numeric, numeric-string, or
+list-like SQUIRE cell) that is not coordinate / score / cluster / embedding
+metadata. Sample names are arbitrary — there is no developmental-stage
+whitelist, so "K562_rep2", "Liver_donorA", "siCTRL_0h", "2-cell", etc. are all
+treated identically. Columns can also be specified explicitly via --stage-cols.
 
 Input:   clustered CSV produced by te_clustering.py
          (needs columns: Cluster, plus ≥1 numeric expression columns)
@@ -64,12 +66,96 @@ _CHROM_ORDER = (
 )
 
 _NON_EXPR_COLS = {
-    "chr", "chromosome", "chrom", "#chrom",
+    "chr", "chromosome", "chrom", "#chrom", "genoname",
     "start", "chromstart", "stop", "end", "chromend",
-    "strand", "te_name", "repname", "seq",
-    "cluster", "cluster_id",
+    "genostart", "genoend", "genoleft",
+    "strand", "te_name", "te_id", "repname", "repclass", "repfamily",
+    "name", "id", "bin", "seq", "sequence", "ucsc_url",
+    "cluster", "cluster_id", "_te_row_id", "_expr_row_id",
+    "length", "gc_content", "gc",
+    "swscore", "millidiv", "milliins", "milldel", "millidel",
+    "repstart", "repend", "repleft",
+    "divergence", "kimura", "age", "age_mya", "subst_rate",
     "umap_x", "umap_y", "pca_x", "pca_y", "tsne_x", "tsne_y",
+    "expr_match_count", "expr_overlap_bp",
 }
+
+# Substring patterns (matched against the lower-cased column name) that mark a
+# numeric column as *metadata*, never an expression sample — regardless of how
+# the actual samples happen to be named. This is what lets the module tolerate
+# arbitrary sample names (e.g. "K562_rep2", "Liver_donorA", "siCTRL_0h"):
+# any numeric column that is NOT obvious coordinate/score/embedding metadata is
+# treated as a sample, instead of relying on a fixed list of stage names.
+_NON_EXPR_PATTERNS = (
+    "_row_id", "row_id", "embedding", "_pca", "_umap", "_tsne",
+    "coord", "millidiv", "milli_div", "swscore", "sw_score",
+    "overlap_bp", "match_count", "_url",
+)
+
+
+def _is_metadata_col(col):
+    """True when *col* is coordinate/score/embedding bookkeeping, not a sample."""
+    name = str(col).strip().lower()
+    if name in _NON_EXPR_COLS:
+        return True
+    return any(pat in name for pat in _NON_EXPR_PATTERNS)
+
+
+def _listlike_count(v):
+    """Count elements in a list-like cell ('[a, b, c]', 'x;y;z', 'p,q').
+
+    SQUIRE / ultracombo expression assemblies store the per-sample signal as a
+    list of cell-barcodes rather than a scalar count. We treat the *number* of
+    elements as the expression value so those columns become usable samples.
+    Returns np.nan for genuine scalars (handled by numeric coercion instead).
+    """
+    if isinstance(v, (list, tuple, set)):
+        return float(len(v))
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return 0.0
+    s = str(v).strip()
+    if not s or s.lower() == "nan":
+        return 0.0
+    if s.startswith("[") and s.endswith("]"):
+        try:
+            import ast
+            parsed = ast.literal_eval(s)
+            if isinstance(parsed, (list, tuple, set)):
+                return float(len(parsed))
+        except Exception:
+            pass
+        # Brackets present but not valid Python literal (e.g. unquoted tokens):
+        # count comma/semicolon-separated tokens inside the brackets.
+        inner = s[1:-1].strip()
+        if not inner:
+            return 0.0
+        for sep in (",", ";", "|"):
+            if sep in inner:
+                return float(len([t for t in inner.split(sep) if t.strip()]))
+        return 1.0
+    # Delimited list of tokens (commas / semicolons / pipes) with no brackets.
+    for sep in (";", "|"):
+        if sep in s:
+            return float(len([t for t in s.split(sep) if t.strip()]))
+    return np.nan
+
+
+def _coerce_expr_series(s):
+    """Return *s* as a float Series, tolerant of list-like / string-number cells.
+
+    Order of attempts: (1) already numeric → as-is; (2) plain numeric strings →
+    pd.to_numeric; (3) list-like cells → element counts. Returns None if the
+    column cannot be interpreted as expression at all.
+    """
+    if pd.api.types.is_numeric_dtype(s):
+        return s.astype(float)
+    num = pd.to_numeric(s, errors="coerce")
+    if num.notna().mean() >= 0.5:        # mostly real numbers → treat as numeric
+        return num.fillna(0.0).astype(float)
+    counts = s.map(_listlike_count)
+    if counts.notna().any() and float(counts.fillna(0).sum()) > 0:
+        return counts.fillna(0.0).astype(float)
+    return None
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -111,11 +197,24 @@ def _cluster_col(df):
 
 
 def _auto_expr_cols(df):
+    """Detect expression-sample columns under *arbitrary* sample naming.
+
+    A column is a sample if it is NOT coordinate/score/embedding metadata and
+    its values can be interpreted as expression (numeric, numeric-string, or
+    list-like). Columns the pipeline already prefixed ``expr_`` are always kept
+    (minus the ``expr_match_count`` / ``expr_overlap_bp`` bookkeeping pair).
+    No sample-name whitelist is used, so names like "K562_rep2" or "2-cell"
+    are treated identically.
+    """
     out = []
     for c in df.columns:
-        if c.lower() in _NON_EXPR_COLS:
+        name = str(c).strip().lower()
+        if name in ("expr_match_count", "expr_overlap_bp"):
             continue
-        if pd.api.types.is_numeric_dtype(df[c]):
+        forced = name.startswith("expr_")           # pipeline-merged sample
+        if not forced and _is_metadata_col(c):
+            continue
+        if _coerce_expr_series(df[c]) is not None:
             out.append(c)
     return out
 
@@ -129,9 +228,11 @@ def _ylabel(log1p):
 
 
 def _chrom_col(df):
-    for c in ("chr", "chromosome", "chrom", "#chrom", "genoName"):
-        if c in df.columns:
-            return c
+    wanted = ("chr", "chromosome", "chrom", "#chrom", "genoname")
+    lower = {str(c).strip().lower(): c for c in df.columns}
+    for w in wanted:
+        if w in lower:
+            return lower[w]
     return None
 
 
@@ -742,8 +843,25 @@ def run_expression_analysis(input_csv, out_dir, stage_cols=None, stage_labels=No
         print("  No expression columns found — skipping.")
         return {"expr_dir": str(expr_dir), "expr_cols": [], "n_clusters": 0}
 
-    labels = (stage_labels if (stage_labels and len(stage_labels) == len(expr_cols))
-              else expr_cols)
+    # Coerce every selected column to a float Series (handles numeric strings
+    # and list-like SQUIRE cells), dropping any that cannot be interpreted or
+    # that are entirely empty/constant-NaN so weird inputs never crash plotting.
+    kept_cols, kept_labels = [], []
+    pre_labels = (stage_labels if (stage_labels and len(stage_labels) == len(expr_cols))
+                  else expr_cols)
+    for c, lbl in zip(expr_cols, pre_labels):
+        coerced = _coerce_expr_series(df[c])
+        if coerced is None or coerced.dropna().empty:
+            print(f"  [DROP] column {c!r} is not usable as expression — skipping")
+            continue
+        df[c] = coerced
+        kept_cols.append(c)
+        kept_labels.append(lbl)
+    expr_cols, labels = kept_cols, kept_labels
+
+    if not expr_cols:
+        print("  No usable expression columns after coercion — skipping.")
+        return {"expr_dir": str(expr_dir), "expr_cols": [], "n_clusters": 0}
     print(f"  Expression columns ({len(expr_cols)}): {expr_cols}")
 
     # ── Run all analyses ──────────────────────────────────────────────────────
