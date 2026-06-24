@@ -143,6 +143,8 @@ def main():
                         "(default None → its own auto-detection).")
     p.add_argument("--expr-stage-cols", nargs="*", default=None,
                    help="Explicit expression stage column names; passed to te_expression.py.")
+    p.add_argument("--notify-email", default="",
+                   help="Email address for completion notifications (via Resend API).")
     args = p.parse_args()
 
     input_csv = Path(args.input).resolve()
@@ -182,6 +184,49 @@ def main():
     ok = fail = skipped = 0
     results: list[tuple[str, str, float]] = []
 
+    # Split into pre-fold (everything except ColabFold) and fold phases so we
+    # can send a notification after each.
+    modules_prefold = [(n, s, e) for n, s, e in modules if n != "fold"]
+    modules_fold    = [(n, s, e) for n, s, e in modules if n == "fold"]
+
+    def _run_module(name, script, extra, lf):
+        nonlocal ok, fail, skipped
+        script_path = sdir / script
+        lf.write(f"\n{'='*60}\n[{name}]\n{'='*60}\n")
+        lf.flush()
+        if not script_path.exists():
+            msg = f"  [{name}] SKIP (script not found: {script_path})"
+            print(msg); lf.write(msg + "\n")
+            skipped += 1
+            results.append((name, "SKIP", 0.0))
+            return
+        cmd = ([py, str(script_path),
+                "--input",       str(input_csv),
+                "--reports-dir", str(args.reports_dir),
+                "--family",      args.family]
+               + extra)
+        lf.write(f"CMD: {' '.join(cmd)}\n\n"); lf.flush()
+        print(f"  [{name}] running...", end="", flush=True)
+        t0 = time.time()
+        rc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT).returncode
+        elapsed = time.time() - t0
+        lf.write(f"\n[EXIT {rc}  {elapsed:.0f}s]\n"); lf.flush()
+        if rc == 0:
+            print(f" ok ({elapsed:.0f}s)"); ok += 1
+            results.append((name, "OK", elapsed))
+        else:
+            print(f" FAILED rc={rc} ({elapsed:.0f}s)"); fail += 1
+            results.append((name, f"FAILED rc={rc}", elapsed))
+
+    def _results_summary(subset_names=None):
+        rows = [r for r in results if subset_names is None or r[0] in subset_names]
+        lines = [f"  {nm:<20} {st:<18} {el:.0f}s" for nm, st, el in rows]
+        n_ok   = sum(1 for _, s, _ in rows if s == "OK")
+        n_fail = sum(1 for _, s, _ in rows if s.startswith("FAILED"))
+        n_skip = sum(1 for _, s, _ in rows if s == "SKIP")
+        lines.append(f"\n  ok={n_ok}  failed={n_fail}  skipped={n_skip}")
+        return "\n".join(lines)
+
     with open(log_path, "w", buffering=1) as lf:
         lf.write("GAMECA Stage 11 Standalone Log\n")
         lf.write(f"Family:   {args.family}\n")
@@ -191,34 +236,38 @@ def main():
         lf.write(f"Started:  {datetime.datetime.now():%Y-%m-%d %H:%M:%S}\n")
         lf.write("=" * 60 + "\n")
 
-        for name, script, extra in modules:
-            script_path = sdir / script
-            lf.write(f"\n{'='*60}\n[{name}]\n{'='*60}\n")
-            lf.flush()
-            if not script_path.exists():
-                msg = f"  [{name}] SKIP (script not found: {script_path})"
-                print(msg); lf.write(msg + "\n")
-                skipped += 1
-                results.append((name, "SKIP", 0.0))
-                continue
+        # ── Phase 1: all modules except ColabFold ──────────────────────────
+        for name, script, extra in modules_prefold:
+            _run_module(name, script, extra, lf)
 
-            cmd = ([py, str(script_path),
-                    "--input",       str(input_csv),
-                    "--reports-dir", str(args.reports_dir),
-                    "--family",      args.family]
-                   + extra)
-            lf.write(f"CMD: {' '.join(cmd)}\n\n"); lf.flush()
-            print(f"  [{name}] running...", end="", flush=True)
-            t0 = time.time()
-            rc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT).returncode
-            elapsed = time.time() - t0
-            lf.write(f"\n[EXIT {rc}  {elapsed:.0f}s]\n"); lf.flush()
-            if rc == 0:
-                print(f" ok ({elapsed:.0f}s)"); ok += 1
-                results.append((name, "OK", elapsed))
-            else:
-                print(f" FAILED rc={rc} ({elapsed:.0f}s)"); fail += 1
-                results.append((name, f"FAILED rc={rc}", elapsed))
+        prefold_names = {n for n, _, _ in modules_prefold}
+        if args.notify_email and modules_prefold:
+            fold_note = (
+                "\nNote: ColabFold structure prediction is still running."
+                "\nYou will receive a second email when it completes."
+                if modules_fold else ""
+            )
+            from te_notify import send_completion_email
+            send_completion_email(
+                args.notify_email,
+                f"Stage 11 ({args.family}) — all modules done",
+                str(args.reports_dir),
+                summary=_results_summary(prefold_names) + fold_note,
+            )
+
+        # ── Phase 2: ColabFold ─────────────────────────────────────────────
+        for name, script, extra in modules_fold:
+            _run_module(name, script, extra, lf)
+
+        if args.notify_email and modules_fold:
+            fold_names = {n for n, _, _ in modules_fold}
+            from te_notify import send_completion_email
+            send_completion_email(
+                args.notify_email,
+                f"Stage 11 ({args.family}) — ColabFold done",
+                str(args.reports_dir),
+                summary=_results_summary(fold_names),
+            )
 
         lf.write(f"\n{'='*60}\nSTAGE 11 SUMMARY\n{'='*60}\n")
         for nm, st, el in results:
