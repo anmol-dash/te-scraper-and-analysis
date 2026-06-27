@@ -29,6 +29,10 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
       - name: Install Linux dependencies for Tauri
         run: |
           sudo apt-get update
@@ -101,15 +105,9 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: actions/cache@v4
+      - uses: swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            src-tauri/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.toml') }}-${{ github.sha }}
-          restore-keys: |
-            cargo-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.toml') }}-
+          workspaces: src-tauri
 
       - name: Install Linux dependencies for Tauri
         if: runner.os == 'Linux'
@@ -178,14 +176,21 @@ jobs:
           path: ~/.cache/pip
           key: pip-${{ runner.os }}-pyinstaller
 
+      - name: Cache Python sidecar
+        id: sidecar-cache
+        uses: actions/cache@v4
+        with:
+          path: src-tauri/binaries
+          key: sidecar-${{ matrix.os }}-${{ hashFiles('backend/**/*.py', 'backend/pyinstaller.spec', 'backend/requirements.txt', 'requirements.txt', '*.py', '*.pyx') }}
+
       - name: Build Python sidecar (Unix)
-        if: runner.os != 'Windows'
+        if: runner.os != 'Windows' && steps.sidecar-cache.outputs.cache-hit != 'true'
         run: |
           pip install pyinstaller
           bash scripts/build-python.sh
 
       - name: Build Python sidecar (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && steps.sidecar-cache.outputs.cache-hit != 'true'
         run: |
           pip install pyinstaller
           powershell -ExecutionPolicy Bypass -File scripts/build-python.ps1
@@ -206,15 +211,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
 
-      - uses: actions/cache@v4
+      - uses: swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            src-tauri/target
-          key: cargo-build-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.toml') }}-${{ github.sha }}
-          restore-keys: |
-            cargo-build-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.toml') }}-
+          workspaces: src-tauri
 
       - name: Tauri build
         run: pnpm exec tauri build --ci

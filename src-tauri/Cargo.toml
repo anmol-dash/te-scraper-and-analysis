@@ -25,3 +25,12 @@ tauri-plugin-shell = "2"
 thiserror = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "io-util"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+
+# Faster release compiles. The Rust side is a thin IPC shell that proxies to the
+# Python sidecar, so reduced optimisation has negligible runtime impact while
+# cutting build time. opt-level=1 keeps light optimisation; codegen-units=256
+# maximises parallelism; strip drops symbols for a smaller binary.
+[profile.release]
+opt-level = 1
+codegen-units = 256
+strip = true

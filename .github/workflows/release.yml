@@ -56,14 +56,21 @@ jobs:
           key: pip-release-${{ runner.os }}-${{ hashFiles('backend/requirements.txt') }}
           restore-keys: pip-release-${{ runner.os }}-
 
+      - name: Cache Python sidecar
+        id: sidecar-cache
+        uses: actions/cache@v4
+        with:
+          path: src-tauri/binaries
+          key: sidecar-${{ matrix.platform }}-${{ hashFiles('backend/**/*.py', 'backend/pyinstaller.spec', 'backend/requirements.txt', 'requirements.txt', '*.py', '*.pyx') }}
+
       - name: Build Python sidecar (Unix)
-        if: runner.os != 'Windows'
+        if: runner.os != 'Windows' && steps.sidecar-cache.outputs.cache-hit != 'true'
         run: |
           pip install pyinstaller
           bash scripts/build-python.sh
 
       - name: Build Python sidecar (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && steps.sidecar-cache.outputs.cache-hit != 'true'
         run: |
           pip install pyinstaller
           powershell -ExecutionPolicy Bypass -File scripts/build-python.ps1
