@@ -62,7 +62,6 @@ jobs:
         if: runner.os != 'Windows' && steps.sidecar-cache.outputs.cache-hit != 'true'
         env:
           PYINSTALLER_TARGET_ARCH: universal2
-          SIDECAR_TRIPLE: universal-apple-darwin
         run: |
           pip install pyinstaller
           bash scripts/build-python.sh
