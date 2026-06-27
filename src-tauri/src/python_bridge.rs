@@ -54,7 +54,6 @@ pub struct PythonBridge {
     child: Arc<TokioMutex<Option<CommandChild>>>,
     request_tx: mpsc::Sender<Request>,
     pending: Arc<DashMap<Uuid, oneshot::Sender<Response>>>,
-    app: AppHandle,
     shutdown_intent: Arc<AtomicBool>,
     fatal: Arc<AtomicBool>,
     fatal_reason: Arc<Mutex<Option<String>>>,
@@ -75,7 +74,6 @@ impl PythonBridge {
             child: child.clone(),
             request_tx: request_tx.clone(),
             pending: pending.clone(),
-            app: app.clone(),
             shutdown_intent: shutdown_intent.clone(),
             fatal: fatal.clone(),
             fatal_reason: fatal_reason.clone(),
@@ -304,7 +302,7 @@ async fn supervisor_task(
         generation.fetch_add(1, Ordering::SeqCst);
         stdout_buf.clear();
         let mut saw_valid_line = false;
-        let mut exit_detail = String::new();
+        let mut exit_detail;
 
         loop {
             let event = match event_rx.recv().await {
@@ -556,7 +554,7 @@ mod framing_tests {
     fn request_multiplexer_resolves_result_by_uuid() {
         let pending = DashMap::new();
         let id = Uuid::new_v4();
-        let (tx, mut rx) = oneshot::channel();
+        let (tx, rx) = oneshot::channel();
         pending.insert(id, tx);
 
         assert!(resolve_pending_response(
