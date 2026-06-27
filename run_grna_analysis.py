@@ -13,7 +13,7 @@ Default example: mt2_mm_ultracombo_countsv4.csv
 Usage:
     python run_grna_analysis.py \
         --input /path/to/mt2_mm_ultracombo_countsv4.csv \
-        --reports-dir /home/amodz/anmol/reports4 \
+        --reports-dir ~/gameca_reports \
         [--family MT2_Mm] \
         [--grna-len 20] \
         [--cas SpCas9]
@@ -805,7 +805,7 @@ def parse_args():
     )
     p.add_argument("--input",       required=True,
                    help="Path to input CSV (Seq + expression columns)")
-    p.add_argument("--reports-dir", default="/home/amodz/anmol/reports4",
+    p.add_argument("--reports-dir", default=os.path.expanduser("~/gameca_reports"),
                    help="Output directory for figures and measured_values.tex")
     p.add_argument("--family",      default="MT2_Mm",
                    help="Family name for plot titles")

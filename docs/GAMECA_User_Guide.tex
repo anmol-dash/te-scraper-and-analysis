@@ -1,0 +1,613 @@
+\documentclass[11pt]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{enumitem}
+\usepackage{parskip}
+\usepackage[colorlinks=true,allcolors=blue!55!black]{hyperref}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{black!4},
+  frame=single,
+  breaklines=true,
+  breakatwhitespace=true,
+  columns=fullflexible,
+}
+
+\title{\textbf{GAMECA} v0.4.39\\[4pt]
+       \large Installation, Quick-Start \& Output Reference}
+\author{Anmol Dash}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% ===========================================================================
+\section{What is GAMECA?}
+
+\textbf{GAMECA} (Gene Alignment, Motif, Expression and Clustering Analysis)
+is a native macOS desktop application for the comprehensive downstream
+characterisation of transposable-element (TE) families. It ships as a
+\texttt{.dmg} installer containing a Tauri/React frontend and a bundled
+Python analysis backend. Starting from nothing more than a RepeatMasker
+family name and a genome assembly code, GAMECA runs the following stages:
+
+\begin{enumerate}[itemsep=2pt]
+  \item \textbf{Data prep} --- fetch all annotated genomic copies from
+        UCSC RepeatMasker or Dfam, then extract sequences (from a local
+        genome FASTA or via the UCSC API).
+  \item \textbf{Clustering} --- group copies by $k$-mer profile
+        (SVD \textrightarrow\ UMAP/t-SNE \textrightarrow\ HDBSCAN).
+  \item \textbf{Alignment} --- per-cluster MAFFT alignment, CIAlign
+        cleaning, and majority-vote consensus sequences.
+  \item \textbf{Motif analysis} --- scan every copy for JASPAR
+        transcription-factor binding motifs.
+  \item \textbf{Enrichment} --- Fisher's exact test for motifs
+        over-represented in each cluster.
+  \item \textbf{TFBS analysis} --- count and visualise transcription-factor
+        binding sites per cluster and per strand.
+  \item \textbf{GO annotation} --- map enriched motifs to their
+        transcription factors and Gene Ontology terms.
+  \item \textbf{Expression} --- per-cluster expression boxplots and
+        differential-expression tests (when an expression matrix is
+        provided).
+  \item \textbf{Primer design} --- family- and cluster-specific PCR
+        primers with genome-wide specificity checking.
+  \item \textbf{Stage~11 standout analyses} --- phylogenetics, CRISPR
+        gRNA off-target scoring, 3$'$ transduction detection, antisense
+        promoter scanning, CTCF/TAD overlap, epigenetic overlay, ortholog
+        insertion presence, multi-assembly liftover, ColabFold consensus
+        ORF structure prediction, repeat landscape, LTR structural
+        classification, subfamily resolution, and differential expression
+        between clusters.
+\end{enumerate}
+
+Analyses run either \textbf{locally} on your Mac or are submitted as
+independent \textbf{batch jobs} on an LSF or Slurm HPC cluster over SSH.
+No terminal knowledge is required for typical use.
+
+% ===========================================================================
+\section{System requirements}
+
+\begin{tabular}{@{}lp{0.62\linewidth}@{}}
+\toprule
+Component & Requirement \\
+\midrule
+macOS & 12 Monterey or later (Apple Silicon \emph{or} Intel) \\
+Disk  & $\sim$3~GB (app + Python environment + first ColabFold model weights) \\
+RAM   & 8~GB minimum; 16~GB or more recommended for large families \\
+Internet & Required for UCSC/Dfam sequence fetching, first-run package
+           install, JASPAR/GO lookups, and HPC SSH \\
+HPC cluster & Optional; LSF (\texttt{bsub}) or Slurm (\texttt{sbatch})
+              reachable by SSH from your Mac \\
+\bottomrule
+\end{tabular}
+
+% ===========================================================================
+\section{Download}
+
+Installers are published on the GitHub Releases page:
+
+\begin{center}
+  \url{https://github.com/anmol-dash/te-scraper-and-analysis/releases}
+\end{center}
+
+Download the \texttt{.dmg} that matches your Mac's processor:
+
+\begin{tabular}{@{}ll@{}}
+\toprule
+Architecture & File to download \\
+\midrule
+Apple Silicon (M1/M2/M3/M4) & \texttt{GAMECA\_0.4.39\_aarch64.dmg} \\
+Intel & \texttt{GAMECA\_0.4.39\_x64.dmg} \\
+\bottomrule
+\end{tabular}
+
+\smallskip
+If unsure which processor your Mac has, click the Apple menu
+\textrightarrow\ \textbf{About This Mac} and read the ``Chip'' or
+``Processor'' line.
+
+% ===========================================================================
+\section{Installation}
+
+\begin{enumerate}
+  \item Double-click the downloaded \texttt{.dmg} to mount it.
+  \item Drag \textbf{GAMECA.app} into your \textbf{Applications} folder.
+  \item Eject the disk image (\texttt{Cmd-E}).
+  \item \textbf{First launch only --- Gatekeeper:} because GAMECA is
+        distributed outside the Mac App Store, macOS blocks the first
+        open. \textbf{Right-click} (or Control-click) \textbf{GAMECA.app}
+        \textrightarrow\ \textbf{Open} \textrightarrow\ \textbf{Open}.
+        This prompt appears once only.
+\end{enumerate}
+
+% ===========================================================================
+\section{First launch and automatic setup}
+
+On first launch GAMECA performs a one-time setup ($\sim$2--3 minutes):
+
+\begin{enumerate}
+  \item The bundled Python sidecar starts and sends a \texttt{ping}
+        handshake to the frontend; a spinner shows until it completes.
+  \item The app checks for a Python virtual environment at
+        \texttt{\$HOME/gameca\_venv}. If absent, it creates one and
+        installs all dependencies from the bundled \texttt{requirements.txt}
+        (NumPy, pandas, scikit-learn, UMAP, HDBSCAN, BioPython, MAFFT
+        bindings, CIAlign, MOODS, \texttt{colabfold[alphafold]}, and more).
+  \item A progress bar and log stream in the \textbf{Log} panel. Do not
+        close the app during this step.
+  \item When the status indicator turns green the app is ready.
+\end{enumerate}
+
+\noindent\textbf{Note:} ColabFold model weights ($\sim$4~GB) are
+\emph{not} downloaded here; they are fetched the first time a
+structure-prediction job runs and cached in
+\texttt{\$HOME/.cache/colabfold}.
+
+% ===========================================================================
+\section{The interface}
+
+\begin{description}[leftmargin=0pt]
+  \item[Sidebar (left).] Every pipeline step, grouped into \emph{Data
+        prep}, \emph{Core analysis}, \emph{Enrichment}, \emph{Primer
+        design}, \emph{Full pipeline}, and \emph{Results}. Click a step
+        to open its configuration panel.
+  \item[Configuration panel (centre).] Parameters for the selected step:
+        family name, assembly, output directory, queue, and step-specific
+        options. Fill in and click \textbf{Run on Cluster} or
+        \textbf{Run locally}.
+  \item[Log panel (bottom).] Streams live output line-by-line: stage
+        checkpoints, progress bars, and errors.
+\end{description}
+
+% ===========================================================================
+\section{Connecting to an HPC cluster}
+
+\begin{enumerate}
+  \item Click \textbf{Settings} (gear icon) \textrightarrow\
+        \textbf{HPC Connection}.
+  \item Enter \textbf{Hostname}, \textbf{Username}, \textbf{SSH key path}
+        (blank to use the SSH agent), \textbf{Scheduler}
+        (\texttt{LSF}/\texttt{Slurm}/\emph{Auto}),
+        \textbf{Queue / partition}, and a writable \textbf{Work
+        directory} (e.g.\ \texttt{/home/amodz/anmol/gameca}).
+  \item Click \textbf{Test connection}. A green tick confirms the
+        scheduler was detected and the work directory is writable.
+\end{enumerate}
+
+\noindent\textbf{Duo / two-factor clusters:} if your cluster requires MFA
+on every login, add a \texttt{ControlMaster} entry to
+\texttt{\textasciitilde/.ssh/config} so the app reuses one authenticated
+session:
+
+\begin{lstlisting}
+Host hpclogin1.university.edu
+    ControlMaster auto
+    ControlPath  ~/.ssh/cm-%r@%h:%p
+    ControlPersist 8h
+\end{lstlisting}
+
+% ===========================================================================
+\section{Running an analysis}
+
+\subsection{Check the locus count first}
+
+\textbf{Data prep} \textrightarrow\ \textbf{RMSK locus count} (or
+\textbf{Dfam locus count}) verifies the family name and reports how many
+copies exist before you commit to a full job.
+
+\subsection{Single family --- on the cluster}
+
+\begin{enumerate}
+  \item \textbf{Full pipeline} \textrightarrow\ \textbf{Batch job}.
+  \item Set \textbf{Family} (e.g.\ \texttt{THE1A}), \textbf{Assembly}
+        (\texttt{hg38}/\texttt{hg19}/\texttt{mm10}/\texttt{mm39}),
+        \textbf{Output directory}, and optionally \textbf{Notify email}.
+  \item Click \textbf{Run on Cluster}. GAMECA uploads the scripts, writes
+        a \texttt{bsub}/\texttt{sbatch} job, and submits it. The job ID
+        prints in the Log panel.
+  \item Monitor in \textbf{Results} \textrightarrow\ \textbf{File browser}
+        or with \texttt{bjobs -w} on the cluster.
+  \item When done, \textbf{Results} \textrightarrow\ \textbf{Retrieve}
+        \texttt{rsync}s the output folder back to your Mac.
+\end{enumerate}
+
+\subsection{Single family --- locally}
+
+\textbf{Full pipeline} \textrightarrow\ \textbf{Batch job}, fill in
+\textbf{Family} and \textbf{Assembly}, then \textbf{Run locally}. Output
+lands in \texttt{\$HOME/gameca\_results/<family>/}. Suitable for families
+up to $\sim$5{,}000 copies on 16~GB RAM; larger families and ColabFold
+prediction should run on HPC.
+
+\subsection{Many families --- batch submission}
+
+Submit many families as independent jobs with the bundled
+\texttt{submit\_diego\_families.py}. Each family produces \emph{two}
+separate LSF jobs --- a main job (core pipeline + Stage~11 except
+ColabFold) and a dependent fold job (ColabFold).
+
+\begin{lstlisting}
+source ~/gameca_venv/bin/activate
+
+python submit_diego_families.py \
+    --outdir /home/$USER/gameca_results \
+    --queue  normal \
+    --notify-email you@institution.edu
+
+python submit_diego_families.py --dry-run   # preview without submitting
+\end{lstlisting}
+
+Both jobs per family appear immediately in \texttt{bjobs}:
+\texttt{gam\_<FAMILY>\_main} starts when a slot frees;
+\texttt{gam\_<FAMILY>\_fold} stays \textsc{pend} until its main job
+finishes, then starts automatically. Two emails are sent per family
+(one when the main job ends, one when the fold job ends).
+
+% ===========================================================================
+\section{Output reference}
+
+A run writes one folder per family. The tree below is the complete
+layout; the subsections that follow show \emph{what is inside each file}
+so you can read the results without ever opening the app.
+
+\begin{lstlisting}
+<outdir>/<family>/                  e.g. gameca_results/the1a/
+  01_data/
+    the1a_clustered.csv             master table: every copy + cluster
+  02_statistics/
+    cluster_summary.csv             one row per cluster (size, GC, length)
+    per_cluster/cluster_<c>_statistics.txt
+  03_clustering/
+    clustering_visualization.html   interactive UMAP scatter
+    clustering_visualization_expr.html   (if expression provided)
+  04_alignments/
+    alignment_stats.txt
+  05_consensus/
+    the1a_consensus.fa              one consensus per cluster + global
+  05_tfbs/
+    cluster_tf_binding_counts.csv   TF binding sites per cluster
+    strand_tf_binding_counts.csv
+    cluster_tf_binding_heatmap.html
+    tf_binding_top_overlaps.html
+  06_primers/
+    cluster_top5_primers.csv        recommended primers per cluster
+    selected_primers_summary.csv
+  07_visualizations/
+    index.html                      dashboard linking every figure
+  cluster_alignments/
+    cluster_<c>_seqs.fa / _aligned.fa / _consensus.fa
+    all_cluster_consensuses.fa
+  cialign_plots/
+    index.html                      open in a browser to view alignments
+  motif_analysis/
+    all_overlaps.tsv                every copy x motif overlap
+    overall_motif_counts.csv        motif frequency table
+    overall_top_motifs.png
+  enrichment_results/
+    cluster_<c>_enrichment.csv      Fisher test per motif per cluster
+    cluster_<c>_enrichment_annotated.csv
+    enrichment_heatmap.png
+  go_annotations/
+    gene_functions.csv              TF -> gene -> GO lookups
+    go_bp_top_terms.csv
+    go_bp_top_terms.png
+  reports/                          Stage 11 results (see 9.7)
+    standout_analysis.log
+    fig_*.pdf / *_per_copy.csv / *_report.txt / *_measured_values.tex
+    fold/                           ColabFold 3D structures
+  bsub_main.out / bsub_fold.out     live cluster job logs
+\end{lstlisting}
+
+% ---------------------------------------------------------------------------
+\subsection{Clustering: the master table}
+
+\textbf{\texttt{01\_data/<family>\_clustered.csv}} is the central output:
+one row per genomic copy. \texttt{Cluster} is the group it was sorted
+into; \texttt{chr/start/stop/strand} give its location; \texttt{Seq} is
+its DNA; \texttt{umap\_x/umap\_y} are the 2-D coordinates plotted in
+\texttt{03\_clustering/clustering\_visualization.html}.
+
+\begin{lstlisting}
+Seq,Cluster,chr,start,stop,strand,te_name,umap_x,umap_y
+tgttattagacgcg...,3,chr1,3031358,3031710,-,IAPLTR1a_Mm,4.21,-1.08
+aatattcagttgtc...,1,chr2,9881204,9881559,+,IAPLTR1a_Mm,-2.66,3.94
+\end{lstlisting}
+
+\textbf{\texttt{02\_statistics/cluster\_summary.csv}} summarises each
+cluster (number of copies, mean length, GC content). The interactive
+UMAP scatter in \texttt{03\_clustering/} colours every copy by cluster ---
+open it in a browser and hover for per-copy detail.
+
+% ---------------------------------------------------------------------------
+\subsection{Alignment and consensus}
+
+\textbf{\texttt{cluster\_alignments/cluster\_<c>\_consensus.fa}} is the
+``average'' sequence of each cluster in FASTA format; the \texttt{>} line
+is the name and the lines below are the sequence.
+\textbf{\texttt{all\_cluster\_consensuses.fa}} bundles them all and is
+the input for downstream structure/divergence modules.
+
+\begin{lstlisting}
+>IAP_cluster3_consensus
+GGGGCTATTTTTGGTTGGTGTGGACGTTTTTTGTCTGGAAAATTAAGAGG
+ATGCCAAAAGGTCCGATTTGAAAAAACAGTCTTTACATTGGAAATATCTA
+\end{lstlisting}
+
+\textbf{\texttt{cialign\_plots/index.html}} is an HTML gallery of the
+CIAlign before/after/markup images --- the quickest way to judge how
+clean each cluster's alignment is.
+
+% ---------------------------------------------------------------------------
+\subsection{Motif analysis (\texttt{motif\_analysis/})}
+
+This stage scans every copy for JASPAR transcription-factor binding
+motifs. \textbf{\texttt{all\_overlaps.tsv}} is the raw result: one line
+per (copy, motif) overlap, giving the copy coordinates, the motif name,
+its position, score, and strand --- this is the table every downstream
+enrichment/TFBS step is built from.
+
+\textbf{\texttt{overall\_motif\_counts.csv}} collapses that to a simple
+frequency table (how many times each motif was found across all copies),
+and \textbf{\texttt{overall\_top\_motifs.png}} plots the top~20.
+
+\begin{lstlisting}
+Motif_name,count
+CTCF,1840
+SP1,1422
+KLF4,1190
+\end{lstlisting}
+
+% ---------------------------------------------------------------------------
+\subsection{Enrichment (\texttt{enrichment\_results/})}
+
+Finding a motif is not the same as it being \emph{characteristic} of a
+cluster. For each cluster, GAMECA runs a Fisher's exact test asking
+``is this motif over-represented in this cluster versus the rest of the
+family?'' \textbf{\texttt{cluster\_<c>\_enrichment.csv}} holds one row
+per motif, sorted by \texttt{P\_Value}:
+
+\begin{lstlisting}
+Motif,In_Cluster,Total_With_Motif,Cluster_Size,Total_Loci,Odds_Ratio,P_Value
+CTCF,118,402,140,1485,6.91,3.2e-41
+SP1,77,388,140,1485,3.10,1.1e-12
+\end{lstlisting}
+
+\begin{itemize}[itemsep=1pt]
+  \item \texttt{In\_Cluster} --- copies in this cluster with the motif.
+  \item \texttt{Total\_With\_Motif} --- copies family-wide with the motif.
+  \item \texttt{Odds\_Ratio} --- how much more frequent the motif is in
+        this cluster ($>1$ = enriched).
+  \item \texttt{P\_Value} --- Fisher's exact significance; rows with
+        \texttt{P\_Value} below the threshold are the cluster's
+        signature TFs.
+\end{itemize}
+
+\textbf{\texttt{cluster\_<c>\_enrichment\_annotated.csv}} adds the
+transcription-factor name, a one-line summary, and GO terms (see
+\S9.6) to every significant motif. \textbf{\texttt{enrichment\_heatmap.png}}
+shows clusters $\times$ enriched motifs at a glance.
+
+% ---------------------------------------------------------------------------
+\subsection{TFBS analysis (\texttt{05\_tfbs/})}
+
+Where enrichment asks ``which motifs are statistically special'', the
+TFBS stage simply \emph{counts} binding sites so you can compare raw
+binding load across clusters.
+\textbf{\texttt{cluster\_tf\_binding\_counts.csv}} has one row per
+(cluster, motif):
+
+\begin{lstlisting}
+Cluster,Motif_name,Binding_Sites
+0,CTCF,118
+0,SP1,77
+1,REST,54
+\end{lstlisting}
+
+\textbf{\texttt{strand\_tf\_binding\_counts.csv}} breaks the same counts
+down by DNA strand. The two \texttt{.html} files are interactive Plotly
+views: \texttt{cluster\_tf\_binding\_heatmap.html} (clusters $\times$ TFs,
+log-scaled) and \texttt{tf\_binding\_top\_overlaps.html} (the 30 highest
+single overlaps). Open either in a browser.
+
+% ---------------------------------------------------------------------------
+\subsection{GO annotation (\texttt{go\_annotations/})}
+
+This stage answers ``what do the enriched transcription factors actually
+\emph{do}?'' Each significant motif is mapped to its gene via
+\texttt{mygene.info}, and \textbf{\texttt{gene\_functions.csv}} records
+the function and Gene Ontology terms:
+
+\begin{lstlisting}
+Gene,Symbol,Name,Summary,GO_BP,GO_MF,GO_CC
+CTCF,CTCF,CCCTC-binding factor,"Chromatin insulator...",chromatin organization;...,DNA binding;...,nucleus;...
+\end{lstlisting}
+
+\textbf{\texttt{go\_bp\_top\_terms.csv}} ranks the most common Biological
+Process terms across all enriched TFs, and \texttt{go\_bp\_top\_terms.png}
+(plus per-cluster \texttt{cluster\_<c>\_go\_bp.png}) plots them.
+
+\begin{lstlisting}
+GO_Term,Count
+regulation of transcription,42
+chromatin organization,28
+\end{lstlisting}
+
+\noindent If no motifs pass the significance threshold the stage writes a
+\texttt{GO\_SKIPPED.txt} note instead of empty files --- expected for
+small or highly divergent families.
+
+% ---------------------------------------------------------------------------
+\subsection{Primers (\texttt{06\_primers/})}
+
+\textbf{\texttt{cluster\_top5\_primers.csv}} lists the recommended PCR
+primers per cluster. \texttt{coverage} is how many copies the primer
+matches; \texttt{total\_expr} sums their expression; \texttt{rows\_covered}
+names the copies. \texttt{selected\_primers\_summary.csv} is the global
+shortlist with the selection \texttt{strategy} used.
+
+\begin{lstlisting}
+cluster,primer,coverage,total_expr,rows_covered
+0,CCTAGCTATGCTGCCTTG,6,1119.19,"8,9,10,11,12,13"
+\end{lstlisting}
+
+% ---------------------------------------------------------------------------
+\subsection{Stage 11 standout analyses (\texttt{reports/})}
+
+Every Stage~11 analysis writes the \emph{same four kinds of file}, so once
+you can read one you can read them all. Using phylogenetics
+(\texttt{phylo}) as the example:
+
+\begin{tabular}{@{}lp{0.58\linewidth}@{}}
+\toprule
+File & What it is \\
+\midrule
+\texttt{fig\_phylo\_tree.pdf}
+  & The figure --- open and look at it. Each analysis makes one or more
+    \texttt{fig\_*} PDFs/PNGs. \\[4pt]
+\texttt{phylo\_per\_copy.csv}
+  & One row per copy, adding this analysis's columns (here: age,
+    divergence, ORF status). Join back to the master table by
+    coordinates or \texttt{TE\_ID}. \\[4pt]
+\texttt{phylo\_report.txt}
+  & A plain-English summary of the headline numbers. \\[4pt]
+\texttt{phylo\_measured\_values.tex}
+  & The same numbers as \LaTeX\ macros for the PDF report; ignore unless
+    compiling the paper. \\
+\bottomrule
+\end{tabular}
+
+\medskip
+The \texttt{*\_report.txt} files need no software and are the fastest way
+to read a result:
+
+\begin{lstlisting}
+GAMECA Phylogenetics / Divergence-Age --- Measured Values
+  Family:                IAP
+  Copies analysed:       12577
+  Median est. age:       423.18 Myr
+  Intact (ORF>=thr):     3374
+  -- Top master/source element --
+  Name:                  chr8:4886476
+\end{lstlisting}
+
+\noindent Some analyses also write a specialised table, e.g.\
+\texttt{grna\_offtarget\_guides.csv} (CRISPR guides with coverage,
+off-target count, specificity), \texttt{ltr\_struct\_summary.csv}
+(full-length vs solo LTR counts), \texttt{subfamily\_tree.nwk} (a Newick
+tree for FigTree/iTOL), and \texttt{divergence\_per\_locus.csv} (per-copy
+divergence for the repeat-landscape plot).
+
+\paragraph{Structure predictions (\texttt{reports/fold/}).}
+If ColabFold ran, this folder holds the predicted 3-D structure of each
+cluster's consensus ORF: \texttt{*.pdb} (open in PyMOL, ChimeraX, or
+\url{https://molstar.org/viewer}), \texttt{*\_plddt.png} (per-residue
+confidence; $>70$ reliable, $>90$ high), and \texttt{*\_pae.png}
+(predicted aligned error; blue blocks = confident domains).
+
+% ---------------------------------------------------------------------------
+\subsection{Following a job and the dashboard}
+
+\texttt{07\_visualizations/index.html} is a dashboard linking every
+figure produced. \texttt{bsub\_main.out} / \texttt{bsub\_fold.out} are the
+live cluster logs, and \texttt{reports/standout\_analysis.log} records
+each Stage~11 step with timings --- check it first if a figure is missing:
+
+\begin{lstlisting}
+[phylo]      ... ok (612s)
+[grna]       ... ok (94s)
+[fold]       ... FAILED rc=1 (12s)   <- look here if a result is absent
+\end{lstlisting}
+
+\medskip
+\noindent To compile the auto-generated PDF report stitching every figure
+and number together:
+
+\begin{lstlisting}
+tectonic gameca_report.tex   # or: pdflatex gameca_report.tex
+\end{lstlisting}
+
+% ===========================================================================
+\section{Updates}
+
+\begin{description}[leftmargin=0pt]
+  \item[Python scripts] are refreshed silently from the latest commit on
+        \texttt{main} every launch. No action required.
+  \item[App binary] When a new GitHub Release has a higher version, a
+        banner appears on next launch. Click \textbf{Install update}; the
+        new \texttt{.dmg} is downloaded, signature-verified, and
+        installed. Relaunch when prompted.
+\end{description}
+
+To update manually, download the latest \texttt{.dmg} from Releases and
+repeat \S4.
+
+% ===========================================================================
+\section{Troubleshooting}
+
+\begin{description}[leftmargin=0pt,itemsep=8pt]
+
+  \item[\textit{``GAMECA is damaged and cannot be opened.''}]
+        macOS quarantine. Right-click \textbf{GAMECA.app} \textrightarrow\
+        \textbf{Open} \textrightarrow\ \textbf{Open} (one time). If it
+        persists, \textbf{System Settings} \textrightarrow\ \textbf{Privacy
+        \& Security} \textrightarrow\ \textbf{Open Anyway}.
+
+  \item[\textit{Blank screen or endless spinner.}]
+        The Python sidecar failed to start. Confirm you downloaded the
+        correct architecture. Open \textbf{Console.app}, filter for
+        ``GAMECA'', and look for \texttt{ImportError} / \texttt{sidecar
+        not found}.
+
+  \item[\textit{Dependency install fails on first launch.}]
+        Run it manually, then relaunch:
+\begin{lstlisting}
+python3 -m venv --system-site-packages ~/gameca_venv
+source ~/gameca_venv/bin/activate
+pip install -r \
+  /Applications/GAMECA.app/Contents/Resources/requirements.txt
+\end{lstlisting}
+
+  \item[\textit{HPC connection fails.}]
+        Verify SSH works from Terminal
+        (\texttt{ssh -i \textasciitilde/.ssh/id\_ed25519 user@host}). For
+        Duo clusters add a \texttt{ControlMaster} entry (see \S8).
+
+  \item[\textit{Jobs stuck in \textsc{pend}.}]
+        Normal when the queue is full or a fold job is waiting on its main
+        job. Check slots with \texttt{bqueues normal}; inspect a specific
+        job with \texttt{bjobs -l <JOBID>}.
+
+  \item[\textit{GO stage produced only \texttt{GO\_SKIPPED.txt}.}]
+        No motifs passed the enrichment p-value threshold --- expected for
+        small or highly divergent families. Lower \texttt{--p-threshold}
+        or inspect \texttt{enrichment\_results/} directly.
+
+  \item[\textit{Motif/TFBS folders are empty.}]
+        JASPAR motif data could not be fetched (network/proxy). Check
+        \texttt{echo \$https\_proxy}; GAMECA reads standard proxy env
+        vars. A \texttt{MOTIF\_ANALYSIS\_FAILED.txt} marker explains why.
+
+  \item[\textit{ColabFold hangs or crashes on HPC.}]
+        Old host GCC. Use a Singularity image:
+\begin{lstlisting}
+python run_stage11_all.py --only fold \
+    --singularity-image /path/to/colabfold.sif \
+    --no-gpu   # omit if GPUs are available
+\end{lstlisting}
+
+  \item[\textit{Sequences are all ``N'' or empty.}]
+        The UCSC API was unreachable from the compute node. Check the
+        proxy as above, or supply a local genome FASTA via
+        \texttt{--genome}.
+
+\end{description}
+
+\end{document}

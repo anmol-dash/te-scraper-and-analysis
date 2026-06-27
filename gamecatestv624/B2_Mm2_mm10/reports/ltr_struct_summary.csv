@@ -1,0 +1,4 @@
+cluster,n_total,n_full_length,n_solo_ltr,n_truncated,n_pbs,n_ppt,mean_ltr_identity
+0,100,0,0,0,0,84,0.279
+1,100,0,0,0,0,94,0.267
+2,100,0,0,0,0,82,0.246

@@ -1,0 +1,11 @@
+============================================================
+GAMECA 3' Transduction --- Measured Values
+Generated: 2026-06-25 07:30:23
+============================================================
+  Family:               L1HS
+  Copies:               300
+  Transduction lineages:20
+  Largest lineage:      100 copies
+  Copies in a lineage:  290
+  With poly-A signal:   89
+  Median poly-A tail:   0 bp

@@ -6,12 +6,12 @@ Submits one pair of bsub jobs per TE family from the Diego enrichment list:
 
   Job A  gamXXX_main   — query.py core pipeline (clustering, consensus,
                           primers) + all Stage 11 modules EXCEPT ColabFold
-                          → emails anmoldash@gmail.com when done, noting
-                            that ColabFold is still running.
+                          → emails the configured notify address when done,
+                            noting that ColabFold is still running.
 
   Job B  gamXXX_fold   — ColabFold structure prediction (Stage 11 fold
                           module only); has an LSF dependency on Job A.
-                          → emails anmoldash@gmail.com when done.
+                          → emails the configured notify address when done.
 
 Each family is a separate entry in bjobs.  Run this script from the
 directory that contains query.py, run_stage11_all.py, etc.
@@ -21,7 +21,8 @@ Usage (on the cluster login node):
 
 Flags:
     --dry-run   Print generated job scripts without submitting anything.
-    --outdir    Override output root (default: /home/amodz/anmol/diegojfamiliesv1).
+    --outdir    Override output root (default: ~/gameca_diego_families, or
+                $GAMECA_OUTDIR if set).
     --queue     LSF queue name (default: normal).
     --colabfold-cmd  Path to colabfold_batch binary (default: colabfold_batch).
 """
@@ -57,11 +58,11 @@ FAMILIES = [
 ]
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
-DEFAULT_OUTDIR       = "/home/amodz/anmol/diegojfamiliesv1"
+DEFAULT_OUTDIR       = os.environ.get("GAMECA_OUTDIR", os.path.expanduser("~/gameca_diego_families"))
 DEFAULT_QUEUE        = "normal"
 DEFAULT_COLABFOLD    = "colabfold_batch"
 ASSEMBLY             = "hg38"
-NOTIFY_EMAIL         = "anmoldash@gmail.com"
+NOTIFY_EMAIL         = os.environ.get("GAMECA_NOTIFY_EMAIL", "")
 
 # LSF resources
 MAIN_CPUS   = 16

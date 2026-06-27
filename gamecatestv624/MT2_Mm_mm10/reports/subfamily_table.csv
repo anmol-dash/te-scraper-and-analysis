@@ -1,0 +1,4 @@
+cluster,n_loci,consensus_length_bp,div_from_canonical_pct,subfamily_label,is_canonical_type
+0,100,663,0.223,MT2_Mm_canonical,True
+1,100,559,0.428,MT2_Mm_canonical,True
+2,100,567,0.02,MT2_Mm_canonical,True

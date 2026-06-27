@@ -1,0 +1,12 @@
+tool,stage,wall_sec,user_steps,description
+Manual workflow,Download RMSK,,1,UCSC Table Browser → export → save file
+Manual workflow,Filter by family,,1,awk/grep on repName field
+Manual workflow,Extract sequences,,2,bedtools getfasta (requires indexed genome FASTA)
+Manual workflow,Quality filter,,1,custom Python/R script
+Manual workflow,Multiple alignment,,1,mafft --auto input.fa > aligned.fa
+Manual workflow,Clustering,,3,R: umap() + hdbscan() + manual parameter tuning
+Manual workflow,Divergence,,2,R/Python: pairwise2 + CpG correction script
+Manual workflow,Motif analysis,,3,fimo/HOMER + bedtools intersect + custom enrichment
+Manual workflow,LTR annotation,,4,LTRharvest setup + run + parse output + reformat
+Manual workflow,Expression overlay,,2,bedtools intersect + custom R join
+Manual workflow,Report generation,,3,Rmarkdown/LaTeX compilation

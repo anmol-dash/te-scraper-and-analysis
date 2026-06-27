@@ -1,0 +1,16 @@
+============================================================
+GAMECA Phylogenetics / Divergence-Age --- Measured Values
+Generated: 2026-06-25 07:55:38
+============================================================
+  Family:                MT2_Mm
+  Assembly / rate:       mm10  (4.5e-09 subs/site/yr, clock divisor 1)
+  Copies analysed:       300
+  Usable divergence:     300  (0 unalignable→NaN)
+  Tree tips:             3
+  Median divergence:     1.64 %
+  Median est. age:       3.65 Myr
+  Intact (ORF≥thr):      9
+
+  ── Top master/source element ──
+  Name:                  chr1|58944156|58944649|MT2_Mm:ERVL:LTR|4649|-
+  Divergence:            1.68 %

@@ -1,0 +1,7 @@
+============================================================
+GAMECA Epigenetic Overlay --- Measured Values
+Generated: 2026-06-25 08:00:14
+============================================================
+  Family:        B2_Mm2
+  Copies:        300
+  Tracks used:   0  (none)

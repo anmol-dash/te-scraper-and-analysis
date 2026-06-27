@@ -19,7 +19,7 @@ Pipeline:
 Usage:
     python run_fold_prediction.py \\
         --input /path/mt2_mm_ultracombo_countsv4.csv \\
-        --reports-dir /home/amodz/anmol/reports4 \\
+        --reports-dir ~/gameca_reports \\
         [--family MT2_Mm] \\
         [--min-aa 100] \\
         [--top-n 5] \\
@@ -866,7 +866,7 @@ def parse_args():
     )
     p.add_argument("--input",         required=True,
                    help="CSV with Seq column (+ optional expression columns)")
-    p.add_argument("--reports-dir",   default="/home/amodz/anmol/reports4",
+    p.add_argument("--reports-dir",   default=os.path.expanduser("~/gameca_reports"),
                    help="Output directory for figures and tex values")
     p.add_argument("--family",        default="MT2_Mm")
     p.add_argument("--min-aa",        type=int, default=100,

@@ -1,0 +1,8 @@
+============================================================
+GAMECA Multi-Assembly Liftover --- Measured Values
+Generated: 2026-06-25 07:30:34
+============================================================
+  Family:           L1HS
+  Source assembly:  hg38
+  Copies:           300
+  Target assemblies:0  (none)

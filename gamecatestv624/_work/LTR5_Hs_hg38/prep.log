@@ -1,0 +1,1012 @@
+
+$ /home/amodz/anmol/miniconda3/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/te_prep.py LTR5_Hs hg38 --base-dir /home/amodz/anmol/gamecatestv624/_work/LTR5_Hs_hg38 --max-loci 300 --fetch-workers 3
+  No local genome FASTA — sequences will be fetched from UCSC API (assembly=hg38)
+============================================================
+TE Family Data Prep
+  Family:    LTR5_Hs
+  Build:     hg38
+  Source:    rmsk
+  Input:     /home/amodz/te_analysis/rmsk/rmsk_hg38.txt.gz
+  Genome FA: (none — UCSC API fallback)
+  Output:    /home/amodz/anmol/gamecatestv624/_work/LTR5_Hs_hg38
+  Date:      2026-06-25 07:48:05
+============================================================
+
+============================================================
+STEP 1: Fetch RepeatMasker coordinates
+============================================================
+  Scanning rmsk_hg38.txt.gz for repName='LTR5_Hs'...
+  Scanned 5,683,690 lines in 10.5s → 630 hits
+  630 loci across 24 chromosomes
+  Coordinates source: RepeatMasker
+  Capping to 300 (--max-loci)
+
+============================================================
+STEP 2: Build TE identifiers
+============================================================
+  Example ID: chr1|1409806|1410773|LTR5_Hs:ERVK:LTR|8655|+
+
+============================================================
+STEP 3: Fetch sequences from UCSC API
+============================================================
+  Coordinates sourced from RepeatMasker; sequences fetched from UCSC (genome=hg38)
+  Fetching 300 sequences from UCSC (3 workers, assembly=hg38)...
+    [0] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=1409806;end=1410773
+    [1] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=1580342;end=1581246
+    [2] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=10425394;end=10425655
+    [2] HTTP 200
+    [2] OK  len=261
+    [1] HTTP 200
+    [1] OK  len=904
+    [0] HTTP 200
+    [0] OK  len=967
+    [3] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=10426924;end=10427626
+    [4] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=15135337;end=15136296
+    [5] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=15379017;end=15379976
+    [3] HTTP 200
+    [3] OK  len=702
+    [4] HTTP 200
+    [4] OK  len=959
+    [5] HTTP 200
+    [5] OK  len=959
+    [6] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=25587849;end=25588817
+    [7] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=29338081;end=29339047
+    [8] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=29359332;end=29360290
+    [6] HTTP 200
+    [6] OK  len=968
+    [7] HTTP 200
+    [7] OK  len=966
+    [8] HTTP 200
+    [8] OK  len=958
+    [9] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=33063515;end=33064484
+    [10] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=36488983;end=36489934
+    [11] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=40572025;end=40572994
+    [9] HTTP 200
+    [9] OK  len=969
+    [10] HTTP 200
+    [10] OK  len=951
+    [11] HTTP 200
+    [11] OK  len=969
+    [12] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=45513510;end=45514465
+    [13] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=45528102;end=45529068
+    [14] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=46320295;end=46321263
+    [12] HTTP 200
+    [12] OK  len=955
+    [13] HTTP 200
+    [13] OK  len=966
+    [14] HTTP 200
+    [14] OK  len=968
+  --- progress: 15/300 done, 0 failed so far ---
+    [15] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=46329762;end=46330515
+    [16] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=46788568;end=46789408
+    [17] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=46789447;end=46789529
+    [15] HTTP 200
+    [15] OK  len=753
+    [16] HTTP 200
+    [16] OK  len=840
+    [17] HTTP 200
+    [17] OK  len=82
+    [18] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=52006244;end=52007211
+    [19] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=54636120;end=54637097
+    [20] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=65139795;end=65140762
+    [18] HTTP 200
+    [18] OK  len=967
+    [19] HTTP 200
+    [19] OK  len=977
+    [20] HTTP 200
+    [20] OK  len=967
+    [21] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=66424814;end=66425774
+    [22] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=70460424;end=70461399
+    [23] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=73129297;end=73130265
+    [21] HTTP 200
+    [21] OK  len=960
+    [22] HTTP 200
+    [22] OK  len=975
+    [23] HTTP 200
+    [23] OK  len=968
+    [24] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=75377085;end=75378053
+    [25] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=75382490;end=75383458
+    [26] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=76073018;end=76073143
+    [24] HTTP 200
+    [24] OK  len=968
+    [25] HTTP 200
+    [25] OK  len=968
+    [26] HTTP 200
+    [26] OK  len=125
+    [27] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=77982895;end=77983837
+    [28] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=79702340;end=79703294
+    [29] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=89066862;end=89067823
+    [27] HTTP 200
+    [27] OK  len=942
+    [28] HTTP 200
+    [28] OK  len=954
+    [29] HTTP 200
+    [29] OK  len=961
+  --- progress: 30/300 done, 0 failed so far ---
+    [30] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=93276781;end=93277749
+    [31] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=99835833;end=99836768
+    [32] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=104134738;end=104135712
+    [30] HTTP 200
+    [30] OK  len=968
+    [31] HTTP 200
+    [31] OK  len=935
+    [32] HTTP 200
+    [32] OK  len=974
+    [33] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=108517444;end=108518412
+    [34] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=111359723;end=111360685
+    [35] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=114058147;end=114059120
+    [33] HTTP 200
+    [33] OK  len=968
+    [34] HTTP 200
+    [34] OK  len=962
+    [35] HTTP 200
+    [35] OK  len=973
+    [36] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=120424750;end=120425723
+    [37] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=144450893;end=144451866
+    [38] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=144555549;end=144556489
+    [36] HTTP 200
+    [36] OK  len=973
+    [37] HTTP 200
+    [37] OK  len=973
+    [38] HTTP 200
+    [38] OK  len=940
+    [39] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=145414872;end=145415845
+    [40] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=145932413;end=145933382
+    [41] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=146381150;end=146382090
+    [39] HTTP 200
+    [39] OK  len=973
+    [40] HTTP 200
+    [40] OK  len=969
+    [41] HTTP 200
+    [41] OK  len=940
+    [42] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=146907211;end=146908212
+    [43] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=146948312;end=146949300
+    [44] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=147106116;end=147107077
+    [42] HTTP 200
+    [42] OK  len=1001
+    [43] HTTP 200
+    [43] OK  len=988
+    [44] HTTP 200
+    [44] OK  len=961
+  --- progress: 45/300 done, 0 failed so far ---
+    [45] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=147240099;end=147241067
+    [46] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=147733841;end=147734800
+    [47] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=148137832;end=148138805
+    [45] HTTP 200
+    [45] OK  len=968
+    [46] HTTP 200
+    [46] OK  len=959
+    [47] HTTP 200
+    [47] OK  len=973
+    [48] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=148188816;end=148189817
+    [49] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=149092876;end=149093849
+    [50] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=150632807;end=150632885
+    [48] HTTP 200
+    [48] OK  len=1001
+    [49] HTTP 200
+    [49] OK  len=973
+    [50] HTTP 200
+    [50] OK  len=78
+    [51] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=150634923;end=150635885
+    [52] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=152455108;end=152456081
+    [53] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=155599536;end=155600505
+    [51] HTTP 200
+    [51] OK  len=962
+    [52] HTTP 200
+    [52] OK  len=973
+    [53] HTTP 200
+    [53] OK  len=969
+    [54] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=155626665;end=155627633
+    [55] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=155634877;end=155635845
+    [56] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=156179222;end=156180190
+    [54] HTTP 200
+    [54] OK  len=968
+    [55] HTTP 200
+    [55] OK  len=968
+    [56] HTTP 200
+    [56] OK  len=968
+    [57] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=156181460;end=156182421
+    [58] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=159767795;end=159768763
+    [59] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=160652138;end=160653095
+    [57] HTTP 200
+    [57] OK  len=961
+    [58] HTTP 200
+    [58] OK  len=968
+    [59] HTTP 200
+    [59] OK  len=957
+  --- progress: 60/300 done, 0 failed so far ---
+    [60] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=160913141;end=160914118
+    [61] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=160948824;end=160949791
+    [62] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=161016834;end=161017804
+    [60] HTTP 200
+    [60] OK  len=977
+    [61] HTTP 200
+    [61] OK  len=967
+    [62] HTTP 200
+    [62] OK  len=970
+    [63] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=161315707;end=161316604
+    [64] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=188751235;end=188752206
+    [65] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=196108731;end=196109705
+    [63] HTTP 200
+    [63] OK  len=897
+    [64] HTTP 200
+    [64] OK  len=971
+    [65] HTTP 200
+    [65] OK  len=974
+    [66] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=207635111;end=207636074
+    [67] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=209141190;end=209142173
+    [68] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=224339830;end=224340798
+    [66] HTTP 200
+    [66] OK  len=963
+    [67] HTTP 200
+    [67] OK  len=983
+    [68] HTTP 200
+    [68] OK  len=968
+    [69] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=227868339;end=227869308
+    [70] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=246082684;end=246083636
+    [71] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr1;start=247015782;end=247016742
+    [69] HTTP 200
+    [69] OK  len=969
+    [70] HTTP 200
+    [70] OK  len=952
+    [71] HTTP 200
+    [71] OK  len=960
+    [72] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr10;start=3061468;end=3062440
+    [73] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr10;start=6824178;end=6825146
+    [74] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr10;start=6832673;end=6833641
+    [72] HTTP 200
+    [72] OK  len=972
+    [73] HTTP 200
+    [73] OK  len=968
+    [74] HTTP 200
+    [74] OK  len=968
+  --- progress: 75/300 done, 0 failed so far ---
+    [75] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr10;start=19509806;end=19510764
+    [76] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr10;start=26376884;end=26377844
+    [77] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr10;start=26893469;end=26894437
+    [75] HTTP 200
+    [75] OK  len=958
+    [76] HTTP 200
+    [76] OK  len=960
+    [77] HTTP 200
+    [77] OK  len=968
+    [78] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr10;start=37493324;end=37494293
+    [79] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr10;start=41713187;end=41714153
+    [80] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr10;start=43337202;end=43338170
+    [78] HTTP 200
+    [78] OK  len=969
+    [79] HTTP 200
+    [79] OK  len=966
+    [80] HTTP 200
+    [80] OK  len=968
+    [81] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr10;start=65409229;end=65410196
+    [82] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr10;start=68525671;end=68526636
+    [83] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr10;start=90301652;end=90302607
+    [81] HTTP 200
+    [81] OK  len=967
+    [82] HTTP 200
+    [82] OK  len=965
+    [83] HTTP 200
+    [83] OK  len=955
+    [84] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr10;start=97416845;end=97417535
+    [85] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr10;start=97417834;end=97418118
+    [86] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr10;start=99820811;end=99821797
+    [84] HTTP 200
+    [84] OK  len=690
+    [85] HTTP 200
+    [85] OK  len=284
+    [86] HTTP 200
+    [86] OK  len=986
+    [87] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr10;start=102391444;end=102392396
+    [88] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr10;start=102454374;end=102455335
+    [89] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr10;start=130627956;end=130628919
+    [87] HTTP 200
+    [87] OK  len=952
+    [88] HTTP 200
+    [88] OK  len=961
+    [89] HTTP 200
+    [89] OK  len=963
+  --- progress: 90/300 done, 0 failed so far ---
+    [90] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr10;start=133541054;end=133542017
+    [91] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=9318775;end=9319704
+    [92] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=10391308;end=10392276
+    [90] HTTP 200
+    [90] OK  len=963
+    [91] HTTP 200
+    [91] OK  len=929
+    [92] HTTP 200
+    [92] OK  len=968
+    [93] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=24446093;end=24447052
+    [94] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=33049341;end=33050285
+    [95] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=37858937;end=37859901
+    [93] HTTP 200
+    [93] OK  len=959
+    [94] HTTP 200
+    [94] OK  len=944
+    [95] HTTP 200
+    [95] OK  len=964
+    [96] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=41305798;end=41306022
+    [97] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=55430994;end=55431959
+    [98] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=56057660;end=56058622
+    [96] HTTP 200
+    [96] OK  len=224
+    [97] HTTP 200
+    [97] OK  len=965
+    [98] HTTP 200
+    [98] OK  len=962
+    [99] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=60713185;end=60713909
+    [100] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=60714223;end=60714479
+    [101] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=61655012;end=61655976
+    [99] HTTP 200
+    [99] OK  len=724
+    [100] HTTP 200
+    [100] OK  len=256
+    [101] HTTP 200
+    [101] OK  len=964
+    [102] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=62194659;end=62195628
+    [103] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=62326599;end=62327566
+    [104] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=62368490;end=62369451
+    [102] HTTP 200
+    [102] OK  len=969
+    [103] HTTP 200
+    [103] OK  len=967
+    [104] HTTP 200
+    [104] OK  len=961
+  --- progress: 105/300 done, 0 failed so far ---
+    [105] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=62371426;end=62371589
+    [106] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=62381929;end=62382006
+    [107] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=62382199;end=62383091
+    [105] HTTP 200
+    [105] OK  len=163
+    [106] HTTP 200
+    [106] OK  len=77
+    [107] HTTP 200
+    [107] OK  len=892
+    [108] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=62858517;end=62859476
+    [109] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=63527970;end=63528938
+    [110] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=63530313;end=63531281
+    [108] HTTP 200
+    [108] OK  len=959
+    [109] HTTP 200
+    [109] OK  len=968
+    [110] HTTP 200
+    [110] OK  len=968
+    [111] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=67477410;end=67477551
+    [112] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=67603353;end=67604313
+    [113] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=67757888;end=67758849
+    [111] HTTP 200
+    [111] OK  len=141
+    [112] HTTP 200
+    [112] OK  len=960
+    [113] HTTP 200
+    [113] OK  len=961
+    [114] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=67867963;end=67868923
+    [115] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=71238899;end=71239021
+    [116] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=71767204;end=71767231
+    [114] HTTP 200
+    [114] OK  len=960
+    [115] HTTP 200
+    [115] OK  len=122
+    [116] HTTP 200
+    [116] OK  len=27
+    [117] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=71767234;end=71767904
+    [118] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=72164373;end=72165341
+    [119] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=96586132;end=96587100
+    [117] HTTP 200
+    [117] OK  len=670
+    [118] HTTP 200
+    [118] OK  len=968
+    [119] HTTP 200
+    [119] OK  len=968
+  --- progress: 120/300 done, 0 failed so far ---
+    [120] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=101695062;end=101696030
+    [121] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=101703560;end=101704528
+    [122] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=105264850;end=105265754
+    [120] HTTP 200
+    [120] OK  len=968
+    [121] HTTP 200
+    [121] OK  len=968
+    [122] HTTP 200
+    [122] OK  len=904
+    [123] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=118721014;end=118721981
+    [124] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=118729206;end=118730174
+    [125] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr11;start=119039271;end=119040160
+    [123] HTTP 200
+    [123] OK  len=967
+    [124] HTTP 200
+    [124] OK  len=968
+    [125] HTTP 200
+    [125] OK  len=889
+    [126] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr12;start=4721230;end=4722199
+    [127] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr12;start=5537016;end=5537956
+    [128] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr12;start=6885859;end=6886821
+    [126] HTTP 200
+    [126] OK  len=969
+    [127] HTTP 200
+    [127] OK  len=940
+    [128] HTTP 200
+    [128] OK  len=962
+    [129] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr12;start=8461931;end=8462899
+    [130] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr12;start=8635660;end=8636609
+    [131] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr12;start=9600464;end=9601432
+    [129] HTTP 200
+    [129] OK  len=968
+    [130] HTTP 200
+    [130] OK  len=949
+    [131] HTTP 200
+    [131] OK  len=968
+    [132] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr12;start=10571267;end=10572236
+    [133] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr12;start=21644941;end=21645931
+    [134] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr12;start=29932053;end=29933021
+    [132] HTTP 200
+    [132] OK  len=969
+    [133] HTTP 200
+    [133] OK  len=990
+    [134] HTTP 200
+    [134] OK  len=968
+  --- progress: 135/300 done, 0 failed so far ---
+    [135] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr12;start=32099510;end=32100478
+    [136] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr12;start=37738087;end=37739055
+    [137] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr12;start=51454286;end=51455254
+    [135] HTTP 200
+    [135] OK  len=968
+    [136] HTTP 200
+    [136] OK  len=968
+    [137] HTTP 200
+    [137] OK  len=968
+    [138] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr12;start=55333430;end=55334399
+    [139] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr12;start=56400360;end=56401325
+    [140] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr12;start=58327458;end=58328426
+    [138] HTTP 200
+    [138] OK  len=969
+    [139] HTTP 200
+    [139] OK  len=965
+    [140] HTTP 200
+    [140] OK  len=968
+    [141] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr12;start=58335947;end=58336915
+    [142] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr12;start=58543161;end=58544122
+    [143] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr12;start=59108213;end=59109184
+    [141] HTTP 200
+    [141] OK  len=968
+    [142] HTTP 200
+    [142] OK  len=961
+    [143] HTTP 200
+    [143] OK  len=971
+    [144] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr12;start=73008722;end=73009695
+    [145] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr12;start=85468939;end=85469903
+    [146] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr12;start=93074402;end=93075369
+    [144] HTTP 200
+    [144] OK  len=973
+    [145] HTTP 200
+    [145] OK  len=964
+    [146] HTTP 200
+    [146] OK  len=967
+    [147] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr12;start=105478558;end=105479527
+    [148] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr12;start=107826122;end=107826195
+    [149] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr12;start=107826453;end=107827421
+    [147] HTTP 200
+    [147] OK  len=969
+    [148] HTTP 200
+    [148] OK  len=73
+    [149] HTTP 200
+    [149] OK  len=968
+  --- progress: 150/300 done, 0 failed so far ---
+    [150] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr12;start=110570037;end=110571005
+    [151] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr12;start=118105983;end=118106943
+    [152] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr12;start=122750859;end=122751831
+    [150] HTTP 200
+    [150] OK  len=968
+    [151] HTTP 200
+    [151] OK  len=960
+    [152] HTTP 200
+    [152] OK  len=972
+    [153] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr12;start=123492641;end=123493573
+    [154] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr13;start=18250954;end=18251919
+    [155] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr13;start=18719994;end=18720917
+    [153] HTTP 200
+    [153] OK  len=932
+    [154] HTTP 200
+    [154] OK  len=965
+    [155] HTTP 200
+    [155] OK  len=923
+    [156] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr13;start=19600217;end=19601185
+    [157] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr13;start=22813649;end=22814620
+    [158] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr13;start=24591592;end=24592530
+    [156] HTTP 200
+    [156] OK  len=968
+    [157] HTTP 200
+    [157] OK  len=971
+    [158] HTTP 200
+    [158] OK  len=938
+    [159] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr13;start=24956545;end=24957486
+    [160] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr13;start=43040543;end=43041509
+    [161] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr13;start=49599021;end=49599990
+    [159] HTTP 200
+    [159] OK  len=941
+    [160] HTTP 200
+    [160] OK  len=966
+    [161] HTTP 200
+    [161] OK  len=969
+    [162] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr13;start=54266806;end=54267766
+    [163] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr13;start=69614877;end=69615842
+    [164] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr13;start=95268020;end=95269003
+    [162] HTTP 200
+    [162] OK  len=960
+    [163] HTTP 200
+    [163] OK  len=965
+    [164] HTTP 200
+    [164] OK  len=983
+  --- progress: 165/300 done, 0 failed so far ---
+    [165] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr14;start=18557966;end=18558073
+    [166] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr14;start=20084586;end=20085556
+    [167] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr14;start=20268922;end=20269890
+    [165] HTTP 200
+    [165] OK  len=107
+    [166] HTTP 200
+    [166] OK  len=970
+    [167] HTTP 200
+    [167] OK  len=968
+    [168] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr14;start=22724684;end=22725652
+    [169] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr14;start=25792774;end=25793313
+    [170] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr14;start=38118098;end=38119067
+    [168] HTTP 200
+    [168] OK  len=968
+    [169] HTTP 200
+    [169] OK  len=539
+    [170] HTTP 200
+    [170] OK  len=969
+    [171] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr14;start=45213721;end=45214690
+    [172] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr14;start=55024549;end=55025503
+    [173] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr14;start=64894101;end=64894126
+    [171] HTTP 200
+    [171] OK  len=969
+    [172] HTTP 200
+    [172] OK  len=954
+    [173] HTTP 200
+    [173] OK  len=25
+    [174] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr14;start=64894162;end=64894264
+    [175] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr14;start=64978587;end=64979555
+    [176] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr14;start=77635279;end=77636245
+    [174] HTTP 200
+    [174] OK  len=102
+    [175] HTTP 200
+    [175] OK  len=968
+    [176] HTTP 200
+    [176] OK  len=966
+    [177] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr14;start=77661397;end=77662365
+    [178] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr14;start=77794673;end=77795634
+    [179] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr14;start=87020141;end=87020979
+    [177] HTTP 200
+    [177] OK  len=968
+    [178] HTTP 200
+    [178] OK  len=961
+    [179] HTTP 200
+    [179] OK  len=838
+  --- progress: 180/300 done, 0 failed so far ---
+    [180] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr14;start=100311790;end=100312758
+    [181] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr15;start=58833341;end=58834296
+    [182] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr15;start=65226541;end=65227509
+    [180] HTTP 200
+    [180] OK  len=968
+    [181] HTTP 200
+    [181] OK  len=955
+    [182] HTTP 200
+    [182] OK  len=968
+    [183] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr15;start=65733652;end=65734621
+    [184] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr15;start=75870853;end=75871822
+    [185] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr15;start=88540551;end=88541519
+    [183] HTTP 200
+    [183] OK  len=969
+    [184] HTTP 200
+    [184] OK  len=969
+    [185] HTTP 200
+    [185] OK  len=968
+    [186] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr15;start=95784734;end=95785682
+    [187] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr15;start=101859976;end=101860944
+    [188] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr16;start=5754387;end=5755355
+    [186] HTTP 200
+    [186] OK  len=948
+    [187] HTTP 200
+    [187] OK  len=968
+    [188] HTTP 200
+    [188] OK  len=968
+    [189] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr16;start=8178760;end=8179728
+    [190] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr16;start=14636146;end=14637106
+    [191] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr16;start=21221786;end=21222748
+    [189] HTTP 200
+    [189] OK  len=968
+    [190] HTTP 200
+    [190] OK  len=960
+    [191] HTTP 200
+    [191] OK  len=962
+    [192] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr16;start=23599483;end=23600443
+    [193] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr16;start=34412056;end=34413016
+    [194] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr16;start=34998813;end=34999771
+    [192] HTTP 200
+    [192] OK  len=960
+    [193] HTTP 200
+    [193] OK  len=960
+    [194] HTTP 200
+    [194] OK  len=958
+  --- progress: 195/300 done, 0 failed so far ---
+    [195] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr16;start=35955554;end=35956522
+    [196] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr16;start=47864458;end=47865426
+    [197] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr16;start=74799403;end=74800360
+    [195] HTTP 200
+    [195] OK  len=968
+    [196] HTTP 200
+    [196] OK  len=968
+    [197] HTTP 200
+    [197] OK  len=957
+    [198] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr16;start=75815004;end=75815286
+    [199] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr16;start=75815595;end=75816296
+    [200] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr17;start=5074679;end=5075646
+    [198] HTTP 200
+    [198] OK  len=282
+    [199] HTTP 200
+    [199] OK  len=701
+    [200] HTTP 200
+    [200] OK  len=967
+    [201] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr17;start=8056336;end=8056551
+    [202] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr17;start=16834879;end=16835857
+    [203] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr17;start=17610927;end=17611884
+    [201] HTTP 200
+    [201] OK  len=215
+    [202] HTTP 200
+    [202] OK  len=978
+    [203] HTTP 200
+    [203] OK  len=957
+    [204] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr17;start=18436883;end=18437858
+    [205] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr17;start=19504957;end=19505922
+    [206] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr17;start=20506549;end=20507524
+    [204] HTTP 200
+    [204] OK  len=975
+    [205] HTTP 200
+    [205] OK  len=965
+    [206] HTTP 200
+    [206] OK  len=975
+    [207] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr17;start=30563389;end=30564161
+    [208] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr17;start=30700040;end=30701008
+    [209] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr17;start=36140052;end=36141024
+    [207] HTTP 200
+    [207] OK  len=772
+    [208] HTTP 200
+    [208] OK  len=968
+    [209] HTTP 200
+    [209] OK  len=972
+  --- progress: 210/300 done, 0 failed so far ---
+    [210] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr17;start=43354953;end=43355913
+    [211] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr17;start=46283613;end=46284581
+    [212] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr17;start=54201573;end=54202541
+    [210] HTTP 200
+    [210] OK  len=960
+    [211] HTTP 200
+    [211] OK  len=968
+    [212] HTTP 200
+    [212] OK  len=968
+    [213] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr17;start=59290106;end=59290917
+    [214] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr17;start=64930021;end=64930983
+    [215] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr17;start=67326845;end=67327771
+    [213] HTTP 200
+    [213] OK  len=811
+    [214] HTTP 200
+    [214] OK  len=962
+    [215] HTTP 200
+    [215] OK  len=926
+    [216] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr17;start=68603991;end=68604951
+    [217] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr17;start=80551207;end=80552176
+    [216] HTTP 200
+    [216] OK  len=960
+    [218] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr17;start=82744531;end=82745497
+    [217] HTTP 200
+    [217] OK  len=969
+    [218] HTTP 200
+    [218] OK  len=966
+    [219] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr18;start=2000813;end=2001781
+    [220] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr18;start=4917278;end=4918247
+    [221] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr18;start=26201834;end=26202802
+    [219] HTTP 200
+    [219] OK  len=968
+    [220] HTTP 200
+    [220] OK  len=969
+    [221] HTTP 200
+    [221] OK  len=968
+    [222] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr18;start=26927276;end=26928239
+    [223] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr18;start=27476539;end=27476584
+    [222] HTTP 200
+    [222] OK  len=963
+    [224] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr18;start=31810500;end=31811482
+    [223] HTTP 200
+    [223] OK  len=45
+    [224] HTTP 200
+    [224] OK  len=982
+  --- progress: 225/300 done, 0 failed so far ---
+    [225] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr18;start=41183867;end=41184837
+    [226] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr18;start=67076782;end=67077752
+    [225] HTTP 200
+    [225] OK  len=970
+    [227] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr18;start=68105241;end=68106208
+    [226] HTTP 200
+    [226] OK  len=970
+    [227] HTTP 200
+    [227] OK  len=967
+    [228] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr18;start=68942268;end=68943233
+    [229] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr18;start=69042851;end=69043820
+    [230] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr18;start=79960165;end=79961063
+    [228] HTTP 200
+    [228] OK  len=965
+    [229] HTTP 200
+    [229] OK  len=969
+    [230] HTTP 200
+    [230] OK  len=898
+    [231] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=386679;end=387637
+    [232] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=8314891;end=8315814
+    [231] HTTP 200
+    [231] OK  len=958
+    [233] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=12231834;end=12232790
+    [232] HTTP 200
+    [232] OK  len=923
+    [233] HTTP 200
+    [233] OK  len=956
+    [234] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=20082341;end=20083300
+    [235] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=20156337;end=20157300
+    [236] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=20248489;end=20248737
+    [234] HTTP 200
+    [234] OK  len=959
+    [235] HTTP 200
+    [235] OK  len=963
+    [236] HTTP 200
+    [236] OK  len=248
+    [237] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=20285751;end=20286703
+    [238] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=20466330;end=20467299
+    [239] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=21567941;end=21568911
+    [237] HTTP 200
+    [237] OK  len=952
+    [238] HTTP 200
+    [238] OK  len=969
+    [239] HTTP 200
+    [239] OK  len=970
+  --- progress: 240/300 done, 0 failed so far ---
+    [240] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=22283561;end=22284503
+    [241] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=22568181;end=22568269
+    [240] HTTP 200
+    [240] OK  len=942
+    [242] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=22575021;end=22575897
+    [241] HTTP 200
+    [241] OK  len=88
+    [242] HTTP 200
+    [242] OK  len=876
+    [243] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=22580791;end=22581759
+    [244] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=23077743;end=23078765
+    [245] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=23692687;end=23693586
+    [243] HTTP 200
+    [243] OK  len=968
+    [244] HTTP 200
+    [244] OK  len=1022
+    [245] HTTP 200
+    [245] OK  len=899
+    [246] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=23723657;end=23724624
+    [247] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=27637589;end=27638584
+    [248] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=28130629;end=28131598
+    [246] HTTP 200
+    [246] OK  len=967
+    [247] HTTP 200
+    [247] OK  len=995
+    [248] HTTP 200
+    [248] OK  len=969
+    [249] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=28689311;end=28690280
+    [250] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=34920177;end=34921118
+    [249] HTTP 200
+    [249] OK  len=969
+    [251] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=36233353;end=36234332
+    [250] HTTP 200
+    [250] OK  len=941
+    [251] HTTP 200
+    [251] OK  len=979
+    [252] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=36247120;end=36247174
+    [253] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=36247143;end=36247924
+    [252] HTTP 200
+    [252] OK  len=54
+    [254] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=36332168;end=36333136
+    [253] HTTP 200
+    [253] OK  len=781
+    [254] HTTP 200
+    [254] OK  len=968
+  --- progress: 255/300 done, 0 failed so far ---
+    [255] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=37006158;end=37007120
+    [256] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=37106646;end=37107600
+    [257] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=37115196;end=37116164
+    [255] HTTP 200
+    [255] OK  len=962
+    [256] HTTP 200
+    [256] OK  len=954
+    [257] HTTP 200
+    [257] OK  len=968
+    [258] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=37320787;end=37321678
+    [259] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=37331390;end=37332372
+    [258] HTTP 200
+    [258] OK  len=891
+    [260] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=37529808;end=37530767
+    [259] HTTP 200
+    [259] OK  len=982
+    [260] HTTP 200
+    [260] OK  len=959
+    [261] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=37629950;end=37630912
+    [262] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=37866176;end=37867144
+    [261] HTTP 200
+    [261] OK  len=962
+    [263] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=38631138;end=38632089
+    [262] HTTP 200
+    [262] OK  len=968
+    [263] HTTP 200
+    [263] OK  len=951
+    [264] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=39479461;end=39480441
+    [265] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=39959230;end=39960162
+    [266] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=44280659;end=44281558
+    [264] HTTP 200
+    [264] OK  len=980
+    [265] HTTP 200
+    [265] OK  len=932
+    [266] HTTP 200
+    [266] OK  len=899
+    [267] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=44594095;end=44595063
+    [268] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=48889635;end=48890598
+    [269] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=51905691;end=51906661
+    [267] HTTP 200
+    [267] OK  len=968
+    [268] HTTP 200
+    [268] OK  len=963
+    [269] HTTP 200
+    [269] OK  len=970
+  --- progress: 270/300 done, 0 failed so far ---
+    [270] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=51908191;end=51909157
+    [271] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=52024481;end=52024991
+    [272] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=52027961;end=52028039
+    [270] HTTP 200
+    [270] OK  len=966
+    [271] HTTP 200
+    [271] OK  len=510
+    [272] HTTP 200
+    [272] OK  len=78
+    [273] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=52043131;end=52044100
+    [274] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=52420955;end=52421918
+    [275] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=52483851;end=52484545
+    [273] HTTP 200
+    [273] OK  len=969
+    [274] HTTP 200
+    [274] OK  len=963
+    [275] HTTP 200
+    [275] OK  len=694
+    [276] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=52485537;end=52486432
+    [277] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=52558696;end=52559661
+    [278] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=52697739;end=52698706
+    [276] HTTP 200
+    [276] OK  len=895
+    [277] HTTP 200
+    [277] OK  len=965
+    [278] HTTP 200
+    [278] OK  len=967
+    [279] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=53838625;end=53839592
+    [280] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=54943735;end=54944664
+    [281] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=54950283;end=54951249
+    [279] HTTP 200
+    [279] OK  len=967
+    [280] HTTP 200
+    [280] OK  len=929
+    [281] HTTP 200
+    [281] OK  len=966
+    [282] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=56559331;end=56560285
+    [283] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=57483784;end=57483875
+    [284] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=57810329;end=57811158
+    [282] HTTP 200
+    [282] OK  len=954
+    [283] HTTP 200
+    [283] OK  len=91
+    [284] HTTP 200
+    [284] OK  len=829
+  --- progress: 285/300 done, 0 failed so far ---
+    [285] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr19;start=57811461;end=57811568
+    [286] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr2;start=3104480;end=3105423
+    [287] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr2;start=10213669;end=10213745
+    [285] HTTP 200
+    [285] OK  len=107
+    [286] HTTP 200
+    [286] OK  len=943
+    [287] HTTP 200
+    [287] OK  len=76
+    [288] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr2;start=10214076;end=10214154
+    [289] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr2;start=20778081;end=20778218
+    [290] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr2;start=26749864;end=26750871
+    [288] HTTP 200
+    [288] OK  len=78
+    [289] HTTP 200
+    [289] OK  len=137
+    [290] HTTP 200
+    [290] OK  len=1007
+    [291] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr2;start=27459978;end=27460946
+    [292] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr2;start=30613471;end=30614439
+    [293] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr2;start=32275581;end=32276549
+    [291] HTTP 200
+    [291] OK  len=968
+    [292] HTTP 200
+    [292] OK  len=968
+    [293] HTTP 200
+    [293] OK  len=968
+    [294] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr2;start=37225317;end=37226285
+    [295] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr2;start=38277783;end=38278760
+    [296] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr2;start=39321157;end=39322127
+    [294] HTTP 200
+    [294] OK  len=968
+    [295] HTTP 200
+    [295] OK  len=977
+    [296] HTTP 200
+    [296] OK  len=970
+    [297] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr2;start=55279270;end=55280234
+    [298] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr2;start=86261298;end=86262267
+    [299] GET https://api.genome.ucsc.edu/getData/sequence?genome=hg38;chrom=chr2;start=94744662;end=94745630
+    [297] HTTP 200
+    [297] OK  len=964
+    [298] HTTP 200
+    [298] OK  len=969
+    [299] HTTP 200
+    [299] OK  len=968
+  --- progress: 300/300 done, 0 failed so far ---
+
+============================================================
+STEP 4: Stats
+============================================================
+  Length: mean=872  median=966  range=[25, 1022]
+  GC:     mean=0.473
+
+============================================================
+STEP 5: Save
+============================================================
+  Saved: /home/amodz/anmol/gamecatestv624/_work/LTR5_Hs_hg38/clustered_data.csv
+  300 loci, 18 columns
+
+============================================================
+DONE
+============================================================
+  LTR5_Hs (hg38): 300 loci
+
+Next steps:
+  python te_enrichment.py LTR5_Hs hg38 --base-dir /home/amodz/anmol/gamecatestv624/_work/LTR5_Hs_hg38
+  python query.py --input /home/amodz/anmol/gamecatestv624/_work/LTR5_Hs_hg38/clustered_data.csv --family LTR5_Hs
+[exit 0  78s]
+
+$ /home/amodz/anmol/miniconda3/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/te_clustering.py --input /home/amodz/anmol/gamecatestv624/_work/LTR5_Hs_hg38/clustered_data.csv --output /home/amodz/anmol/gamecatestv624/_work/LTR5_Hs_hg38/clustered_with_labels.csv
+[07:49:34]   Step 1/5: Encoding 300 sequences as 6-mer counts (sparse)…
+[07:49:34]     → 3833 unique 6-mers  (matrix 300×3833, density 18.911%)
+[07:49:34]   Step 2/5: TruncatedSVD (50 components)…
+[07:49:38]     → SVD done  (71.2% variance explained)
+[07:49:38]   Step 3/5: UMAP (n_neighbors=30, min_dist=0.0, n_epochs=200, n_jobs=-1)…
+/home/amodz/.local/lib/python3.12/site-packages/umap/umap_.py:1952: UserWarning: n_jobs value 1 overridden to 1 by setting random_state. Use no seed for parallelism.
+  warn(
+[07:49:50]     → UMAP done
+[07:49:50]   Step 4/5: t-SNE (perplexity=30, init='pca')…
+[07:49:50]     → t-SNE done
+[07:49:50]   Step 5/5: HDBSCAN (min_cluster_size=120, min_samples=7)…
+/home/amodz/.local/lib/python3.12/site-packages/sklearn/utils/deprecation.py:132: FutureWarning: 'force_all_finite' was renamed to 'ensure_all_finite' in 1.6 and will be removed in 1.8.
+  warnings.warn(
+/home/amodz/.local/lib/python3.12/site-packages/sklearn/utils/deprecation.py:132: FutureWarning: 'force_all_finite' was renamed to 'ensure_all_finite' in 1.6 and will be removed in 1.8.
+  warnings.warn(
+[07:49:50]     PCA: 0 cluster(s) found
+/home/amodz/.local/lib/python3.12/site-packages/sklearn/utils/deprecation.py:132: FutureWarning: 'force_all_finite' was renamed to 'ensure_all_finite' in 1.6 and will be removed in 1.8.
+  warnings.warn(
+/home/amodz/.local/lib/python3.12/site-packages/sklearn/utils/deprecation.py:132: FutureWarning: 'force_all_finite' was renamed to 'ensure_all_finite' in 1.6 and will be removed in 1.8.
+  warnings.warn(
+[07:49:51]     UMAP: 0 cluster(s) found
+/home/amodz/.local/lib/python3.12/site-packages/sklearn/utils/deprecation.py:132: FutureWarning: 'force_all_finite' was renamed to 'ensure_all_finite' in 1.6 and will be removed in 1.8.
+  warnings.warn(
+/home/amodz/.local/lib/python3.12/site-packages/sklearn/utils/deprecation.py:132: FutureWarning: 'force_all_finite' was renamed to 'ensure_all_finite' in 1.6 and will be removed in 1.8.
+  warnings.warn(
+[07:49:51]     t-SNE: 0 cluster(s) found
+[07:49:51]     UMAP all-noise — assigning Cluster 0
+[07:49:51]     Clustering visualisation → clustering_visualization.html
+[07:49:51]     Expression-sized visualisation → clustering_visualization_expr.html
+[07:49:51]     Coordinates → clustering_coordinates.csv
+[07:49:51]     Cluster summary → cluster_summary.csv
+Saved to /home/amodz/anmol/gamecatestv624/_work/LTR5_Hs_hg38/clustered_with_labels.csv
+[exit 0  29s]
+[clusters] using synthetic clusters (real n_clusters=1)
+[prepared] /home/amodz/anmol/gamecatestv624/_work/LTR5_Hs_hg38/LTR5_Hs_hg38_prepared.csv  rows=300 clusters=3 expr_cols=['K562_rep1', 'K562_rep2', 'Liver_donorA', 'siCTRL_24h', 'patient_07_tumor', 'GM12878.scRNA']

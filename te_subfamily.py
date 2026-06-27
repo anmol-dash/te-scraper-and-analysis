@@ -354,13 +354,17 @@ def run_subfamily_analysis(input_csv, reports_dir, family_name,
     for cid in cluster_ids:
         sub = df[df[cl_col] == cid]
         cons = consensuses.get(cid, "")
+        d_can = canonical_divs.get(cid)
         rows.append({
             "cluster":             cid,
             "n_loci":              len(sub),
             "consensus_length_bp": len(cons),
-            "div_from_canonical_pct": canonical_divs.get(cid),
+            "div_from_canonical_pct": d_can,
             "subfamily_label":     subfam_labels.get(cid, f"{family_name}_sub{cid}"),
-            "is_canonical_type":   (canonical_divs.get(cid) or 999) <= CLOSE_THRESH,
+            # NB: must be an explicit None-check — `d_can or 999` would treat a
+            # perfect 0.0% match (canonical_divs == 0.0) as falsy and mislabel
+            # the most-canonical cluster as non-canonical.
+            "is_canonical_type":   (d_can is not None and d_can <= CLOSE_THRESH),
         })
     sfam_df = pd.DataFrame(rows)
     sfam_csv = reports_dir / "subfamily_table.csv"

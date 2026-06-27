@@ -26,8 +26,8 @@ across assemblies and families.
 
 Usage (cluster):
     python run_gameca_cluster_test.py \
-        --out-dir /home/amodz/anmol/gamecatestv624 \
-        --notify-email anmoldash@gmail.com
+        --out-dir ~/gameca_cluster_test \
+        --notify-email you@example.com
 
     # custom matrix / caps:
     python run_gameca_cluster_test.py --out-dir OUT \
@@ -208,6 +208,18 @@ def run_family_stage11(family, assembly, prepared, out_root, sdir, py, args, mlo
     n_ok = sum(1 for s in modules.values() if s == "OK")
     n_fail = sum(1 for s in modules.values() if s.startswith("FAILED"))
     n_skip = sum(1 for s in modules.values() if s == "SKIP")
+    # Fallback/cross-check: the 'Done: N ok / N failed / N skipped' line is the
+    # authoritative count. If the per-module table couldn't be scraped (e.g.
+    # format drift), trust the Done line so the master summary never reports a
+    # false zero for a run that actually executed modules.
+    done = _parse_stage11_done(log)
+    if done and (n_ok, n_fail, n_skip) != done:
+        if not modules:
+            n_ok, n_fail, n_skip = done
+        else:
+            mlog.write(f"  [{tag}] WARNING: module table "
+                       f"({n_ok}/{n_fail}/{n_skip}) disagrees with Done line "
+                       f"({done[0]}/{done[1]}/{done[2]})\n")
     print(f"  [{tag}] Stage 11 done rc={rc} ({dt:.0f}s) — "
           f"ok={n_ok} failed={n_fail} skipped={n_skip}")
     mlog.write(f"  [{tag}] STAGE11 rc={rc} {dt:.0f}s ok={n_ok} "
@@ -222,7 +234,13 @@ def run_family_stage11(family, assembly, prepared, out_root, sdir, py, args, mlo
 
 
 def _parse_stage11_summary(log_path):
-    """Pull the 'STAGE 11 SUMMARY' table written by run_stage11_all.py."""
+    """Pull the module-status table written by run_stage11_all.py.
+
+    run_stage11_all prints the table to stdout under a bare ``SUMMARY`` header
+    (the ``STAGE 11 SUMMARY`` header only appears in the file it writes to its
+    own --reports-dir log, which we don't read). Match either so the harness
+    counts modules regardless of which sink it scrapes.
+    """
     out = {}
     try:
         lines = Path(log_path).read_text(errors="replace").splitlines()
@@ -230,7 +248,7 @@ def _parse_stage11_summary(log_path):
         return out
     in_summary = False
     for ln in lines:
-        if "STAGE 11 SUMMARY" in ln:
+        if ln.strip() == "SUMMARY" or "STAGE 11 SUMMARY" in ln:
             in_summary = True
             continue
         if in_summary:
@@ -246,11 +264,24 @@ def _parse_stage11_summary(log_path):
     return out
 
 
+def _parse_stage11_done(log_path):
+    """Return (n_ok, n_fail, n_skip) from the 'Done: N ok / N failed / N skipped'
+    line run_stage11_all prints, or None if not found."""
+    import re
+    try:
+        text = Path(log_path).read_text(errors="replace")
+    except Exception:
+        return None
+    m = re.search(r"Done:\s*(\d+)\s*ok\s*/\s*(\d+)\s*failed\s*/\s*(\d+)\s*skipped",
+                  text)
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
+
+
 def main():
     p = argparse.ArgumentParser(
         description="Comprehensive multi-family/assembly GAMECA cluster test.")
     p.add_argument("--out-dir", required=True,
-                   help="Top-level output dir (e.g. /home/amodz/anmol/gamecatestv624).")
+                   help="Top-level output dir (e.g. ~/gameca_cluster_test).")
     p.add_argument("--matrix", default=None,
                    help="Comma-separated FAMILY:ASSEMBLY pairs "
                         "(default: built-in LINE/SINE/LTR × hg38/mm10 matrix).")

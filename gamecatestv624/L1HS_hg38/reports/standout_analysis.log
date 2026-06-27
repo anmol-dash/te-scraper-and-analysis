@@ -1,0 +1,477 @@
+GAMECA Stage 11 Standalone Log
+Family:   L1HS
+Assembly: hg38
+Input:    /home/amodz/anmol/gamecatestv624/_work/L1HS_hg38/L1HS_hg38_prepared.csv
+Python:   /home/amodz/anmol/miniconda3/bin/python3
+Started:  2026-06-25 07:25:45
+============================================================
+
+============================================================
+[phylo]
+============================================================
+CMD: /home/amodz/anmol/miniconda3/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/run_phylo_analysis.py --input /home/amodz/anmol/gamecatestv624/_work/L1HS_hg38/L1HS_hg38_prepared.csv --reports-dir /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports --family L1HS --assembly hg38 --clock-divisor 1 --intact-orf-aa 100
+
+[07:25:48] ============================================================
+[07:25:48] GAMECA Phylogenetics / Divergence-Age --- L1HS
+[07:25:48]   Input:   /home/amodz/anmol/gamecatestv624/_work/L1HS_hg38/L1HS_hg38_prepared.csv
+[07:25:48]   Reports: /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports
+[07:25:48] ============================================================
+[07:25:48]   300 copies with sequence
+[07:25:48]   Assembly hg38 → substitution rate 2.2e-09 subs/site/yr (clock divisor 1)
+[07:25:48] Per-cluster divergence over 3 clusters (consensus from up to 400 copies each)...
+[07:26:16]   cluster 0: 100 copies, consensus 5012 bp, 100 placed
+[07:27:05]   cluster 1: 100 copies, consensus 6124 bp, 100 placed
+[07:28:10]   cluster 2: 100 copies, consensus 6063 bp, 100 placed
+[07:28:10] Computing clock ages...
+[07:28:10]   297/300 copies with a usable divergence (3 unalignable/saturated → NaN)
+[07:28:10]   Wrote /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/phylo_per_copy.csv
+[07:28:10] Building NJ tree...
+[07:28:10]   Tree over 3 cluster consensuses
+[07:28:17]   Saved /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/fig_phylo_tree.pdf
+[07:28:17]   Saved /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/fig_phylo_divergence.pdf
+[07:28:17]   Saved /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/fig_phylo_master.pdf
+[07:28:17]   Written phylo_measured_values.tex and phylo_report.txt
+[07:28:17] ============================================================
+[07:28:17] DONE
+
+============================================================
+MEASURED VALUES (paste into chat):
+============================================================
+============================================================
+GAMECA Phylogenetics / Divergence-Age --- Measured Values
+Generated: 2026-06-25 07:28:17
+============================================================
+  Family:                L1HS
+  Assembly / rate:       hg38  (2.2e-09 subs/site/yr, clock divisor 1)
+  Copies analysed:       300
+  Usable divergence:     297  (3 unalignable→NaN)
+  Tree tips:             3
+  Median divergence:     0.77 %
+  Median est. age:       3.51 Myr
+  Intact (ORF≥thr):      157
+
+  ── Top master/source element ──
+  Name:                  chr1|180866811|180872843|L1HS:L1:LINE|28770|-
+  Divergence:            0.43 %
+
+[EXIT 0  153s]
+
+============================================================
+[consensus_distance]
+============================================================
+CMD: /home/amodz/anmol/miniconda3/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/plot_consensus_distance.py --input /home/amodz/anmol/gamecatestv624/_work/L1HS_hg38/L1HS_hg38_prepared.csv --reports-dir /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports --family L1HS
+
+[07:28:19] ============================================================
+[07:28:19] Consensus-distance figures — L1HS
+[07:28:19]   Input:   /home/amodz/anmol/gamecatestv624/_work/L1HS_hg38/L1HS_hg38_prepared.csv
+[07:28:19]   Out:     /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports
+[07:28:19] ============================================================
+[07:28:19]   300 copies in 1 clusters (dropped 0 copies in clusters < 10).
+[07:28:19] Aligning each cluster to its own consensus (MAFFT --addfragments)...
+[07:30:11]   cluster L1HS: 300 copies, cons 6124 bp, 285 good distances
+[07:30:11] Building global (family-wide) consensus...
+[07:30:11]   Global consensus: 6124 bp
+[07:30:11] Projecting copies onto the global consensus (per-cluster map)...
+[07:30:15]   cluster L1HS: 285 good global distances
+[07:30:15]   Wrote /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/consensus_distance_per_copy.csv
+[07:30:15]   Cluster-consensus: 285/300 copies usable (15 unalignable/saturated dropped).
+[07:30:15]   Global-consensus:  285/300 copies usable (15 unalignable/saturated dropped).
+[07:30:15]   Saved /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/fig_cluster_consensus_distance.pdf
+[07:30:16]   Saved /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/fig_global_consensus_distance.pdf
+[07:30:16] ============================================================
+[07:30:16] DONE
+[07:30:16]   /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/fig_cluster_consensus_distance.pdf
+[07:30:16]   /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/fig_global_consensus_distance.pdf
+[07:30:16]   /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/consensus_distance_per_copy.csv
+
+[EXIT 0  118s]
+
+============================================================
+[grna]
+============================================================
+CMD: /home/amodz/anmol/miniconda3/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/run_grna_offtarget.py --input /home/amodz/anmol/gamecatestv624/_work/L1HS_hg38/L1HS_hg38_prepared.csv --reports-dir /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports --family L1HS --cas SpCas9 --max-mm 2
+
+[07:30:17] ============================================================
+[07:30:17] GAMECA gRNA Off-Target --- L1HS (SpCas9)
+[07:30:17] ============================================================
+[07:30:17]   300 family copies
+[07:30:17]   400 candidate guides from consensus/copies
+[07:30:17] Indexing family copy landscape...
+[07:30:19]   No --background given --- off-target = within-family paralog multiplicity.
+[07:30:19] Scoring 400 guides (max_mm=2)...
+[07:30:19]   Wrote /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/grna_offtarget_guides.csv (7 on Pareto frontier)
+[07:30:20]   Saved /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/fig_grna_offtarget_pareto.pdf
+[07:30:20]   Saved /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/fig_grna_offtarget_top.pdf
+[07:30:20]   Saved /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/fig_grna_offtarget_mm.pdf
+[07:30:20]   Written grna_offtarget_measured_values.tex and grna_offtarget_report.txt
+[07:30:20] ============================================================
+[07:30:20] DONE
+
+============================================================
+MEASURED VALUES (paste into chat):
+============================================================
+============================================================
+GAMECA gRNA Off-Target / Specificity-Coverage --- Measured Values
+Generated: 2026-06-25 07:30:20
+============================================================
+  Family:               L1HS
+  Cas / PAM:            SpCas9
+  Family copies:        300
+  Candidate guides:     400
+  Pareto-frontier:      7
+
+  ── Best coverage/specificity guide ──
+  Guide:                GTGGCATGGGGGGAGTGGGG
+  Coverage:             1 / 300 (0.3%)
+  Off-target sites:     0
+
+[EXIT 0  5s]
+
+============================================================
+[transduction]
+============================================================
+CMD: /home/amodz/anmol/miniconda3/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/run_transduction.py --input /home/amodz/anmol/gamecatestv624/_work/L1HS_hg38/L1HS_hg38_prepared.csv --reports-dir /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports --family L1HS --tail-bp 150 --min-shared 3
+
+[07:30:21] ============================================================
+[07:30:21] GAMECA 3' Transduction --- L1HS
+[07:30:21] ============================================================
+[07:30:22]   300 copies; consensus tail 150 bp
+[07:30:22]   20 candidate transduction lineages (>= 2 copies, >= 3 shared k-mers)
+[07:30:23]   Saved /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/fig_transduction_groups.pdf
+[07:30:23]   Saved /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/fig_transduction_polya.pdf
+[07:30:23]   Written transduction_measured_values.tex and transduction_report.txt
+[07:30:23] ============================================================
+[07:30:23] DONE
+
+============================================================
+MEASURED VALUES (paste into chat):
+============================================================
+============================================================
+GAMECA 3' Transduction --- Measured Values
+Generated: 2026-06-25 07:30:23
+============================================================
+  Family:               L1HS
+  Copies:               300
+  Transduction lineages:20
+  Largest lineage:      100 copies
+  Copies in a lineage:  290
+  With poly-A signal:   89
+  Median poly-A tail:   0 bp
+
+[EXIT 0  3s]
+
+============================================================
+[antisense]
+============================================================
+CMD: /home/amodz/anmol/miniconda3/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/run_antisense_promoter.py --input /home/amodz/anmol/gamecatestv624/_work/L1HS_hg38/L1HS_hg38_prepared.csv --reports-dir /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports --family L1HS --promoter-bp 200
+
+[07:30:24] ============================================================
+[07:30:24] GAMECA Antisense / Bidirectional Promoter --- L1HS
+[07:30:24] ============================================================
+[07:30:24]   No stranded expression columns --- using sequence bidirectionality only.
+[07:30:24]   Wrote /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/antisense_per_copy.csv
+[07:30:26]   Saved /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/fig_antisense_motifs.pdf
+[07:30:26]   Saved /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/fig_antisense_expr.pdf
+[07:30:26]   Written antisense_measured_values.tex and antisense_report.txt
+[07:30:26] ============================================================
+[07:30:26] DONE
+
+============================================================
+MEASURED VALUES (paste into chat):
+============================================================
+============================================================
+GAMECA Antisense / Bidirectional Promoter --- Measured Values
+Generated: 2026-06-25 07:30:26
+============================================================
+  Family:                  L1HS
+  Copies:                  300
+  Bidirectional (>=0.4):   185
+  Median bidir. score:     0.500
+  Stranded expression:     no
+
+[EXIT 0  3s]
+
+============================================================
+[ctcf_tad]
+============================================================
+CMD: /home/amodz/anmol/miniconda3/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/run_ctcf_tad.py --input /home/amodz/anmol/gamecatestv624/_work/L1HS_hg38/L1HS_hg38_prepared.csv --reports-dir /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports --family L1HS --motif-mismatch 3
+
+[07:30:27] ============================================================
+[07:30:27] GAMECA CTCF / TAD --- L1HS
+[07:30:27] ============================================================
+[07:30:27]   300 loci
+[07:30:28]   CTCF core-motif scan: 88/300 copies hit (<= 3 mismatch)
+[07:30:28]   Wrote /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/ctcf_tad_per_copy.csv
+[07:30:29]   Saved /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/fig_ctcf_overlap.pdf
+[07:30:29]   Saved /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/fig_ctcf_tad_distance.pdf
+[07:30:29]   Written ctcf_tad_measured_values.tex and ctcf_tad_report.txt
+[07:30:29] ============================================================
+[07:30:29] DONE
+
+============================================================
+MEASURED VALUES (paste into chat):
+============================================================
+============================================================
+GAMECA CTCF / TAD --- Measured Values
+Generated: 2026-06-25 07:30:29
+============================================================
+  Family:               L1HS
+  Copies:               300
+  CTCF core motif:      88
+  CTCF ChIP overlap:    n/a (no peaks file)
+  Boundary-proximal:    n/a (no TAD file)
+  Median TAD distance:  n/a
+
+[EXIT 0  3s]
+
+============================================================
+[epigenetic]
+============================================================
+CMD: /home/amodz/anmol/miniconda3/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/run_epigenetic_overlay.py --input /home/amodz/anmol/gamecatestv624/_work/L1HS_hg38/L1HS_hg38_prepared.csv --reports-dir /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports --family L1HS
+
+[07:30:30] ============================================================
+[07:30:30] GAMECA Epigenetic Overlay --- L1HS
+[07:30:30] ============================================================
+[07:30:30]   300 loci
+[07:30:30]   No --tracks provided. Use --preset K562 (or GM12878/HeLa-S3/IMR-90/H1-hESC) to auto-download ENCODE tracks, or pass --tracks NAME=path.bed.
+[07:30:30]   Wrote /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/epigenetic_per_copy.csv
+[07:30:30]   Saved /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/fig_epigenetic_overlap.pdf
+[07:30:30]   Saved /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/fig_epigenetic_heatmap.pdf
+[07:30:30]   Written epigenetic_measured_values.tex and epigenetic_report.txt
+[07:30:30] ============================================================
+[07:30:30] DONE
+
+============================================================
+MEASURED VALUES (paste into chat):
+============================================================
+============================================================
+GAMECA Epigenetic Overlay --- Measured Values
+Generated: 2026-06-25 07:30:30
+============================================================
+  Family:        L1HS
+  Copies:        300
+  Tracks used:   0  (none)
+
+[EXIT 0  2s]
+
+============================================================
+[ortholog]
+============================================================
+CMD: /home/amodz/anmol/miniconda3/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/run_ortholog_insertion.py --input /home/amodz/anmol/gamecatestv624/_work/L1HS_hg38/L1HS_hg38_prepared.csv --reports-dir /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports --family L1HS
+
+[07:30:32] ============================================================
+[07:30:32] GAMECA Ortholog Insertion --- L1HS
+[07:30:32] ============================================================
+[07:30:32]   300 loci
+[07:30:32]   No chains available. Use --species panTro6 rheMac10 mm39 to auto-download, or pass --chains SPECIES=chain.
+[07:30:32]   Wrote /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/ortholog_per_copy.csv
+[07:30:32]   Saved /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/fig_ortholog_presence.pdf
+[07:30:32]   Saved /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/fig_ortholog_summary.pdf
+[07:30:32]   Written ortholog_measured_values.tex and ortholog_report.txt
+[07:30:32] ============================================================
+[07:30:32] DONE
+
+============================================================
+MEASURED VALUES (paste into chat):
+============================================================
+============================================================
+GAMECA Ortholog Insertion --- Measured Values
+Generated: 2026-06-25 07:30:32
+============================================================
+  Family:              L1HS
+  Copies:              300
+  Target species:      0  (none)
+  Lineage-specific:    n/a (no chains)
+
+[EXIT 0  2s]
+
+============================================================
+[multiassembly]
+============================================================
+CMD: /home/amodz/anmol/miniconda3/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/run_multiassembly_liftover.py --input /home/amodz/anmol/gamecatestv624/_work/L1HS_hg38/L1HS_hg38_prepared.csv --reports-dir /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports --family L1HS --source-assembly hg38
+
+[07:30:33] ============================================================
+[07:30:33] GAMECA Multi-Assembly Liftover --- L1HS (from hg38)
+[07:30:33] ============================================================
+[07:30:33]   300 loci
+[07:30:33]   No chains available. Use --target-assemblies hg19 t2t to auto-download, or pass --chains ASM=chain.
+[07:30:33]   Wrote /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/multiassembly_per_copy.csv
+[07:30:34]   Saved /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/fig_multiassembly_mapping.pdf
+[07:30:34]   Saved /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/fig_multiassembly_coords.pdf
+[07:30:34]   Written multiassembly_measured_values.tex and multiassembly_report.txt
+[07:30:34] ============================================================
+[07:30:34] DONE
+
+============================================================
+MEASURED VALUES (paste into chat):
+============================================================
+============================================================
+GAMECA Multi-Assembly Liftover --- Measured Values
+Generated: 2026-06-25 07:30:34
+============================================================
+  Family:           L1HS
+  Source assembly:  hg38
+  Copies:           300
+  Target assemblies:0  (none)
+
+[EXIT 0  2s]
+
+============================================================
+[divergence]
+============================================================
+CMD: /home/amodz/anmol/miniconda3/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/run_divergence.py --input /home/amodz/anmol/gamecatestv624/_work/L1HS_hg38/L1HS_hg38_prepared.csv --reports-dir /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports --family L1HS --assembly hg38
+
+
+=== DIVERGENCE ANALYSIS (L1HS) ===
+  300 loci × 31 columns
+  Clusters: [0, 1, 2]
+  No consensus FASTA found — building majority-vote consensus per cluster
+    Cluster 0: consensus len=8549
+    Cluster 1: consensus len=6359
+    Cluster 2: consensus len=6329
+  Computing K2P divergence (ω=10.0)...
+  Per-locus CSV → /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/divergence_per_locus.csv
+  PDF → /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/fig_repeat_landscape.pdf
+  PNG → /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/fig_repeat_landscape.png
+  Per-cluster PNG → /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/fig_repeat_landscape_per_cluster.png
+  Stats CSV → /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/divergence_stats.csv
+  LaTeX values → /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/repeat_landscape_values.tex
+
+[EXIT 0  484s]
+
+============================================================
+[ltr_struct]
+============================================================
+CMD: /home/amodz/anmol/miniconda3/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/run_ltr_struct.py --input /home/amodz/anmol/gamecatestv624/_work/L1HS_hg38/L1HS_hg38_prepared.csv --reports-dir /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports --family L1HS
+
+
+=== LTR STRUCTURAL ANNOTATION (L1HS) ===
+  300 loci
+  Annotating (min_ltr_identity=0.65)...
+  Annotated CSV → /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/ltr_struct_annotated.csv
+  Bar chart → /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/fig_ltr_struct.png
+  full-length: 0  solo-LTR: 0  PBS: 0  PPT: 287
+  Summary CSV → /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/ltr_struct_summary.csv
+  LaTeX values → /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/ltr_struct_values.tex
+
+[EXIT 0  3s]
+
+============================================================
+[subfamily]
+============================================================
+CMD: /home/amodz/anmol/miniconda3/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/run_subfamily.py --input /home/amodz/anmol/gamecatestv624/_work/L1HS_hg38/L1HS_hg38_prepared.csv --reports-dir /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports --family L1HS --assembly hg38
+
+
+=== SUBFAMILY RESOLUTION (L1HS) ===
+  3 clusters: [0, 1, 2]
+  Building majority-vote consensuses...
+    Cluster 0: 8549 bp
+    Cluster 1: 6359 bp
+    Cluster 2: 6329 bp
+  Fetching Dfam canonical for 'L1HS'...
+  Dfam canonical: 902 bp
+  Computing 3×3 pairwise K2P matrix...
+  Subfamily table → /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/subfamily_table.csv
+  UPGMA tree → /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/fig_subfamily_tree.png
+  Newick → /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/subfamily_tree.nwk
+  Divergence bar → /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/fig_subfamily_divergence.png
+  LaTeX values → /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/subfamily_values.tex
+
+[EXIT 0  341s]
+
+============================================================
+[benchmark]
+============================================================
+CMD: /home/amodz/anmol/miniconda3/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/run_benchmark.py --input /home/amodz/anmol/gamecatestv624/_work/L1HS_hg38/L1HS_hg38_prepared.csv --reports-dir /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports --family L1HS --assembly hg38
+
+
+=== BENCHMARKING (L1HS / hg38) ===
+  No pipeline_diagnostic.log found — timing columns will be empty
+  Table → /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/benchmark_table.csv
+  Steps plot → /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/fig_benchmark_steps.png
+  LaTeX values → /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports/benchmark_values.tex
+  GAMECA user steps:   1
+  Manual workflow steps: 23
+
+[EXIT 0  1s]
+
+============================================================
+[motif_gain]
+============================================================
+CMD: /home/amodz/anmol/miniconda3/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/run_motif_gain.py --input /home/amodz/anmol/gamecatestv624/_work/L1HS_hg38/L1HS_hg38_prepared.csv --reports-dir /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports --family L1HS --assembly hg38
+
+[07:44:25] ============================================================
+[07:44:25] GAMECA TF Motif Gain/Loss  ---  L1HS
+[07:44:25] ============================================================
+[07:44:26]   300 loci loaded  |  cluster col: Cluster
+[07:44:26]   WARNING: /home/amodz/anmol/gamecatestv624/_work/motif_analysis/all_overlaps.tsv not found or empty — motif gain requires Stage 8 output.
+[07:44:26]   Wrote placeholder outputs  (all_overlaps.tsv not found at /home/amodz/anmol/gamecatestv624/_work/motif_analysis/all_overlaps.tsv)
+
+[EXIT 0  2s]
+
+============================================================
+[expression]
+============================================================
+CMD: /home/amodz/anmol/miniconda3/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/te_expression.py --input /home/amodz/anmol/gamecatestv624/_work/L1HS_hg38/L1HS_hg38_prepared.csv --reports-dir /home/amodz/anmol/gamecatestv624/L1HS_hg38/reports --family L1HS --out-dir /home/amodz/anmol/gamecatestv624/L1HS_hg38 --stage-cols K562_rep1 K562_rep2 Liver_donorA siCTRL_24h patient_07_tumor GM12878.scRNA
+
+============================================================
+GAMECA — Expression Analysis
+  Input:  /home/amodz/anmol/gamecatestv624/_work/L1HS_hg38/L1HS_hg38_prepared.csv
+  OutDir: /home/amodz/anmol/gamecatestv624/L1HS_hg38
+============================================================
+
+  Loading /home/amodz/anmol/gamecatestv624/_work/L1HS_hg38/L1HS_hg38_prepared.csv...
+  300 rows, 31 columns
+  3 clusters: [0, 1, 2]
+  Expression columns (6): ['K562_rep1', 'K562_rep2', 'Liver_donorA', 'siCTRL_24h', 'patient_07_tumor', 'GM12878.scRNA']
+
+  --- Boxplots ---
+  Saved boxplot_all.png
+  Saved boxplot_mid80.png
+
+  --- Stage profile ---
+  Saved stage_profile.png  (peak stage: Liver_donorA)
+  Saved peak_stage_summary.csv
+  Saved peak_stage_summary.png
+
+  --- Chromosomal expression ---
+  Saved chromosomal_expression.png
+  Saved chromosomal_heatmap.png
+  Saved chromosomal_expression.csv
+
+  --- Primer expression ---
+  [SKIP] selected_primers_summary.csv not found — skipping primer expression
+
+  --- Extended stats ---
+  Saved expression_stats.csv
+
+  --- Differential expression between clusters ---
+  Saved de_pairwise.csv  (18 tests, 17 sig at p_adj<0.05)
+  Saved de_significant.csv  (17 rows)
+  Saved de_values.tex
+  Saved de_heatmap.png
+  Saved de_volcano.png
+
+[EXIT 0  6s]
+
+============================================================
+STAGE 11 SUMMARY
+============================================================
+  phylo                OK                 153s
+  consensus_distance   OK                 118s
+  grna                 OK                 5s
+  transduction         OK                 3s
+  antisense            OK                 3s
+  ctcf_tad             OK                 3s
+  epigenetic           OK                 2s
+  ortholog             OK                 2s
+  multiassembly        OK                 2s
+  divergence           OK                 484s
+  ltr_struct           OK                 3s
+  subfamily            OK                 341s
+  benchmark            OK                 1s
+  motif_gain           OK                 2s
+  expression           OK                 6s
+
+Done: ok=15 failed=0 skipped=0
+Finished: 2026-06-25 07:44:32

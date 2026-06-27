@@ -139,7 +139,7 @@ def upload_file(transport, local_path: Path, remote_path: str):
 def select_work_dir(transport, username):
     probe = f"""
 set +e
-for d in "/project/amodzlab/{username}/gameca" "/scratch/{username}/gameca" \
+for d in "/project/{username}/gameca" "/scratch/{username}/gameca" \
           "/work/{username}/gameca" "$HOME/gameca"; do
   mkdir -p "$d" 2>/dev/null && [ -w "$d" ] && printf '%s\\n' "$d" && exit 0
 done
@@ -201,7 +201,7 @@ def base_parser(description: str) -> argparse.ArgumentParser:
     p.add_argument("--key", default="")
     p.add_argument("--password", default=None)
     p.add_argument("--input", required=True, help="Local or remote path to input CSV")
-    p.add_argument("--reports-dir", default="/home/amodz/anmol/reports4")
+    p.add_argument("--reports-dir", default="~/gameca_reports")
     p.add_argument("--family", default="TE")
     p.add_argument("--scheduler", choices=["lsf", "slurm", "local", "auto"], default="auto")
     p.add_argument("--queue", default="normal")

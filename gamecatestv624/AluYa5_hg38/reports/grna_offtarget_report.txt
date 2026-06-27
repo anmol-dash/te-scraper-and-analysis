@@ -1,0 +1,14 @@
+============================================================
+GAMECA gRNA Off-Target / Specificity-Coverage --- Measured Values
+Generated: 2026-06-25 07:46:41
+============================================================
+  Family:               AluYa5
+  Cas / PAM:            SpCas9
+  Family copies:        300
+  Candidate guides:     52
+  Pareto-frontier:      6
+
+  ── Best coverage/specificity guide ──
+  Guide:                GGAGTGCAGTGGCGGGATCT
+  Coverage:             247 / 300 (82.3%)
+  Off-target sites:     3

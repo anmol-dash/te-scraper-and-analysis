@@ -5,9 +5,9 @@ Connect to HPC, upload code, and submit the fold prediction batch job.
 
 Usage:
     python submit_fold_prediction.py \\
-        --host consign.pmacs.upenn.edu --user amodz \\
-        --input /home/amodz/anmol/mt2_mm_ultracombo_countsv4.csv \\
-        --reports-dir /home/amodz/anmol/reports4 \\
+        --host login.your-cluster.edu --user youruser \\
+        --input /path/to/mt2_mm_ultracombo_countsv4.csv \\
+        --reports-dir ~/gameca_reports \\
         [--family MT2_Mm] \\
         [--min-aa 100] \\
         [--top-n 5] \\
@@ -146,7 +146,7 @@ def _upload_file(transport, local_path: Path, remote_path: str):
 def _select_work_dir(transport, username):
     probe = f"""
 set +e
-for d in "/project/amodzlab/{username}/gameca" "/scratch/{username}/gameca" \
+for d in "/project/{username}/gameca" "/scratch/{username}/gameca" \
           "/work/{username}/gameca" "$HOME/gameca"; do
   mkdir -p "$d" 2>/dev/null && [ -w "$d" ] && printf '%s\\n' "$d" && exit 0
 done
@@ -230,7 +230,7 @@ def parse_args():
     p.add_argument("--password",       default=None)
     p.add_argument("--input",          required=True,
                    help="Local or remote path to input CSV")
-    p.add_argument("--reports-dir",    default="/home/amodz/anmol/reports4")
+    p.add_argument("--reports-dir",    default="~/gameca_reports")
     p.add_argument("--family",         default="MT2_Mm")
     p.add_argument("--min-aa",         type=int, default=100)
     p.add_argument("--top-n",          type=int, default=5)

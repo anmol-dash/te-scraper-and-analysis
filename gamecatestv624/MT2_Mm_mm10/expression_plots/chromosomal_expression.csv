@@ -1,0 +1,3 @@
+chromosome,n_loci,mean_total_expr,mean_K562_rep1,mean_K562_rep2,mean_Liver_donorA,mean_siCTRL_24h,mean_patient_07_tumor,mean_GM12878.scRNA
+chr1,207,3.3718,1.6823,1.6774,2.138,1.3623,1.4759,1.2121
+chr10,93,3.3398,1.5852,1.6591,2.0617,1.4495,1.3857,1.2379

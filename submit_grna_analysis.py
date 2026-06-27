@@ -8,7 +8,7 @@ Usage:
     python submit_grna_analysis.py \\
         --host login.cluster.edu --user myuser \\
         --input /local/or/remote/mt2_mm_ultracombo_countsv4.csv \\
-        --reports-dir /home/amodz/anmol/reports4 \\
+        --reports-dir ~/gameca_reports \\
         [--family MT2_Mm] \\
         [--cas SpCas9] \\
         [--key ~/.ssh/id_rsa] \\
@@ -151,7 +151,7 @@ def _upload_file(transport, local_path, remote_path):
 def _select_work_dir(transport, username):
     probe = f"""
 set +e
-for d in "/project/amodzlab/{username}/gameca" "/scratch/{username}/gameca" \
+for d in "/project/{username}/gameca" "/scratch/{username}/gameca" \
           "/work/{username}/gameca" "$HOME/gameca"; do
   mkdir -p "$d" 2>/dev/null && [ -w "$d" ] && printf '%s\\n' "$d" && exit 0
 done
@@ -210,7 +210,7 @@ def parse_args():
     p.add_argument("--password",    default=None)
     p.add_argument("--input",       required=True,
                    help="Local or remote path to input CSV")
-    p.add_argument("--reports-dir", default="/home/amodz/anmol/reports4")
+    p.add_argument("--reports-dir", default="~/gameca_reports")
     p.add_argument("--family",      default="MT2_Mm")
     p.add_argument("--cas",         default="SpCas9",
                    choices=["SpCas9","SaCas9","Cas12a","SpRY"])

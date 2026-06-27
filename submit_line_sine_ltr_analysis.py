@@ -6,10 +6,10 @@ Connect to HPC cluster, upload analysis code, and submit the LINE/SINE/LTR batch
 Usage:
     python submit_line_sine_ltr_analysis.py \\
         --host login.cluster.edu --user myuser \\
-        --l1mdt-expr  /home/amodz/anmol/L1Md_T_ultracombo.csv \\
-        --b1mus2-expr /home/amodz/anmol/B1_Mus2_ultracombo.csv \\
-        --iapltr1-expr /home/amodz/anmol/IAPLTR1_Mm_ultracombo.csv \\
-        [--genome-fa /home/amodz/mm10.fa] \\
+        --l1mdt-expr  /path/to/L1Md_T_ultracombo.csv \\
+        --b1mus2-expr /path/to/B1_Mus2_ultracombo.csv \\
+        --iapltr1-expr /path/to/IAPLTR1_Mm_ultracombo.csv \\
+        [--genome-fa /path/to/mm10.fa] \\
         [--key ~/.ssh/id_rsa] \\
         [--scheduler lsf|slurm|auto] \\
         [--queue normal] \\
@@ -213,7 +213,7 @@ def _detect_scheduler(transport: paramiko.Transport) -> str:
 def _select_work_dir(transport: paramiko.Transport, username: str) -> str:
     probe = rf"""
 set +e
-for d in "/project/amodzlab/{username}/gameca" "/scratch/{username}/gameca" \
+for d in "/project/{username}/gameca" "/scratch/{username}/gameca" \
           "/work/{username}/gameca" "$HOME/gameca"; do
   mkdir -p "$d" 2>/dev/null && [ -w "$d" ] && printf '%s\n' "$d" && exit 0
 done
@@ -272,7 +272,7 @@ def parse_args():
                    help="Cluster path to B1_Mus2_ultracombo.csv")
     p.add_argument("--iapltr1-expr",required=True,
                    help="Cluster path to IAPLTR1_Mm_ultracombo.csv")
-    p.add_argument("--reports-dir", default="/home/amodz/anmol/reports_line_sine_ltr",
+    p.add_argument("--reports-dir", default="~/gameca_reports_line_sine_ltr",
                    help="Remote path for output figures (created on cluster if absent)")
     p.add_argument("--genome-fa",   default="",
                    help="Cluster path to mm10.fa (optional)")

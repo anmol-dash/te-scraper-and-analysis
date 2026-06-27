@@ -38,7 +38,7 @@ RMSK_DIR="${RMSK_DIR:-}"             # optional pre-downloaded rmsk_<build>.txt.
 INCLUDE_FOLD="${INCLUDE_FOLD:-0}"    # 1 → also run ColabFold (heavy/GPU)
 QUEUE="${QUEUE:-normal}"
 N_CORES="${N_CORES:-4}"
-MEM_MB="${MEM_MB:-16000}"
+MEM_MB="${MEM_MB:-24000}"            # peak observed ~19 GB (L1HS); 16 GB overran
 WALL="${WALL:-24:00}"                # HH:MM
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON="${PYTHON:-python3}"
@@ -68,6 +68,9 @@ PYCMD_STR="$(printf '%q ' "${PYCMD[@]}")"
 {
   echo "#!/usr/bin/env bash"
   echo "set -uo pipefail"
+  # Avoid the noisy (non-fatal) 'conda-libmamba-solver (libicui18n.so.*)' load
+  # error on cluster nodes with an older system ICU than the conda env expects.
+  echo "export CONDA_SOLVER=classic"
   printf 'cd %q\n' "$SCRIPT_DIR"
   [ -n "$PROXY_PREFIX" ] && echo "$PROXY_PREFIX"
   echo 'echo "Host: $(hostname)   Started: $(date)"'

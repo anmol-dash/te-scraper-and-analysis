@@ -1,0 +1,47 @@
+============================================================
+GAMECA STAGE 11 — STANDOUT ANALYSIS (standalone)
+============================================================
+  Family:   LTR5_Hs
+  Assembly: hg38
+  Input:    /home/amodz/anmol/gamecatestv624/_work/LTR5_Hs_hg38/LTR5_Hs_hg38_prepared.csv
+  Reports:  /home/amodz/anmol/gamecatestv624/LTR5_Hs_hg38/reports
+  Log:      /home/amodz/anmol/gamecatestv624/LTR5_Hs_hg38/reports/standout_analysis.log
+  Modules:  15
+============================================================
+  [phylo] running... ok (21s)
+  [consensus_distance] running... ok (12s)
+  [grna] running... ok (3s)
+  [transduction] running... ok (3s)
+  [antisense] running... ok (3s)
+  [ctcf_tad] running... ok (2s)
+  [epigenetic] running... ok (2s)
+  [ortholog] running... ok (2s)
+  [multiassembly] running... ok (2s)
+  [divergence] running... ok (88s)
+  [ltr_struct] running... ok (4s)
+  [subfamily] running... ok (77s)
+  [benchmark] running... ok (1s)
+  [motif_gain] running... ok (2s)
+  [expression] running... ok (6s)
+
+============================================================
+SUMMARY
+============================================================
+  phylo                OK                 21s
+  consensus_distance   OK                 12s
+  grna                 OK                 3s
+  transduction         OK                 3s
+  antisense            OK                 3s
+  ctcf_tad             OK                 2s
+  epigenetic           OK                 2s
+  ortholog             OK                 2s
+  multiassembly        OK                 2s
+  divergence           OK                 88s
+  ltr_struct           OK                 4s
+  subfamily            OK                 77s
+  benchmark            OK                 1s
+  motif_gain           OK                 2s
+  expression           OK                 6s
+
+  Done: 15 ok / 0 failed / 0 skipped
+  Outputs in: /home/amodz/anmol/gamecatestv624/LTR5_Hs_hg38/reports

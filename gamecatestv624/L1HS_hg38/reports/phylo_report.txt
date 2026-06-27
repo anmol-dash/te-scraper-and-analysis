@@ -1,0 +1,16 @@
+============================================================
+GAMECA Phylogenetics / Divergence-Age --- Measured Values
+Generated: 2026-06-25 07:28:17
+============================================================
+  Family:                L1HS
+  Assembly / rate:       hg38  (2.2e-09 subs/site/yr, clock divisor 1)
+  Copies analysed:       300
+  Usable divergence:     297  (3 unalignable→NaN)
+  Tree tips:             3
+  Median divergence:     0.77 %
+  Median est. age:       3.51 Myr
+  Intact (ORF≥thr):      157
+
+  ── Top master/source element ──
+  Name:                  chr1|180866811|180872843|L1HS:L1:LINE|28770|-
+  Divergence:            0.43 %

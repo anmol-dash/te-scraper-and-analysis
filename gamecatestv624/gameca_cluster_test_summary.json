@@ -1,0 +1,87 @@
+{
+  "started": "2026-06-25T07:23:27.234909",
+  "finished": "2026-06-25T08:01:05.876379",
+  "out_dir": "/home/amodz/anmol/gamecatestv624",
+  "matrix": [
+    "L1HS:hg38",
+    "AluYa5:hg38",
+    "LTR5_Hs:hg38",
+    "MT2_Mm:mm10",
+    "B2_Mm2:mm10"
+  ],
+  "max_loci": 300,
+  "include_fold": false,
+  "families_ok": 5,
+  "families_problem": 0,
+  "modules_ok": 0,
+  "modules_failed": 0,
+  "modules_skipped": 0,
+  "results": [
+    {
+      "tag": "L1HS_hg38",
+      "family": "L1HS",
+      "assembly": "hg38",
+      "rc": 0,
+      "elapsed_s": 1127.3,
+      "modules": {},
+      "n_ok": 0,
+      "n_fail": 0,
+      "n_skip": 0,
+      "log": "/home/amodz/anmol/gamecatestv624/L1HS_hg38/stage11.log",
+      "reports": "/home/amodz/anmol/gamecatestv624/L1HS_hg38/reports"
+    },
+    {
+      "tag": "AluYa5_hg38",
+      "family": "AluYa5",
+      "assembly": "hg38",
+      "rc": 0,
+      "elapsed_s": 106.7,
+      "modules": {},
+      "n_ok": 0,
+      "n_fail": 0,
+      "n_skip": 0,
+      "log": "/home/amodz/anmol/gamecatestv624/AluYa5_hg38/stage11.log",
+      "reports": "/home/amodz/anmol/gamecatestv624/AluYa5_hg38/reports"
+    },
+    {
+      "tag": "LTR5_Hs_hg38",
+      "family": "LTR5_Hs",
+      "assembly": "hg38",
+      "rc": 0,
+      "elapsed_s": 226.6,
+      "modules": {},
+      "n_ok": 0,
+      "n_fail": 0,
+      "n_skip": 0,
+      "log": "/home/amodz/anmol/gamecatestv624/LTR5_Hs_hg38/stage11.log",
+      "reports": "/home/amodz/anmol/gamecatestv624/LTR5_Hs_hg38/reports"
+    },
+    {
+      "tag": "MT2_Mm_mm10",
+      "family": "MT2_Mm",
+      "assembly": "mm10",
+      "rc": 0,
+      "elapsed_s": 158.3,
+      "modules": {},
+      "n_ok": 0,
+      "n_fail": 0,
+      "n_skip": 0,
+      "log": "/home/amodz/anmol/gamecatestv624/MT2_Mm_mm10/stage11.log",
+      "reports": "/home/amodz/anmol/gamecatestv624/MT2_Mm_mm10/reports"
+    },
+    {
+      "tag": "B2_Mm2_mm10",
+      "family": "B2_Mm2",
+      "assembly": "mm10",
+      "rc": 0,
+      "elapsed_s": 81.4,
+      "modules": {},
+      "n_ok": 0,
+      "n_fail": 0,
+      "n_skip": 0,
+      "log": "/home/amodz/anmol/gamecatestv624/B2_Mm2_mm10/stage11.log",
+      "reports": "/home/amodz/anmol/gamecatestv624/B2_Mm2_mm10/reports"
+    }
+  ],
+  "note": "expression values are synthetic test fixtures, not measurements"
+}

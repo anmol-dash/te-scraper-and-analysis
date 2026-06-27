@@ -1,0 +1,11 @@
+============================================================
+GAMECA 3' Transduction --- Measured Values
+Generated: 2026-06-25 08:00:08
+============================================================
+  Family:               B2_Mm2
+  Copies:               300
+  Transduction lineages:1
+  Largest lineage:      289 copies
+  Copies in a lineage:  289
+  With poly-A signal:   102
+  Median poly-A tail:   0 bp

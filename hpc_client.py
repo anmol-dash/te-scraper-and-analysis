@@ -280,7 +280,7 @@ class HPCClient:
 
         probe = r'''
 set +e
-for target in "/project/amodzlab/${USER:-__USER__}/gameca" "/project/amodzlab/gameca_${USER:-__USER__}" "/project/${USER:-__USER__}/gameca" "/scratch/${USER:-__USER__}/gameca" "/work/${USER:-__USER__}/gameca"; do
+for target in "/project/${USER:-__USER__}/gameca" "/scratch/${USER:-__USER__}/gameca" "/work/${USER:-__USER__}/gameca"; do
   mkdir -p "$target" >/dev/null 2>&1 || continue
   [ -d "$target" ] && [ -w "$target" ] || continue
   printf '%s\n' "$target"
@@ -330,8 +330,6 @@ exit 1
     def _batch_work_dir_candidates(self) -> list[str]:
         user = self._username or "$USER"
         candidates = [
-            f"/project/amodzlab/{user}/gameca",
-            f"/project/amodzlab/gameca_{user}",
             f"/project/{user}/gameca",
             f"/scratch/{user}/gameca",
             f"/work/{user}/gameca",
