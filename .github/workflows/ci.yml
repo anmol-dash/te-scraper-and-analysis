@@ -29,6 +29,21 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Install Linux dependencies for Tauri
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - name: Stub sidecar binary (compilation only)
+        shell: bash
+        run: |
+          triple=$(rustc -vV | sed -n 's/^host: //p')
+          mkdir -p src-tauri/binaries
+          out="src-tauri/binaries/pytool-${triple}"
+          printf '#!/bin/sh\nexit 0\n' > "$out"
+          chmod +x "$out"
+          echo "Created stub $out"
+
       - name: Cargo fmt + clippy
         working-directory: src-tauri
         run: |
@@ -96,8 +111,30 @@ jobs:
           restore-keys: |
             cargo-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.toml') }}-
 
+      - name: Install Linux dependencies for Tauri
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - name: Stub sidecar binary (compilation only)
+        shell: bash
+        run: |
+          triple=$(rustc -vV | sed -n 's/^host: //p')
+          mkdir -p src-tauri/binaries
+          if [[ "$triple" == *windows* ]]; then
+            out="src-tauri/binaries/pytool-${triple}.exe"
+          else
+            out="src-tauri/binaries/pytool-${triple}"
+          fi
+          printf '#!/bin/sh\nexit 0\n' > "$out"
+          chmod +x "$out" || true
+          echo "Created stub $out"
+
       - name: cargo test
         working-directory: src-tauri
+        env:
+          CARGO_NET_RETRY: '10'
         run: cargo test --all-targets
 
   test-frontend:
