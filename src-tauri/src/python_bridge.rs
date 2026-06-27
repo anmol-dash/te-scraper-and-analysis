@@ -206,7 +206,10 @@ impl PythonBridge {
     }
 }
 
-async fn stdin_writer_task(mut rx: mpsc::Receiver<Request>, child: Arc<TokioMutex<Option<CommandChild>>>) {
+async fn stdin_writer_task(
+    mut rx: mpsc::Receiver<Request>,
+    child: Arc<TokioMutex<Option<CommandChild>>>,
+) {
     while let Some(req) = rx.recv().await {
         match req {
             Request::WriteStdin(bytes) => {
@@ -314,7 +317,8 @@ async fn supervisor_task(
 
             match event {
                 CommandEvent::Stdout(bytes) => {
-                    let health = append_stdout_and_dispatch(&mut stdout_buf, &bytes, &pending, &app);
+                    let health =
+                        append_stdout_and_dispatch(&mut stdout_buf, &bytes, &pending, &app);
                     if health {
                         saw_valid_line = true;
                         restarts = 0;
@@ -428,10 +432,7 @@ fn append_stdout_and_dispatch(
     parsed_any
 }
 
-fn resolve_pending_response(
-    v: &Value,
-    pending: &DashMap<Uuid, oneshot::Sender<Response>>,
-) -> bool {
+fn resolve_pending_response(v: &Value, pending: &DashMap<Uuid, oneshot::Sender<Response>>) -> bool {
     let Some(id_val) = v.get("id") else {
         return false;
     };
@@ -471,7 +472,9 @@ fn resolve_pending_response(
     }
 
     if v.get("type").and_then(|x| x.as_str()) == Some("result") {
-        let _ = tx.send(Response::Ok(v.get("payload").cloned().unwrap_or(Value::Null)));
+        let _ = tx.send(Response::Ok(
+            v.get("payload").cloned().unwrap_or(Value::Null),
+        ));
         return true;
     }
 
@@ -479,7 +482,11 @@ fn resolve_pending_response(
     true
 }
 
-fn dispatch_json_line(v: Value, pending: &DashMap<Uuid, oneshot::Sender<Response>>, app: &AppHandle) {
+fn dispatch_json_line(
+    v: Value,
+    pending: &DashMap<Uuid, oneshot::Sender<Response>>,
+    app: &AppHandle,
+) {
     if let Some(t) = v.get("type").and_then(|x| x.as_str()) {
         match t {
             "progress" => {

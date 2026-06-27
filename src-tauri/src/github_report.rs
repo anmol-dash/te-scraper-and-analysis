@@ -53,7 +53,11 @@ fn report_target() -> Option<(String, String)> {
     let token = env::var("GAMECA_GITHUB_REPORT_TOKEN")
         .ok()
         .filter(|v| !v.trim().is_empty())
-        .or_else(|| env::var("GITHUB_TOKEN").ok().filter(|v| !v.trim().is_empty()))
+        .or_else(|| {
+            env::var("GITHUB_TOKEN")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        })
         .or_else(|| {
             cfg.and_then(|c| c.github_report_token)
                 .filter(|v| !v.trim().is_empty())
