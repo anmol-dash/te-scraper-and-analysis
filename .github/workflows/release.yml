@@ -25,12 +25,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-13
-            platform: darwin-x86_64
+          # One universal macOS .dmg (Intel + Apple Silicon) built on Apple
+          # Silicon; the GitHub-hosted Intel (macos-13) runner is too starved to
+          # rely on. Windows .exe builds natively.
           - os: macos-14
-            platform: darwin-aarch64
+            platform: darwin-universal
+            tauri_args: "--target universal-apple-darwin"
+            bundle_dir: src-tauri/target/universal-apple-darwin/release/bundle
           - os: windows-latest
             platform: windows-x86_64
+            tauri_args: ""
+            bundle_dir: src-tauri/target/release/bundle
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -53,8 +58,11 @@ jobs:
           path: src-tauri/binaries
           key: sidecar-${{ matrix.platform }}-${{ hashFiles('backend/**/*.py', 'backend/pyinstaller.spec', 'backend/requirements.txt', 'requirements.txt', '*.py', '*.pyx') }}
 
-      - name: Build Python sidecar (Unix)
+      - name: Build Python sidecar (Unix, universal2)
         if: runner.os != 'Windows' && steps.sidecar-cache.outputs.cache-hit != 'true'
+        env:
+          PYINSTALLER_TARGET_ARCH: universal2
+          SIDECAR_TRIPLE: universal-apple-darwin
         run: |
           pip install pyinstaller
           bash scripts/build-python.sh
@@ -74,6 +82,10 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Add macOS universal Rust targets
+        if: matrix.platform == 'darwin-universal'
+        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
@@ -85,10 +97,10 @@ jobs:
       # Passing the cert env vars as empty strings makes Tauri attempt (and fail)
       # a keychain import, so they are intentionally omitted here.
       - name: Build Tauri app
-        run: pnpm tauri build
+        run: pnpm tauri build ${{ matrix.tauri_args }}
 
-      - name: Stage platform assets + updater fragment
-        run: node scripts/prepare-platform-release.mjs ${{ matrix.platform }} src-tauri/target/release/bundle staging
+      - name: Stage platform installer
+        run: node scripts/prepare-platform-release.mjs ${{ matrix.platform }} ${{ matrix.bundle_dir }} staging
 
       - uses: actions/upload-artifact@v4
         with:
@@ -124,29 +136,16 @@ jobs:
         run: |
           git tag -l --format='%(contents:body)' "${GITHUB_REF_NAME}" > release_notes.md || true
 
-      - name: Assemble latest.json
-        run: |
-          set -euo pipefail
-          VER="${GITHUB_REF_NAME#v}"
-          export PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          export RELEASE_VERSION="$VER"
-          export RELEASE_NOTES="$(cat release_notes.md)"
-          export TAG_NAME="${GITHUB_REF_NAME}"
-          export GITHUB_REPOSITORY="${{ github.repository }}"
-          mapfile -t FRAGS < <(find artifacts -name fragment.json | sort)
-          if [[ "${#FRAGS[@]}" -lt 1 ]]; then
-            echo "::error::No fragment.json files found under artifacts/ — all platform builds may have failed"
-            exit 1
-          fi
-          node scripts/merge-latest-json.mjs "${FRAGS[@]}" | tee latest.json
-
-      - name: Upload installers, signatures, and latest.json
+      - name: Upload installers
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
-          mapfile -t BINS < <(find artifacts -type f -path '*/assets/*' | sort)
+          # Only the user-facing installers (.dmg / .exe). The updater is unused,
+          # so no latest.json/.sig is attached. GitHub still auto-adds the
+          # "Source code" archives — those cannot be removed via the API.
+          mapfile -t BINS < <(find artifacts -type f -path '*/assets/*' ! -name '*.sig' | sort)
           if [[ "${#BINS[@]}" -lt 1 ]]; then
             echo "::error::No release binaries found under artifacts/**/assets/ — check platform build logs"
             exit 1
@@ -160,7 +159,7 @@ jobs:
             --notes-file release_notes.md \
             --verify-tag \
             "${EXTRA[@]}" \
-            latest.json "${BINS[@]}"
+            "${BINS[@]}"
 
   report-failure:
     needs: [preflight, build, publish]

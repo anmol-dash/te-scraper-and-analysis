@@ -107,7 +107,9 @@ exe = EXE(
     console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
-    target_arch=None,
+    # macOS universal builds set PYINSTALLER_TARGET_ARCH=universal2 so one binary
+    # carries both x86_64 and arm64 slices; unset elsewhere -> native arch.
+    target_arch=os.environ.get("PYINSTALLER_TARGET_ARCH") or None,
     codesign_identity=None,
     entitlements_file=None,
     onefile=True,
