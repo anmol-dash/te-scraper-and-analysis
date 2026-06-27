@@ -33,8 +33,8 @@ _BACKEND_ROOT = Path(__file__).resolve().parent
 if str(_BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(_BACKEND_ROOT))
 
-from yourtool import __version__ as _TOOL_VERSION
-from yourtool.cli import main as cli_main
+from yourtool import __version__ as _TOOL_VERSION  # noqa: E402  (import follows sys.path setup above)
+from yourtool.cli import main as cli_main  # noqa: E402
 
 _REAL_STDOUT: TextIO = sys.__stdout__
 
