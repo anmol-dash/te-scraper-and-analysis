@@ -12,9 +12,9 @@ PY="${PYTHON:-python3}"
 "${PY}" -m PyInstaller --noconfirm pyinstaller.spec
 
 # macOS universal build: PyInstaller (with target_arch=universal2) emits one fat
-# binary, but `tauri build --target universal-apple-darwin` compiles each arch
-# separately and its build.rs requires a per-arch sidecar for *each* triple.
-# Split the fat binary into the two thin sidecars Tauri expects.
+# binary. `tauri build --target universal-apple-darwin` needs both the per-arch
+# sidecars (its build.rs checks each triple while compiling that arch) AND the
+# fat -universal-apple-darwin one (copied into the bundle). Provide all three.
 if [[ "${PYINSTALLER_TARGET_ARCH:-}" == "universal2" ]]; then
   archs="$(lipo -archs "dist/pytool" 2>/dev/null || true)"
   if [[ "${archs}" != *x86_64* || "${archs}" != *arm64* ]]; then
@@ -22,10 +22,13 @@ if [[ "${PYINSTALLER_TARGET_ARCH:-}" == "universal2" ]]; then
     echo "       The build Python must be a universal2 build for target_arch=universal2." >&2
     exit 1
   fi
+  cp "dist/pytool" "${DEST}/pytool-universal-apple-darwin"
   lipo "dist/pytool" -thin x86_64 -output "${DEST}/pytool-x86_64-apple-darwin"
   lipo "dist/pytool" -thin arm64 -output "${DEST}/pytool-aarch64-apple-darwin"
-  chmod 0755 "${DEST}/pytool-x86_64-apple-darwin" "${DEST}/pytool-aarch64-apple-darwin"
-  echo "Installed per-arch sidecars from universal2 binary (${archs}):"
+  chmod 0755 "${DEST}/pytool-universal-apple-darwin" \
+    "${DEST}/pytool-x86_64-apple-darwin" "${DEST}/pytool-aarch64-apple-darwin"
+  echo "Installed universal + per-arch sidecars from universal2 binary (${archs}):"
+  echo "  ${DEST}/pytool-universal-apple-darwin"
   echo "  ${DEST}/pytool-x86_64-apple-darwin"
   echo "  ${DEST}/pytool-aarch64-apple-darwin"
   exit 0
