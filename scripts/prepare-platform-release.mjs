@@ -1,7 +1,12 @@
 #!/usr/bin/env node
 /**
- * Picks updater bundle + .sig for a Tauri platform key, copies into <out>/assets/
- * and writes <out>/fragment.json for merge-latest-json.mjs
+ * Picks the user-facing installer for a Tauri platform key, copies it into
+ * <out>/assets/ and writes <out>/fragment.json for merge-latest-json.mjs.
+ *
+ * Installers shipped: macOS -> .dmg, Windows -> NSIS setup .exe, Linux -> .AppImage.
+ * The Tauri updater is not wired into this app, so detached .sig signatures are
+ * optional: if a matching .sig exists it is shipped alongside, otherwise it is
+ * silently skipped (and the fragment signature is left empty).
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -33,72 +38,42 @@ if (!fs.existsSync(bundleRoot)) {
 }
 
 const files = walk(bundleRoot);
-const readSig = (p) => fs.readFileSync(p, "utf8").trim();
 
-function pickDarwin() {
-  const tgz = files.filter(
-    (f) => f.endsWith(".app.tar.gz") && !f.endsWith(".sig"),
-  );
-  if (tgz.length !== 1) {
+// Pick exactly one installer matching `match`, plus its optional sidecar .sig.
+function pickOne(match, label) {
+  const hits = files.filter((f) => !f.endsWith(".sig") && match(f));
+  if (hits.length !== 1) {
     console.error(
-      `Expected exactly one .app.tar.gz under ${bundleRoot}, found ${tgz.length}`,
+      `Expected exactly one ${label} under ${bundleRoot}, found ${hits.length}` +
+        (hits.length ? `:\n  ${hits.join("\n  ")}` : ""),
     );
     process.exit(1);
   }
-  const base = tgz[0];
+  const base = hits[0];
   const sigFile = `${base}.sig`;
-  if (!fs.existsSync(sigFile)) {
-    console.error(`Missing signature: ${sigFile}`);
-    process.exit(1);
-  }
-  return { bundle: base, sig: sigFile, basename: path.basename(base) };
+  return {
+    bundle: base,
+    sig: fs.existsSync(sigFile) ? sigFile : null,
+    basename: path.basename(base),
+  };
+}
+
+function pickDarwin() {
+  return pickOne((f) => f.endsWith(".dmg"), ".dmg");
 }
 
 function pickLinux() {
-  const imgs = files.filter(
-    (f) => f.endsWith(".AppImage") && !f.endsWith(".sig"),
-  );
-  if (imgs.length !== 1) {
-    console.error(
-      `Expected exactly one .AppImage under ${bundleRoot}, found ${imgs.length}`,
-    );
-    process.exit(1);
-  }
-  const base = imgs[0];
-  const sigFile = `${base}.sig`;
-  if (!fs.existsSync(sigFile)) {
-    console.error(`Missing signature: ${sigFile}`);
-    process.exit(1);
-  }
-  return { bundle: base, sig: sigFile, basename: path.basename(base) };
+  return pickOne((f) => f.endsWith(".AppImage"), ".AppImage");
 }
 
 function pickWindows() {
-  const inNsis = files.filter((f) => {
-    if (!f.includes(`${path.sep}nsis${path.sep}`)) return false;
-    return f.endsWith(".exe") && !f.endsWith(".sig");
-  });
-  const exes = inNsis.length
-    ? inNsis
-    : files.filter(
-        (f) =>
-          f.endsWith(".exe") &&
-          !f.endsWith(".sig") &&
-          (f.includes("setup") || f.includes("-setup")),
-      );
-  if (exes.length !== 1) {
-    console.error(
-      `Expected exactly one NSIS setup .exe under ${bundleRoot}, found ${exes.length}`,
-    );
-    process.exit(1);
-  }
-  const base = exes[0];
-  const sigFile = `${base}.sig`;
-  if (!fs.existsSync(sigFile)) {
-    console.error(`Missing signature: ${sigFile}`);
-    process.exit(1);
-  }
-  return { bundle: base, sig: sigFile, basename: path.basename(base) };
+  const nsis = (f) =>
+    f.includes(`${path.sep}nsis${path.sep}`) && f.endsWith(".exe");
+  if (files.some(nsis)) return pickOne(nsis, "NSIS setup .exe");
+  return pickOne(
+    (f) => f.endsWith(".exe") && (f.includes("setup") || f.includes("-setup")),
+    "NSIS setup .exe",
+  );
 }
 
 let picked;
@@ -113,11 +88,13 @@ else {
 const assetsDir = path.join(outRoot, "assets");
 fs.mkdirSync(assetsDir, { recursive: true });
 fs.copyFileSync(picked.bundle, path.join(assetsDir, picked.basename));
-fs.copyFileSync(picked.sig, path.join(assetsDir, `${picked.basename}.sig`));
+if (picked.sig) {
+  fs.copyFileSync(picked.sig, path.join(assetsDir, `${picked.basename}.sig`));
+}
 
 const fragment = {
   [platformKey]: {
-    signature: readSig(picked.sig),
+    signature: picked.sig ? fs.readFileSync(picked.sig, "utf8").trim() : "",
     basename: picked.basename,
   },
 };
