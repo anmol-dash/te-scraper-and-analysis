@@ -1,9 +1,0 @@
-============================================================
-GAMECA Antisense / Bidirectional Promoter --- Measured Values
-Generated: 2026-06-25 07:46:46
-============================================================
-  Family:                  AluYa5
-  Copies:                  300
-  Bidirectional (>=0.4):   155
-  Median bidir. score:     1.000
-  Stranded expression:     no

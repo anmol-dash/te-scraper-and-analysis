@@ -1,8 +1,0 @@
-============================================================
-GAMECA Ortholog Insertion --- Measured Values
-Generated: 2026-06-25 07:55:59
-============================================================
-  Family:              MT2_Mm
-  Copies:              300
-  Target species:      0  (none)
-  Lineage-specific:    n/a (no chains)

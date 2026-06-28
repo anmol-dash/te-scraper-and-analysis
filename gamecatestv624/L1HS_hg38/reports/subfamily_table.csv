@@ -1,4 +1,0 @@
-cluster,n_loci,consensus_length_bp,div_from_canonical_pct,subfamily_label,is_canonical_type
-0,100,8549,0.022,L1HS_canonical,True
-1,100,6359,0.122,L1HS_canonical,True
-2,100,6329,0.011,L1HS_canonical,True

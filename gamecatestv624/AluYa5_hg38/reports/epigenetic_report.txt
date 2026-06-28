@@ -1,7 +1,0 @@
-============================================================
-GAMECA Epigenetic Overlay --- Measured Values
-Generated: 2026-06-25 07:46:50
-============================================================
-  Family:        AluYa5
-  Copies:        300
-  Tracks used:   0  (none)

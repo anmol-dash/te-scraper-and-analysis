@@ -1,4 +1,0 @@
-Cluster,peak_stage,peak_col,peak_mean,mean_K562_rep1,mean_K562_rep2,mean_Liver_donorA,mean_siCTRL_24h,mean_patient_07_tumor,mean_GM12878.scRNA
-0,Liver_donorA,Liver_donorA,2.2575,1.2315,1.3291,2.2575,1.1326,1.7386,0.9708
-1,Liver_donorA,Liver_donorA,2.1445,1.7253,1.6866,2.1445,1.5281,1.4014,1.348
-2,K562_rep2,K562_rep2,2.0684,2.0186,2.0684,2.0258,1.5913,1.1909,1.5298

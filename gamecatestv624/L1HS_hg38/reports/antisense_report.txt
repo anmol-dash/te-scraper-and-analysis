@@ -1,9 +1,0 @@
-============================================================
-GAMECA Antisense / Bidirectional Promoter --- Measured Values
-Generated: 2026-06-25 07:30:26
-============================================================
-  Family:                  L1HS
-  Copies:                  300
-  Bidirectional (>=0.4):   185
-  Median bidir. score:     0.500
-  Stranded expression:     no

@@ -1,8 +1,0 @@
-============================================================
-GAMECA Multi-Assembly Liftover --- Measured Values
-Generated: 2026-06-25 07:46:53
-============================================================
-  Family:           AluYa5
-  Source assembly:  hg38
-  Copies:           300
-  Target assemblies:0  (none)

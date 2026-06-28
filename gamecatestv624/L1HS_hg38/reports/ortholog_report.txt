@@ -1,8 +1,0 @@
-============================================================
-GAMECA Ortholog Insertion --- Measured Values
-Generated: 2026-06-25 07:30:32
-============================================================
-  Family:              L1HS
-  Copies:              300
-  Target species:      0  (none)
-  Lineage-specific:    n/a (no chains)

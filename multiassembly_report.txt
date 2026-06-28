@@ -1,8 +1,0 @@
-============================================================
-GAMECA Multi-Assembly Liftover --- Measured Values
-Generated: 2026-06-16 18:17:07
-============================================================
-  Family:           IAP
-  Source assembly:  mm10
-  Copies:           12577
-  Target assemblies:0  (none)

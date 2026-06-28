@@ -1,7 +1,0 @@
-============================================================
-GAMECA Epigenetic Overlay --- Measured Values
-Generated: 2026-06-25 07:30:30
-============================================================
-  Family:        L1HS
-  Copies:        300
-  Tracks used:   0  (none)

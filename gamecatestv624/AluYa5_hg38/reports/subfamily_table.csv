@@ -1,4 +1,0 @@
-cluster,n_loci,consensus_length_bp,div_from_canonical_pct,subfamily_label,is_canonical_type
-0,100,367,0.0,AluYa5_canonical,False
-1,100,337,0.0,AluYa5_canonical,False
-2,100,330,0.0,AluYa5_canonical,False

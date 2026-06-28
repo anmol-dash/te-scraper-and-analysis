@@ -1,7 +1,0 @@
-============================================================
-GAMECA Epigenetic Overlay --- Measured Values
-Generated: 2026-06-16 18:17:03
-============================================================
-  Family:        IAP
-  Copies:        12577
-  Tracks used:   0  (none)

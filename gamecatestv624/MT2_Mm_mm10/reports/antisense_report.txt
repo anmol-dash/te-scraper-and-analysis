@@ -1,9 +1,0 @@
-============================================================
-GAMECA Antisense / Bidirectional Promoter --- Measured Values
-Generated: 2026-06-25 07:55:54
-============================================================
-  Family:                  MT2_Mm
-  Copies:                  300
-  Bidirectional (>=0.4):   171
-  Median bidir. score:     0.556
-  Stranded expression:     no
