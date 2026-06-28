@@ -260,11 +260,16 @@ so you can read the results without ever opening the app.
 
 \begin{lstlisting}
 <outdir>/<family>/                  e.g. gameca_results/the1a/
+  the1a_sequences.csv               flat list of every copy + sequence
+  pipeline_diagnostic.log           timestamped log of every stage
+  pipeline_errors.log               errors only (empty on a clean run)
   01_data/
-    the1a_clustered.csv             master table: every copy + cluster
+    the1a_with_sequences.csv        copies + sequences, BEFORE clustering
+    the1a_clustered.csv             master table: copies + cluster labels
   02_statistics/
+    overall_statistics.txt          whole-family length/GC summary
     cluster_summary.csv             one row per cluster (size, GC, length)
-    per_cluster/cluster_<c>_statistics.txt
+    per_cluster/cluster_<c>_statistics.txt   detailed stats per cluster
   03_clustering/
     clustering_visualization.html   interactive UMAP scatter
     clustering_visualization_expr.html   (if expression provided)
@@ -281,7 +286,11 @@ so you can read the results without ever opening the app.
     cluster_top5_primers.csv        recommended primers per cluster
     selected_primers_summary.csv
   07_visualizations/
-    index.html                      dashboard linking every figure
+    index.html                      DASHBOARD - start here, links all below
+    cluster_distribution.html       cluster sizes / composition
+    sequence_characteristics.html   length + GC distributions
+    expression_heatmap.html         (if expression provided)
+    expression_comparison.html      (if expression provided)
   cluster_alignments/
     cluster_<c>_seqs.fa / _aligned.fa / _consensus.fa
     all_cluster_consensuses.fa
@@ -291,6 +300,7 @@ so you can read the results without ever opening the app.
     all_overlaps.tsv                every copy x motif overlap
     overall_motif_counts.csv        motif frequency table
     overall_top_motifs.png
+    te_loci.bed, jaspar_indexed/    (intermediate - safe to ignore)
   enrichment_results/
     cluster_<c>_enrichment.csv      Fisher test per motif per cluster
     cluster_<c>_enrichment_annotated.csv
@@ -299,21 +309,52 @@ so you can read the results without ever opening the app.
     gene_functions.csv              TF -> gene -> GO lookups
     go_bp_top_terms.csv
     go_bp_top_terms.png
-  reports/                          Stage 11 results (see 9.7)
+  reports/                          Stage 11 results (see below)
     standout_analysis.log
     fig_*.pdf / *_per_copy.csv / *_report.txt / *_measured_values.tex
-    fold/                           ColabFold 3D structures
+    fold/                           ColabFold 3D structures (orfs.fa, *.pdb)
+  expression_plots/                 expression + DE between clusters
+    de_significant.csv, de_volcano.png, stage_profile.png, ...
+  jaspar/, tmp_motif/               (download cache + scratch - ignore)
   bsub_main.out / bsub_fold.out     live cluster job logs
 \end{lstlisting}
 
+\medskip
+\noindent\textbf{Where to start:} open
+\texttt{07\_visualizations/index.html} in a browser --- it is a dashboard
+that links every figure and table below. The subsections that follow
+walk through each output in the order the pipeline produces it, and
+explain not just \emph{what} each file is but \emph{how to read it}.
+
+% ---------------------------------------------------------------------------
+\subsection{Sequences and statistics (the inputs to everything)}
+
+Before clustering, GAMECA writes the raw material it pulled from the
+genome. \textbf{\texttt{01\_data/<family>\_with\_sequences.csv}} (and the
+identical top-level \texttt{<family>\_sequences.csv}) is one row per copy
+with its coordinates and extracted DNA, \emph{before} any cluster labels
+are assigned. Use it to confirm the right family and copy count were
+fetched. If this file is short or its \texttt{Seq} column is full of
+\texttt{N}s, the genome fetch failed --- fix that before trusting anything
+downstream.
+
+\textbf{\texttt{02\_statistics/overall\_statistics.txt}} is a plain-text
+summary of the whole family: number of copies, and the distribution of
+sequence length and GC content. \textbf{\texttt{per\_cluster/cluster\_<c>\_statistics.txt}}
+gives the same breakdown for each individual cluster. Read these to spot
+a family that is unexpectedly small, bimodal in length (often full-length
+vs.\ solo/truncated elements), or skewed in GC.
+
 % ---------------------------------------------------------------------------
 \subsection{Clustering: the master table}
+\label{sec:master}
 
 \textbf{\texttt{01\_data/<family>\_clustered.csv}} is the central output:
-one row per genomic copy. \texttt{Cluster} is the group it was sorted
+one row per genomic copy, identical to the sequences table but with
+clustering columns added. \texttt{Cluster} is the group it was sorted
 into; \texttt{chr/start/stop/strand} give its location; \texttt{Seq} is
-its DNA; \texttt{umap\_x/umap\_y} are the 2-D coordinates plotted in
-\texttt{03\_clustering/clustering\_visualization.html}.
+its DNA; \texttt{umap\_x/umap\_y} are the 2-D coordinates plotted in the
+interactive scatter.
 
 \begin{lstlisting}
 Seq,Cluster,chr,start,stop,strand,te_name,umap_x,umap_y
@@ -321,10 +362,29 @@ tgttattagacgcg...,3,chr1,3031358,3031710,-,IAPLTR1a_Mm,4.21,-1.08
 aatattcagttgtc...,1,chr2,9881204,9881559,+,IAPLTR1a_Mm,-2.66,3.94
 \end{lstlisting}
 
+\noindent\textbf{How to read the clusters:}
+\begin{itemize}[itemsep=2pt]
+  \item Each \texttt{Cluster} value is a group of copies with similar
+        sequence ($k$-mer) composition --- typically corresponding to a
+        subfamily, an age cohort, or a structural variant of the element.
+  \item \textbf{\texttt{Cluster = -1} is the noise group}: copies that did
+        not fit any dense cluster (HDBSCAN's outliers). A large $-1$ group
+        means the family is heterogeneous or the copies are short/divergent;
+        it is normal to see some, but if \emph{most} copies are $-1$ the
+        family may be too diverse for tight clustering.
+  \item A typical family yields a handful to a few dozen clusters. One or
+        two dominant clusters plus several small ones is the usual shape.
+\end{itemize}
+
 \textbf{\texttt{02\_statistics/cluster\_summary.csv}} summarises each
-cluster (number of copies, mean length, GC content). The interactive
-UMAP scatter in \texttt{03\_clustering/} colours every copy by cluster ---
-open it in a browser and hover for per-copy detail.
+cluster (number of copies, mean length, GC content) --- the quickest
+numeric overview of how the family split. The interactive UMAP scatter in
+\texttt{03\_clustering/clustering\_visualization.html} colours every copy
+by cluster: open it in a browser and hover any point for its coordinates
+and cluster. \textbf{Well-separated, compact blobs} mean clean subfamily
+structure; \textbf{one diffuse cloud} means the copies form a continuum
+rather than discrete groups. The \texttt{\_expr} variant colours the same
+scatter by expression instead, when an expression matrix was supplied.
 
 % ---------------------------------------------------------------------------
 \subsection{Alignment and consensus}
@@ -392,7 +452,7 @@ SP1,77,388,140,1485,3.10,1.1e-12
 
 \textbf{\texttt{cluster\_<c>\_enrichment\_annotated.csv}} adds the
 transcription-factor name, a one-line summary, and GO terms (see
-\S9.6) to every significant motif. \textbf{\texttt{enrichment\_heatmap.png}}
+\S\ref{sec:go}) to every significant motif. \textbf{\texttt{enrichment\_heatmap.png}}
 shows clusters $\times$ enriched motifs at a glance.
 
 % ---------------------------------------------------------------------------
@@ -419,6 +479,7 @@ single overlaps). Open either in a browser.
 
 % ---------------------------------------------------------------------------
 \subsection{GO annotation (\texttt{go\_annotations/})}
+\label{sec:go}
 
 This stage answers ``what do the enriched transcription factors actually
 \emph{do}?'' Each significant motif is mapped to its gene via
@@ -458,35 +519,66 @@ cluster,primer,coverage,total_expr,rows_covered
 0,CCTAGCTATGCTGCCTTG,6,1119.19,"8,9,10,11,12,13"
 \end{lstlisting}
 
-% ---------------------------------------------------------------------------
-\subsection{Stage 11 standout analyses (\texttt{reports/})}
+\noindent\textbf{How to choose a primer:} prefer high \texttt{coverage}
+(amplifies many copies of the cluster) \emph{and} high \texttt{total\_expr}
+(those copies are actually expressed) if your goal is to target the active
+members. For a cluster-specific assay, pick a primer whose
+\texttt{rows\_covered} are concentrated in one cluster rather than spread
+across the family.
 
-Every Stage~11 analysis writes the \emph{same four kinds of file}, so once
-you can read one you can read them all. Using phylogenetics
-(\texttt{phylo}) as the example:
+% ---------------------------------------------------------------------------
+\subsection{The visual dashboard (\texttt{07\_visualizations/})}
+
+\textbf{\texttt{index.html}} is the recommended starting point for reading
+any run --- open it in a browser and it embeds and links every figure the
+pipeline made. It pulls together four interactive Plotly pages, each also
+openable on its own:
 
 \begin{tabular}{@{}lp{0.58\linewidth}@{}}
 \toprule
-File & What it is \\
+File & What it shows \\
 \midrule
-\texttt{fig\_phylo\_tree.pdf}
-  & The figure --- open and look at it. Each analysis makes one or more
-    \texttt{fig\_*} PDFs/PNGs. \\[4pt]
-\texttt{phylo\_per\_copy.csv}
-  & One row per copy, adding this analysis's columns (here: age,
-    divergence, ORF status). Join back to the master table by
-    coordinates or \texttt{TE\_ID}. \\[4pt]
-\texttt{phylo\_report.txt}
-  & A plain-English summary of the headline numbers. \\[4pt]
-\texttt{phylo\_measured\_values.tex}
-  & The same numbers as \LaTeX\ macros for the PDF report; ignore unless
-    compiling the paper. \\
+\texttt{cluster\_distribution.html}
+  & Bar/pie view of how many copies fell into each cluster --- the visual
+    version of \texttt{cluster\_summary.csv}. Use it to see which
+    subfamilies dominate. \\[4pt]
+\texttt{sequence\_characteristics.html}
+  & Distributions of copy length and GC content, split by cluster.
+    A second length mode usually separates full-length from
+    solo/truncated elements. \\[4pt]
+\texttt{expression\_heatmap.html}
+  & Copies $\times$ expression-stage heatmap (only written when an
+    expression matrix is supplied). Bright rows are the actively
+    transcribed copies. \\[4pt]
+\texttt{expression\_comparison.html}
+  & Expression compared \emph{between} clusters, to see which subfamily
+    carries the family's transcriptional activity. \\
 \bottomrule
 \end{tabular}
 
 \medskip
-The \texttt{*\_report.txt} files need no software and are the fastest way
-to read a result:
+All four are interactive: hover for values, drag to zoom, double-click to
+reset. They need only a web browser --- no other software.
+
+% ---------------------------------------------------------------------------
+\subsection{Stage 11 standout analyses (\texttt{reports/})}
+\label{sec:stage11}
+
+Stage~11 is a battery of 16 independent analyses. They share a consistent
+naming convention, so once you know it you can find any file by guessing:
+
+\begin{itemize}[itemsep=2pt]
+  \item \texttt{fig\_<analysis>\_*.pdf}/\texttt{.png} --- the figure(s).
+  \item \texttt{<analysis>\_per\_copy.csv} --- one row per genomic copy,
+        adding that analysis's columns. Join back to the master table
+        (\S\ref{sec:master}) by coordinates or \texttt{TE\_ID}.
+  \item \texttt{<analysis>\_report.txt} --- a plain-English summary of the
+        headline numbers; needs no software and is the fastest read.
+  \item \texttt{<analysis>\_measured\_values.tex} --- the same numbers as
+        \LaTeX\ macros for the PDF report; ignore unless compiling it.
+\end{itemize}
+
+\noindent A typical \texttt{*\_report.txt} looks like this:
 
 \begin{lstlisting}
 GAMECA Phylogenetics / Divergence-Age --- Measured Values
@@ -498,27 +590,214 @@ GAMECA Phylogenetics / Divergence-Age --- Measured Values
   Name:                  chr8:4886476
 \end{lstlisting}
 
-\noindent Some analyses also write a specialised table, e.g.\
-\texttt{grna\_offtarget\_guides.csv} (CRISPR guides with coverage,
-off-target count, specificity), \texttt{ltr\_struct\_summary.csv}
-(full-length vs solo LTR counts), \texttt{subfamily\_tree.nwk} (a Newick
-tree for FigTree/iTOL), and \texttt{divergence\_per\_locus.csv} (per-copy
-divergence for the repeat-landscape plot).
+\noindent The rest of this section documents every analysis and its exact
+output files, so any filename in \texttt{reports/} is searchable here.
 
-\paragraph{Structure predictions (\texttt{reports/fold/}).}
-If ColabFold ran, this folder holds the predicted 3-D structure of each
-cluster's consensus ORF: \texttt{*.pdb} (open in PyMOL, ChimeraX, or
-\url{https://molstar.org/viewer}), \texttt{*\_plddt.png} (per-residue
-confidence; $>70$ reliable, $>90$ high), and \texttt{*\_pae.png}
-(predicted aligned error; blue blocks = confident domains).
+% ----- 1. phylo -----
+\paragraph{1. Phylogenetics \& divergence-age (\texttt{phylo}).}
+Builds a tree, estimates each copy's age from sequence divergence (a
+molecular clock), and flags the youngest intact ``master'' copies.
+\textbf{Files:} \texttt{fig\_phylo\_tree.pdf} (neighbour-joining tree),
+\texttt{fig\_phylo\_divergence.pdf} (divergence distribution),
+\texttt{fig\_phylo\_master.pdf} (candidate source elements);
+\texttt{phylo\_per\_copy.csv} (per copy: divergence, estimated age in Myr,
+ORF-intact flag); \texttt{phylo\_report.txt}; \texttt{phylo\_measured\_values.tex}.
+\emph{Read:} low divergence = young/recently active; ``intact'' copies
+with the lowest divergence are the likely active source elements.
+
+% ----- 2. consensus_distance -----
+\paragraph{2. Consensus distance (\texttt{consensus\_distance}).}
+Measures how far each copy has drifted from its cluster consensus and from
+the global family consensus (CIAlign-cleaned, Kimura-2P distance).
+\textbf{Files:} \texttt{fig\_cluster\_consensus\_distance.pdf},
+\texttt{fig\_global\_consensus\_distance.pdf};
+\texttt{consensus\_distance\_per\_copy.csv} (columns
+\texttt{TE\_ID, cluster, dist\_cluster, dist\_global}).
+\emph{Read:} small distances = copies that closely match the prototype;
+long tails = degraded or divergent copies.
+
+% ----- 3. grna -----
+\paragraph{3. CRISPR gRNA off-target scoring (\texttt{grna}).}
+Scores candidate guide RNAs against the \emph{whole} copy landscape ---
+the real specificity problem for repeats.
+\textbf{Files:} \texttt{fig\_grna\_offtarget\_pareto.pdf}
+(coverage-vs-specificity frontier), \texttt{fig\_grna\_offtarget\_top.pdf},
+\texttt{fig\_grna\_offtarget\_mm.pdf} (mismatch tolerance);
+\texttt{grna\_offtarget\_guides.csv} (columns \texttt{guide, coverage,
+offtarget, cov\_pct, on\_target, specificity, pareto});
+\texttt{grna\_offtarget\_report.txt}; \texttt{grna\_offtarget\_measured\_values.tex}.
+\emph{Read:} pick guides on the Pareto frontier (\texttt{pareto=True}) ---
+high \texttt{coverage}, low \texttt{offtarget}.
+
+% ----- 4. transduction -----
+\paragraph{4. 3$'$ transduction (\texttt{transduction}).}
+Detects copies that carried flanking 3$'$ sequence with them when they
+mobilised, and groups them into mobilisation lineages.
+\textbf{Files:} \texttt{fig\_transduction\_groups.pdf} (shared-tail
+lineages), \texttt{fig\_transduction\_polya.pdf} (poly-A signal);
+\texttt{transduction\_per\_copy.csv} (per copy: transduced-tail group,
+poly-A presence); \texttt{transduction\_report.txt};
+\texttt{transduction\_measured\_values.tex}.
+\emph{Read:} copies sharing a transduced tail descend from the same active
+source copy.
+
+% ----- 5. antisense -----
+\paragraph{5. Antisense / bidirectional promoter (\texttt{antisense}).}
+Scans both strands for promoter motifs and (with expression data) measures
+antisense:sense activity.
+\textbf{Files:} \texttt{fig\_antisense\_motifs.pdf},
+\texttt{fig\_antisense\_expr.pdf};
+\texttt{antisense\_per\_copy.csv} (columns include
+\texttt{sense\_promoter\_motifs, antisense\_promoter\_motifs, cpg\_ratio,
+bidirectionality}); \texttt{antisense\_report.txt};
+\texttt{antisense\_measured\_values.tex}.
+\emph{Read:} high \texttt{bidirectionality} marks copies that can drive
+transcription into neighbouring genes on either strand.
+
+% ----- 6. ctcf_tad -----
+\paragraph{6. CTCF / TAD boundaries (\texttt{ctcf\_tad}).}
+Scans for CTCF binding motifs and measures each copy's distance to the
+nearest TAD (topological domain) boundary.
+\textbf{Files:} \texttt{fig\_ctcf\_overlap.pdf} (CTCF peak overlap),
+\texttt{fig\_ctcf\_tad\_distance.pdf};
+\texttt{ctcf\_tad\_per\_copy.csv} (per copy: CTCF motif count, ChIP-peak
+overlap, distance to TAD boundary); \texttt{ctcf\_tad\_report.txt};
+\texttt{ctcf\_tad\_measured\_values.tex}.
+\emph{Read:} copies at TAD boundaries with CTCF sites are candidates for
+re-shaping genome architecture.
+
+% ----- 7. epigenetic -----
+\paragraph{7. Epigenetic overlay (\texttt{epigenetic}).}
+Annotates each copy with ENCODE/Roadmap chromatin tracks (H3K9me3, ATAC,
+CpG, etc.) for the chosen cell line.
+\textbf{Files:} \texttt{fig\_epigenetic\_overlap.pdf},
+\texttt{fig\_epigenetic\_heatmap.pdf} (copies $\times$ marks);
+\texttt{epigenetic\_per\_copy.csv} (per copy: signal per track);
+\texttt{epigenetic\_report.txt}; \texttt{epigenetic\_measured\_values.tex}.
+\emph{Read:} H3K9me3 = silenced/repressed; ATAC/open chromatin =
+potentially active.
+
+% ----- 8. ortholog -----
+\paragraph{8. Orthologous insertion presence (\texttt{ortholog}).}
+Uses liftOver to test which copies are present at the same locus in other
+species (shared = ancestral; absent = lineage-specific).
+\textbf{Files:} \texttt{fig\_ortholog\_presence.pdf} (copies $\times$
+species matrix), \texttt{fig\_ortholog\_summary.pdf};
+\texttt{ortholog\_per\_copy.csv} (per copy: present/absent per species);
+\texttt{ortholog\_report.txt}; \texttt{ortholog\_measured\_values.tex}.
+\emph{Read:} a copy present across many species predates their common
+ancestor; species-specific copies inserted more recently.
+
+% ----- 9. multiassembly -----
+\paragraph{9. Multi-assembly liftover (\texttt{multiassembly}).}
+Maps the family between assemblies (e.g.\ hg38 $\leftrightarrow$ T2T-CHM13)
+to find copies one assembly resolves and another misses.
+\textbf{Files:} \texttt{fig\_multiassembly\_mapping.pdf},
+\texttt{fig\_multiassembly\_coords.pdf};
+\texttt{multiassembly\_per\_copy.csv} (per copy: mapped coordinates in each
+target assembly); \texttt{multiassembly\_report.txt};
+\texttt{multiassembly\_measured\_values.tex}.
+\emph{Read:} copies that map only in T2T-CHM13 sit in pericentromeric/
+heterochromatic regions hg38 leaves collapsed.
+
+% ----- 10. fold -----
+\paragraph{10. Consensus ORF structure prediction (\texttt{fold}).}
+Folds the longest ORF of each cluster consensus with ColabFold (AlphaFold2).
+\textbf{Files:} \texttt{fig\_fold\_orf\_map.pdf} (ORF positions),
+\texttt{fig\_fold\_plddt.pdf} (confidence per ORF),
+\texttt{fig\_fold\_summary.pdf}; \texttt{fold\_report.txt};
+\texttt{fold\_measured\_values.tex}; and the \texttt{reports/fold/}
+sub-folder with the raw ColabFold output: \texttt{orfs.fa} (the protein
+sequences folded), one \texttt{*.pdb} per ORF (the 3-D structure --- open
+in PyMOL, ChimeraX, or \url{https://molstar.org/viewer}),
+\texttt{*\_plddt.png} (per-residue confidence; $>70$ reliable, $>90$
+high), and \texttt{*\_pae.png} (predicted aligned error; blue blocks =
+confidently-positioned domains).
+\emph{Read:} a high-pLDDT structure means the consensus encodes a real,
+foldable protein domain --- evidence the element was protein-coding.
+
+% ----- 11. divergence -----
+\paragraph{11. Divergence landscape (\texttt{divergence}).}
+Builds the classic ``repeat landscape'' --- a histogram of copies by
+sequence divergence, the standard view of a family's age structure.
+\textbf{Files:} \texttt{fig\_repeat\_landscape.pdf} (and \texttt{.png}),
+\texttt{fig\_repeat\_landscape\_per\_cluster.png};
+\texttt{divergence\_per\_locus.csv} (per copy: \% divergence from
+consensus), \texttt{divergence\_stats.csv} (summary statistics);
+\texttt{repeat\_landscape\_values.tex}.
+\emph{Read:} a peak at low divergence = a recent burst of activity; a broad
+spread = sustained or ancient activity.
+
+% ----- 12. ltr_struct -----
+\paragraph{12. LTR structural classification (\texttt{ltr\_struct}).}
+For LTR/ERV families, classifies each copy as full-length, solo-LTR, or
+truncated, and detects PBS/PPT replication motifs.
+\textbf{Files:} \texttt{fig\_ltr\_struct.png};
+\texttt{ltr\_struct\_annotated.csv} (per copy: structure class, PBS/PPT,
+LTR identity), \texttt{ltr\_struct\_summary.csv} (counts of
+\texttt{n\_full\_length, n\_solo\_ltr, n\_truncated, n\_pbs, n\_ppt,
+mean\_ltr\_identity}); \texttt{ltr\_struct\_values.tex}.
+\emph{Read:} a high solo-LTR fraction indicates old elements that have
+recombined away their internal sequence. (Reports N/A for non-LTR
+families such as satellites.)
+
+% ----- 13. subfamily -----
+\paragraph{13. Subfamily resolution (\texttt{subfamily}).}
+Resolves finer subfamily structure within the family and builds a
+subfamily tree.
+\textbf{Files:} \texttt{fig\_subfamily\_tree.png},
+\texttt{fig\_subfamily\_divergence.png};
+\texttt{subfamily\_table.csv} (subfamily assignments + stats),
+\texttt{subfamily\_tree.nwk} (Newick tree --- open in FigTree or iTOL);
+\texttt{subfamily\_values.tex}.
+\emph{Read:} branch lengths show how diverged the subfamilies are from one
+another.
+
+% ----- 14. benchmark -----
+\paragraph{14. Benchmarking (\texttt{benchmark}).}
+Records the pipeline's per-stage runtime and scope for this family.
+\textbf{Files:} \texttt{fig\_benchmark\_steps.png} (per-stage timing);
+\texttt{benchmark\_table.csv} (stage, seconds);
+\texttt{benchmark\_values.tex}.
+\emph{Read:} use it to see which stages dominate runtime when planning
+larger jobs.
+
+% ----- 15. motif_gain -----
+\paragraph{15. Motif gain/loss (\texttt{motif\_gain}).}
+Identifies transcription-factor motifs each copy has \emph{gained} or
+\emph{lost} relative to the family consensus --- regulatory innovation.
+\textbf{Files:} \texttt{fig\_motif\_gains\_bar.png},
+\texttt{fig\_motif\_gains\_heatmap.png};
+\texttt{motif\_gain\_per\_copy.csv} (per copy: motifs gained/lost),
+\texttt{motif\_gain\_summary.csv} (most frequently gained motifs);
+\texttt{motif\_gain\_values.tex}.
+\emph{Read:} a motif gained by many copies of one cluster points to
+cluster-specific regulatory rewiring.
+
+% ----- 16. expression -----
+\paragraph{16. Expression \& differential expression (\texttt{expression}).}
+Runs only when an expression matrix is present. \textbf{Writes to a
+separate \texttt{expression\_plots/} folder} at the family root (not
+\texttt{reports/}). \textbf{Files:} \texttt{boxplot\_all.png},
+\texttt{stage\_profile.png}, \texttt{peak\_stage\_summary.png}/\texttt{.csv}
+(when each copy peaks), \texttt{chromosomal\_expression.png}/\texttt{.csv}
+and \texttt{chromosomal\_heatmap.png} (expression by location),
+\texttt{expression\_stats.csv} (per-copy summary statistics),
+\texttt{primer\_expression.png}/\texttt{.csv} and
+\texttt{primer\_expression\_heatmap.png} (expression of primer-targeted
+copies), and the differential-expression-between-clusters set:
+\texttt{de\_volcano.png}, \texttt{de\_pairwise.csv} (all pairwise tests),
+\texttt{de\_significant.csv} (significant hits), \texttt{de\_heatmap.png},
+and \texttt{de\_values.tex}.
+\emph{Read:} \texttt{de\_significant.csv} answers ``which subfamily is
+differentially expressed, and at which stage'' --- the headline biological
+result when expression is available.
 
 % ---------------------------------------------------------------------------
-\subsection{Following a job and the dashboard}
+\subsection{The compiled PDF report}
 
-\texttt{07\_visualizations/index.html} is a dashboard linking every
-figure produced. \texttt{bsub\_main.out} / \texttt{bsub\_fold.out} are the
-live cluster logs, and \texttt{reports/standout\_analysis.log} records
-each Stage~11 step with timings --- check it first if a figure is missing:
+\texttt{reports/standout\_analysis.log} records each Stage~11 step with
+its exit code and timing --- check it first if a figure is missing:
 
 \begin{lstlisting}
 [phylo]      ... ok (612s)
@@ -527,12 +806,62 @@ each Stage~11 step with timings --- check it first if a figure is missing:
 \end{lstlisting}
 
 \medskip
-\noindent To compile the auto-generated PDF report stitching every figure
-and number together:
+\noindent Every figure and measured number can be stitched into a single
+publication-style PDF. From the output folder:
 
 \begin{lstlisting}
 tectonic gameca_report.tex   # or: pdflatex gameca_report.tex
 \end{lstlisting}
+
+% ---------------------------------------------------------------------------
+\subsection{Logs, caches, and intermediate files}
+
+The remaining files are not results, but knowing what they are tells you
+where to look when something goes wrong --- and which files you can safely
+delete to reclaim space.
+
+\begin{tabular}{@{}lp{0.56\linewidth}@{}}
+\toprule
+File / folder & Purpose \\
+\midrule
+\texttt{pipeline\_diagnostic.log}
+  & Timestamped record of every stage as it ran. \textbf{The first place
+    to look} if a run ended early or a folder is missing. \\[4pt]
+\texttt{pipeline\_errors.log}
+  & Errors only; \textbf{empty on a clean run}. A non-empty file points
+    straight at what failed. \\[4pt]
+\texttt{reports/standout\_analysis.log}
+  & Per-module Stage~11 log with exit codes and timings (see
+    \S\ref{sec:stage11}). \\[4pt]
+\texttt{bsub\_main.out / bsub\_fold.out}
+  & Live stdout of the cluster jobs --- \texttt{tail -f} either to watch a
+    running job. \\[4pt]
+\texttt{motif\_analysis/te\_loci.bed}, \texttt{te\_loci\_tmp.bed}
+  & The TE coordinates in BED form, used internally for the JASPAR motif
+    intersection. Intermediate. \\[4pt]
+\texttt{motif\_analysis/jaspar\_indexed/}, \texttt{jaspar/}
+  & Cached, indexed JASPAR motif database --- kept so re-runs skip the
+    download. Safe to delete; it is rebuilt on demand. \\[4pt]
+\texttt{tmp\_motif/}
+  & Scratch space for motif scanning (e.g.\ \texttt{jaspar\_norm6.bed}).
+    Safe to delete after a run. \\[4pt]
+\texttt{motif\_analysis/README.txt}, \texttt{05\_tfbs/README.txt}
+  & Auto-written notes describing those folders' contents. \\[4pt]
+\texttt{go\_annotations/go\_plot\_status.txt}
+  & Records whether GO plots were generated. \\[4pt]
+\texttt{*\_measured\_values.tex}
+  & \LaTeX\ macros consumed by \texttt{gameca\_report.tex}; ignore unless
+    compiling the paper. \\
+\bottomrule
+\end{tabular}
+
+\paragraph{Status / failure markers.}
+A few zero-byte-style marker files appear \emph{only} when a stage is
+skipped or fails, and explain why in one line:
+\texttt{GO\_SKIPPED.txt} (no motifs passed the enrichment threshold) and
+\texttt{MOTIF\_ANALYSIS\_FAILED.txt} (JASPAR data could not be fetched ---
+usually a network/proxy issue). If you see one of these, the matching
+result folder will be empty by design.
 
 % ===========================================================================
 \section{Updates}
