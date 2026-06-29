@@ -2180,6 +2180,7 @@ def _run_standout_analysis(args, out_dir, dirs, family_name, stage_times):
         _sdir = Path(__file__).resolve().parent
     _py = shutil.which("python3") or shutil.which("python") or sys.executable
     cons_fa = out_dir / "cluster_alignments" / "all_cluster_consensuses.fa"
+    cleaned_cons_fa = out_dir / "cleaned_consensus" / "all_clusters_cleaned_consensus.fa"
 
     _assembly_arg = getattr(args, "assembly", "hg38") or "hg38"
 
@@ -2238,7 +2239,8 @@ def _run_standout_analysis(args, out_dir, dirs, family_name, stage_times):
         ("fold",          "run_fold_prediction.py",
          ["--per-cluster", "--min-aa", "100", "--top-n", "5"]
          + _opt("--colabfold-cmd", _colabfold_cmd)
-         + (["--consensus-fasta", str(cons_fa)] if cons_fa.exists() else [])),
+         + (["--consensus-fasta", str(cleaned_cons_fa)] if cleaned_cons_fa.exists()
+            else ["--consensus-fasta", str(cons_fa)] if cons_fa.exists() else [])),
         ("divergence",    "run_divergence.py",
          ["--assembly", _assembly_arg]
          + _opt("--cpg-omega", _cpg_omega)
@@ -2364,6 +2366,79 @@ def run_pipeline(args):
 
     if args.validate_existing:
         validate_existing_outputs(OUT_DIR, FAMILY_NAME)
+
+    if args.resume_from == "alignment":
+        # Load df_family from the already-clustered CSV then run stage 7 onwards.
+        clustered_csv = DIRS["data"] / f"{FAMILY_NAME.lower()}_clustered.csv"
+        if not clustered_csv.exists():
+            candidates = sorted(Path(OUT_DIR).glob("**/*_clustered.csv"))
+            if candidates:
+                clustered_csv = candidates[0]
+        if not clustered_csv.exists():
+            print(f"ERROR: no clustered CSV found under {OUT_DIR}; cannot resume alignment")
+            sys.exit(1)
+        import pandas as _pd_resume
+        df_family = _pd_resume.read_csv(clustered_csv, low_memory=False)
+        _diag(f"  Loaded df_family from {clustered_csv} ({len(df_family)} rows)")
+        genome_cache = type('_NullCache', (), {'is_loaded': False})()
+        t0 = time.time()
+        _diag("STAGE 7: Alignment (resume)")
+        print("\n=== ALIGNMENT ===")
+        try:
+            run_alignment_pipeline(df_family, OUT_DIR, FAMILY_NAME)
+            _diag("  Alignment OK")
+        except Exception as e:
+            _diag(f"  Alignment FAILED: {type(e).__name__}: {e}\n{traceback.format_exc()}")
+            log_error("ALIGNMENT", e)
+        _checkpoint(OUT_DIR, "stage7_alignment")
+
+        if not args.skip_motif:
+            _diag("STAGE 9: Motif / TFBS / GO (resume)")
+            print("\n=== MOTIF / TFBS / GO ===")
+            try:
+                run_motif_stage_full(args, OUT_DIR, DIRS, FAMILY_NAME,
+                                     clustered_csv=str(clustered_csv))
+                _diag("  Motif stage OK")
+            except SystemExit as e:
+                if e.code not in (0, None):
+                    sys.exit(e.code or 1)
+            except Exception as e:
+                _diag(f"  Motif FAILED: {type(e).__name__}: {e}\n{traceback.format_exc()}")
+                log_error("MOTIF / TFBS / GO", e)
+            _checkpoint(OUT_DIR, "stage9_motif")
+
+        if not args.skip_primers:
+            _diag("STAGE 10: Primers (resume)")
+            print("\n=== PRIMER DESIGN ===")
+            try:
+                design_primers(
+                    df_family,
+                    primer_k=args.primer_kmer,
+                    top_global=args.top_global,
+                    top_cluster=args.top_cluster,
+                    genome_fa=None,
+                    genome_cache=None,
+                    primer_timeout=args.primer_timeout,
+                    out_dir=DIRS["primers"],
+                    family_name=FAMILY_NAME,
+                )
+                _diag("  Primers OK")
+            except Exception as e:
+                _diag(f"  Primers FAILED: {type(e).__name__}: {e}\n{traceback.format_exc()}")
+                log_error("PRIMER DESIGN", e)
+            _checkpoint(OUT_DIR, "stage10_primers")
+
+        _diag("STAGE 11: Standout analysis (resume)")
+        _stage_times_r = {}
+        try:
+            _run_standout_analysis(args, OUT_DIR, DIRS, FAMILY_NAME, _stage_times_r)
+        except SystemExit:
+            raise
+        except Exception as e:
+            _diag(f"  Standout FAILED: {type(e).__name__}: {e}\n{traceback.format_exc()}")
+            log_error("STANDOUT", e)
+        print(f"\nResume run complete (alignment + stages 9-11).")
+        return None
 
     if args.resume_from in {"motif", "tfbs", "go"}:
         try:

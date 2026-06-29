@@ -56,10 +56,51 @@ def check_cialign():
         return False
 
 
-def run_mafft(input_fasta, output_fasta, threads=-1):
-    """Run MAFFT --auto alignment. Returns True on success."""
-    cmd = f"mafft --auto --thread {threads} {input_fasta} > {output_fasta}"
-    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+def _count_fasta_seqs(fasta_path):
+    """Count '>' header lines in a FASTA file."""
+    n = 0
+    try:
+        with open(fasta_path) as f:
+            for line in f:
+                if line.startswith('>'):
+                    n += 1
+    except Exception:
+        pass
+    return n
+
+
+def run_mafft(input_fasta, output_fasta, threads=-1, timeout=14400):
+    """Run MAFFT alignment. Skips if output already exists and is non-empty.
+    Selects --parttree / --retree / --auto based on sequence count.
+    Returns True on success."""
+    input_fasta = Path(input_fasta)
+    output_fasta = Path(output_fasta)
+
+    # Skip if output already exists with content
+    if output_fasta.exists() and output_fasta.stat().st_size > 0:
+        _pp(f"  MAFFT: {output_fasta.name} already exists — skipping")
+        return True
+
+    n_seqs = _count_fasta_seqs(input_fasta)
+    if n_seqs > 50000:
+        mode = "--parttree"
+        _pp(f"  MAFFT parttree mode ({n_seqs:,} seqs, timeout={timeout}s)")
+    elif n_seqs > 10000:
+        mode = "--retree 2 --maxiterate 0"
+        _pp(f"  MAFFT fast mode ({n_seqs:,} seqs, timeout={timeout}s)")
+    else:
+        mode = "--auto"
+        _pp(f"  MAFFT auto mode ({n_seqs:,} seqs, timeout={timeout}s)")
+
+    cmd = f"mafft {mode} --thread {threads} {input_fasta} > {output_fasta}"
+    try:
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+                                timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _pp(f"  MAFFT TIMEOUT after {timeout}s for {input_fasta.name} — skipping alignment")
+        if output_fasta.exists():
+            output_fasta.unlink()
+        return False
     if result.returncode != 0:
         _pp(f"  MAFFT failed: {result.stderr[:300]}")
         return False
@@ -139,12 +180,51 @@ def alignment_stats(aligned_fasta):
 
 # ── CIAlign helper ──────────────────────────────────────────────────────────
 
-def run_cialign(input_fasta, output_stem, label=""):
-    """Run CIAlign cleaning + plotting on *input_fasta*."""
+MAX_CIALIGN_SEQS = 25000   # subsample alignment to this many seqs before CIAlign
+CIALIGN_TIMEOUT  = 3600    # seconds; CIAlign hangs forever on huge inputs otherwise
+
+
+def _subsample_fasta(input_fasta, output_fasta, max_seqs):
+    """Write every Nth record of input_fasta so output has at most max_seqs seqs."""
+    records = []
+    buf = []
+    with open(input_fasta) as f:
+        for line in f:
+            if line.startswith('>') and buf:
+                records.append(''.join(buf))
+                buf = []
+            buf.append(line)
+    if buf:
+        records.append(''.join(buf))
+
+    if len(records) <= max_seqs:
+        return input_fasta   # no subsampling needed
+
+    step = len(records) // max_seqs
+    sampled = records[::step][:max_seqs]
+    with open(output_fasta, 'w') as f:
+        for rec in sampled:
+            f.write(rec)
+    _pp(f"    CIAlign: subsampled {len(records):,} → {len(sampled):,} seqs for plotting")
+    return output_fasta
+
+
+def run_cialign(input_fasta, output_stem, label="", timeout=CIALIGN_TIMEOUT):
+    """Run CIAlign cleaning + plotting on *input_fasta*.
+    Subsamples automatically if the alignment is larger than MAX_CIALIGN_SEQS."""
     import os
+    input_fasta = Path(input_fasta)
+    output_stem = Path(output_stem)
+
+    n_seqs = _count_fasta_seqs(input_fasta)
+    run_fasta = input_fasta
+    if n_seqs > MAX_CIALIGN_SEQS:
+        subsample_fa = output_stem.parent / (output_stem.name + '_cialign_input.fa')
+        run_fasta = Path(_subsample_fasta(input_fasta, subsample_fa, MAX_CIALIGN_SEQS))
+
     cmd = [
         "CIAlign",
-        "--infile",       str(input_fasta),
+        "--infile",       str(run_fasta),
         "--outfile_stem", str(output_stem),
         "--remove_insertions",
         "--remove_divergent",
@@ -153,13 +233,17 @@ def run_cialign(input_fasta, output_stem, label=""):
         "--plot_output",
         "--plot_markup",
     ]
-    result = subprocess.run(
-        cmd, capture_output=True, text=True,
-        env={**os.environ, "MPLBACKEND": "Agg"}
-    )
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout,
+            env={**os.environ, "MPLBACKEND": "Agg"}
+        )
+    except subprocess.TimeoutExpired:
+        _pp(f"    CIAlign TIMEOUT after {timeout}s for {label} — skipping plots")
+        return False
     if result.returncode == 0:
-        pngs = list(Path(output_stem).parent.glob(f"{Path(output_stem).name}*.png"))
-        _pp(f"    CIAlign {label}: {len(pngs)} plots")
+        pngs = list(output_stem.parent.glob(f"{output_stem.name}*.png"))
+        _pp(f"    CIAlign {label}: {len(pngs)} plots ({n_seqs:,} seqs)")
         return True
     else:
         _pp(f"    CIAlign failed for {label}: {result.stderr[:200]}")
