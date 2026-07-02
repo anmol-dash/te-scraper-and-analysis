@@ -9,10 +9,10 @@ FROM python:3.11-slim-bookworm
 # glibc is irrelevant — that is the whole point of wrapping the pipeline.
 #
 # Build the .sif from this image (see build_sif.sh):
-#   docker build -t gameca:latest .
-#   docker push <registry>/gameca:latest
+#   docker build -t ghcr.io/anmol-dash/gameca:latest .
+#   docker push ghcr.io/anmol-dash/gameca:latest
 #   # on the cluster (no root needed):
-#   singularity build gameca.sif docker://<registry>/gameca:latest
+#   singularity build gameca.sif docker://ghcr.io/anmol-dash/gameca:latest
 #
 # NOTE: ColabFold fold prediction is intentionally NOT in this image — it needs
 # a CUDA base and runs from the separate colabfold.sif (see colabfold.def).
@@ -29,11 +29,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # System toolchain + bioinformatics binaries the pipeline shells out to
 # (mafft, bedtools, liftOver, bigBedToBed/bigWigToBedGraph for JASPAR bigBed).
+# default-jre-headless + curl are here so the baked-in Nextflow (installed below)
+# can run — needed when query.py --stage11-nextflow orchestrates the
+# post-alignment analyses from *inside* the container.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         bedtools \
         build-essential \
         ca-certificates \
+        curl \
+        default-jre-headless \
         gcc \
         git \
         libbz2-dev \
@@ -51,6 +56,16 @@ RUN apt-get update \
            -O "/usr/local/bin/$_b" && chmod +x "/usr/local/bin/$_b" \
            || echo "WARNING: $_b download failed; stages that use it degrade gracefully"; \
        done
+
+# Nextflow — GAMECA's orchestration layer (see nextflow/). Baked in so the image
+# can BOTH be the per-process container for an external `nextflow run` AND run the
+# pipeline itself (query.py --stage11-nextflow) when exec'd standalone on HPC.
+ENV NXF_HOME=/opt/gameca/.nextflow \
+    NXF_OFFLINE=false
+RUN curl -s https://get.nextflow.io | bash \
+    && mv nextflow /usr/local/bin/nextflow \
+    && chmod +x /usr/local/bin/nextflow \
+    && nextflow -version
 
 WORKDIR /opt/gameca/code
 

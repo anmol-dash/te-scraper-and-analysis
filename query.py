@@ -206,6 +206,14 @@ def parse_args(argv=None):
     p.add_argument("--skip-standout", action="store_true",
                    help="Skip Stage 11 standout analysis modules "
                         "(phylo, gRNA, fold, overlays)")
+    p.add_argument("--post-alignment-analyses-nextflow", action="store_true",
+                   help="Run the post-alignment analyses modules concurrently via "
+                        "Nextflow (nextflow/post_alignment_analyses.nf) instead of the "
+                        "sequential in-process loop; falls back to the loop if "
+                        "nextflow is unavailable")
+    p.add_argument("--nextflow-profile", type=str, default=None,
+                   help="Nextflow -profile to use when --post-alignment-analyses-nextflow "
+                        "is set (e.g. 'lsf,singularity')")
     p.add_argument("--skip-motif",    action="store_true",
                    help="Skip JASPAR motif / TF binding analysis")
     p.add_argument("--skip-go",       action="store_true",
@@ -2144,6 +2152,51 @@ def run_motif_tfbs_go(args, out_dir, dirs, family_name, run_motif=True, run_tfbs
 # STAGE 11 HELPER (also called standalone via --resume-from standout)
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _run_standout_analysis_nextflow(args, out_dir, family_name):
+    """Delegate the post-alignment analyses to the Nextflow pipeline
+    (nextflow/post_alignment_analyses.nf).
+
+    Runs the standout modules concurrently under Nextflow (real per-module
+    parallelism + resume + per-process LSF resources) against the already-built
+    family folder. Returns True on success, False if Nextflow is unavailable or
+    the run failed (caller then falls back to the in-process loop).
+    """
+    nf = shutil.which("nextflow")
+    if not nf:
+        _diag("  STAGE 11: nextflow not on PATH")
+        return False
+
+    if hasattr(sys, "_MEIPASS"):
+        script_dir = Path(sys._MEIPASS)
+    else:
+        script_dir = Path(__file__).resolve().parent
+    paa_nf = script_dir / "nextflow" / "post_alignment_analyses.nf"
+    if not paa_nf.exists():
+        _diag(f"  STAGE 11: {paa_nf} not found")
+        return False
+
+    assembly = getattr(args, "assembly", "hg38") or "hg38"
+    profile  = getattr(args, "nextflow_profile", None)
+    cmd = [nf, "run", str(paa_nf),
+           "--results",  str(out_dir),
+           "--family",   family_name,
+           "--assembly", assembly,
+           "--gameca_home", str(script_dir),
+           "-resume"]
+    if profile:
+        cmd += ["-profile", profile]
+
+    _diag(f"  STAGE 11 (nextflow): {' '.join(cmd)}")
+    print(f"  Handing post-alignment analyses to Nextflow: {paa_nf.name}")
+    rc = subprocess.run(cmd, cwd=str(script_dir)).returncode
+    if rc == 0:
+        print("  Post-alignment analyses (Nextflow) complete.")
+        return True
+    _diag(f"  STAGE 11 (nextflow): FAILED rc={rc}")
+    print(f"  WARNING: Nextflow Stage 11 failed (rc={rc}).")
+    return False
+
+
 def _run_standout_analysis(args, out_dir, dirs, family_name, stage_times):
     """Run all Stage 11 standout analysis modules.
 
@@ -2173,6 +2226,18 @@ def _run_standout_analysis(args, out_dir, dirs, family_name, stage_times):
         _checkpoint(out_dir, "stage11_standout")
         stage_times["Standout analysis"] = time.time() - t0
         return
+
+    # ── Optional: hand the post-alignment analyses to Nextflow ───────────────
+    # With --post-alignment-analyses-nextflow, run the 15 standout modules
+    # concurrently via the Nextflow pipeline (nextflow/post_alignment_analyses.nf)
+    # instead of the sequential loop below. Falls back to the in-process loop if
+    # Nextflow isn't available.
+    if getattr(args, "post_alignment_analyses_nextflow", False):
+        if _run_standout_analysis_nextflow(args, out_dir, family_name):
+            _checkpoint(out_dir, "stage11_standout")
+            stage_times["Standout analysis"] = time.time() - t0
+            return
+        _diag("  STAGE 11: Nextflow path unavailable — using in-process loop")
 
     if hasattr(sys, '_MEIPASS'):
         _sdir = Path(sys._MEIPASS)

@@ -1,0 +1,27 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema",
+    "title": "GAMECA samplesheet",
+    "description": "One TE family per row",
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "family": {
+                "type": "string",
+                "pattern": "^\\S+$",
+                "errorMessage": "family (TE repName) is required and cannot contain spaces"
+            },
+            "assembly": {
+                "type": "string",
+                "pattern": "^\\S*$",
+                "errorMessage": "assembly must be a single token, e.g. hg38 or mm10"
+            },
+            "input": {
+                "type": "string",
+                "format": "file-path",
+                "errorMessage": "input must be a path to an existing loci CSV (or blank)"
+            }
+        },
+        "required": ["family"]
+    }
+}
