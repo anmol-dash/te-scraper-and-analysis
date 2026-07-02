@@ -17,3 +17,27 @@ collab_rna/
 
 # Large local notes/artifacts.
 directory_struct.txt
+
+# Desktop app / JS toolchain — never needed inside the analysis container.
+node_modules/
+frontend/
+src-tauri/
+build/
+*.dmg
+*.icns
+background.*
+
+# Large local data that must be bind-mounted at runtime, not baked into the image
+# (genomes, caches, per-family working dirs, pre-generated results).
+*.fa
+*.fa.gz
+*.fasta
+*.2bit
+*.genome_cache.pkl
+*.npy
+alusx1/
+iapltr1a_mm/
+l1md_gf/
+mt2_mm/
+clusters5.csv
+*.dmg.blockmap

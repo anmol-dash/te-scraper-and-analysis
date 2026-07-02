@@ -110,6 +110,14 @@ class HPCClient:
             "QUEUE": "normal",       # LSF queue / Slurm partition
             # Optional module loads (space-separated, e.g. "python/3.11 gcc/12")
             "MODULES": "",
+            # Singularity/Apptainer container mode. When CONTAINER_SIF is set to an
+            # absolute path of gameca.sif on the cluster, jobs run every `python`
+            # call through `singularity exec <binds> gameca.sif python ...` instead
+            # of building a venv — no glibc/import issues, nothing to pip-install.
+            "CONTAINER_SIF": "",
+            # Extra bind mounts, space-separated "src:dst" (or "src") entries. The
+            # work dir, output dir and genome dir are bound automatically.
+            "CONTAINER_BINDS": "",
             # Skip flags
             "SKIP_JASPAR": 0,
             "SKIP_PRIMERS": 0,
@@ -668,8 +676,68 @@ fi
         lines = "\n".join(f"module load {m}" for m in mods.split())
         return lines
 
+    def _container_sif(self):
+        """Return the configured gameca.sif path, or '' if container mode is off."""
+        return str(self.params.get("CONTAINER_SIF", "") or "").strip()
+
+    def _container_setup_block(self):
+        """Return a shell block that makes every subsequent `python` call run
+        inside gameca.sif via `singularity exec`.
+
+        Rather than patch the four job-script templates, we define a bash function
+        named `python` (and `python3`) that wraps `singularity exec <binds> sif
+        python "$@"`. Existing `python -u query.py ...` call sites then transparently
+        execute inside the container — where mafft/bedtools/liftOver and every
+        Python dep already live, so no venv, pip, or module loads are needed.
+        """
+        sif = self._container_sif()
+        # Auto-bind work dir, output dir and (parent of) the genome FASTA, plus any
+        # user-supplied extras. Bind "src:src" so absolute paths match inside/out.
+        bind_srcs = []
+        for p in (self.remote_work_dir, self.remote_output_dir):
+            if p:
+                bind_srcs.append(str(p))
+        genome = str(self.params.get("LOCAL_ASSEMBLY_PATH", "") or "").strip()
+        if genome:
+            bind_srcs.append(str(Path(genome).parent))
+        for extra in str(self.params.get("CONTAINER_BINDS", "") or "").split():
+            bind_srcs.append(extra)
+        # De-dup while preserving order; format each as a -B argument.
+        seen, binds = set(), []
+        for b in bind_srcs:
+            if b and b not in seen:
+                seen.add(b)
+                binds.append(f"-B {shlex.quote(b if ':' in b else f'{b}:{b}')}")
+        binds_str = " ".join(binds)
+        pwd_dir = self.remote_work_dir or "."
+        return f'''# ── Container (Singularity/Apptainer) mode ──────────────────────────────────
+# CONTAINER_SIF is set: run all Python through gameca.sif — no venv/pip/modules.
+GAMECA_SIF={shlex.quote(sif)}
+GAMECA_RT="$(command -v singularity 2>/dev/null || command -v apptainer 2>/dev/null || echo singularity)"
+GAMECA_BINDS="{binds_str}"
+if [ ! -f "$GAMECA_SIF" ]; then
+    echo "[GAMECA] FATAL: CONTAINER_SIF not found: $GAMECA_SIF" >&2
+    exit 1
+fi
+echo "[GAMECA] Container mode: $GAMECA_RT exec $GAMECA_SIF"
+echo "[GAMECA] Binds: $GAMECA_BINDS"
+# Route bare `python`/`python3` into the image. --pwd keeps the working dir; the
+# bind-mounted work dir means the repo's own code is used (bake default, override).
+python()  {{ "$GAMECA_RT" exec $GAMECA_BINDS --pwd {shlex.quote(pwd_dir)} "$GAMECA_SIF" python "$@"; }}
+python3() {{ python "$@"; }}
+export GAMECA_SIF GAMECA_RT GAMECA_BINDS
+export -f python python3
+echo "[GAMECA] Container python: $(python --version 2>&1)"
+'''.strip()
+
     def _venv_setup_block(self):
-        """Return robust virtualenv setup. Never exits — logs errors and continues."""
+        """Return robust virtualenv setup. Never exits — logs errors and continues.
+
+        In container mode (CONTAINER_SIF set) this is replaced by a block that
+        routes `python` through gameca.sif instead of building a venv.
+        """
+        if self._container_sif():
+            return self._container_setup_block()
         return f'''# ── Host diagnostics ────────────────────────────────────────────────────────
 echo "[GAMECA] build={_SCRIPT_BUILD}  host=$(hostname)  user=$(whoami)"
 echo "[GAMECA] SLURM_JOB_ID=${{SLURM_JOB_ID:-<unset>}}  LSB_JOBID=${{LSB_JOBID:-<unset>}}"
@@ -745,7 +813,12 @@ echo "[GAMECA] Python: $(python --version 2>&1)  Pip: $(python -m pip --version 
 '''
 
     def _mafft_setup_block(self):
-        """Return MAFFT setup that does not fail on broken conda installations."""
+        """Return MAFFT setup that does not fail on broken conda installations.
+
+        In container mode mafft is baked into gameca.sif, so host-side install is
+        unnecessary (and would run outside the image anyway)."""
+        if self._container_sif():
+            return "# MAFFT provided by gameca.sif (container mode) — no host install needed"
         return '''# Install MAFFT if not available
 if ! command -v mafft >/dev/null 2>&1; then
     if command -v conda >/dev/null 2>&1; then
@@ -1077,6 +1150,8 @@ fi
             "25": "JASPAR_TABIX_PATH",
             "27": "NOTIFY_EMAIL",
             "31": "SOURCE_DB",
+            "32": "CONTAINER_SIF",
+            "33": "CONTAINER_BINDS",
         }
         int_params = {
             "4": "K", "5": "PRIMER_K", "6": "TOP_N_GLOBAL",
@@ -1147,6 +1222,11 @@ fi
             print("    [28] SKIP_JASPAR: 1 = skip JASPAR motif/TFBS analysis")
             print("    [29] SKIP_PRIMERS: 1 = skip primer design")
             print("    [30] SKIP_GO: 1 = skip GO enrichment")
+            print("    [32] CONTAINER_SIF: absolute path to gameca.sif on the cluster. When set, jobs")
+            print("         run every python step inside the container (no venv/pip/glibc issues).")
+            print("         Build it with build_sif.sh (docker:// or --fakeroot).")
+            print("    [33] CONTAINER_BINDS: extra Singularity bind mounts, space-separated src[:dst]")
+            print("         (work dir, output dir and genome dir are bound automatically).")
             print()
             print("  [g]  Send a test email  (Resend via cluster — confirm notifications work)")
             print("  [p]  Preview family count")

@@ -1,16 +1,34 @@
 FROM python:3.11-slim-bookworm
 
+# GAMECA analysis container.
+#
+# This image is the SOURCE OF TRUTH for the Singularity/Apptainer .sif used on
+# HPC. The container ships its own glibc 2.36, so the manylinux_2_28 wheels that
+# fail to install on old-glibc login/compute nodes (pybigtools, MOODS-python,
+# colabfold, numba/llvmlite) install cleanly here. Once inside the .sif the host
+# glibc is irrelevant — that is the whole point of wrapping the pipeline.
+#
+# Build the .sif from this image (see build_sif.sh):
+#   docker build -t gameca:latest .
+#   docker push <registry>/gameca:latest
+#   # on the cluster (no root needed):
+#   singularity build gameca.sif docker://<registry>/gameca:latest
+#
+# NOTE: ColabFold fold prediction is intentionally NOT in this image — it needs
+# a CUDA base and runs from the separate colabfold.sif (see colabfold.def).
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     MPLBACKEND=Agg \
     MPLCONFIGDIR=/tmp/matplotlib \
     NUMBA_CACHE_DIR=/tmp/numba-cache \
+    GAMECA_HOME=/opt/gameca/code \
     GAMECA_HOST=0.0.0.0 \
     GAMECA_PORT=8765
 
-WORKDIR /app
-
+# System toolchain + bioinformatics binaries the pipeline shells out to
+# (mafft, bedtools, liftOver, bigBedToBed/bigWigToBedGraph for JASPAR bigBed).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         bedtools \
@@ -24,19 +42,59 @@ RUN apt-get update \
         libssl-dev \
         mafft \
         procps \
+        tabix \
         wget \
         zlib1g-dev \
     && rm -rf /var/lib/apt/lists/* \
-    && wget -q http://hgdownload.soe.ucsc.edu/admin/exe/linux.x86_64/liftOver \
-        -O /usr/local/bin/liftOver && chmod +x /usr/local/bin/liftOver \
-        || echo "WARNING: liftOver download failed; ortholog/multiassembly degrade gracefully"
+    && for _b in liftOver bigBedToBed bigWigToBedGraph; do \
+         wget -q "http://hgdownload.soe.ucsc.edu/admin/exe/linux.x86_64/$_b" \
+           -O "/usr/local/bin/$_b" && chmod +x "/usr/local/bin/$_b" \
+           || echo "WARNING: $_b download failed; stages that use it degrade gracefully"; \
+       done
 
+WORKDIR /opt/gameca/code
+
+# Install Python deps first so the layer caches across code edits. numpy/Cython
+# must be present before the te_fast extension is built below.
 COPY requirements.txt .
 RUN python -m pip install --upgrade pip setuptools wheel \
     && python -m pip install -r requirements.txt
 
+# Bake the repository into the image. .dockerignore keeps out the desktop app,
+# genomes, caches and prior results (those get bind-mounted at runtime).
 COPY . .
+
+# Build the te_fast Cython extension FOR LINUX. The only committed .so is a
+# macOS build (and is .dockerignore'd); without this the pipeline silently falls
+# back to pure-Python and runs much slower.
+RUN python setup_cython.py build_ext --inplace \
+    && python -c "import te_fast; print('te_fast built:', te_fast.__file__)"
+
+# Fail the build early if any critical import is missing — this is the glibc /
+# import smoke test the whole container exists to guarantee.
+RUN python - <<'PY'
+import importlib
+mods = ["numpy", "pandas", "scipy", "sklearn", "umap", "hdbscan",
+        "numba", "Bio", "pysam", "MOODS", "requests", "yaml", "te_fast"]
+missing = []
+for m in mods:
+    try:
+        importlib.import_module(m)
+    except Exception as e:  # noqa: BLE001
+        missing.append(f"{m}: {e}")
+try:
+    importlib.import_module("pybigtools")
+except Exception as e:  # noqa: BLE001
+    print(f"NOTE: pybigtools unavailable ({e}); JASPAR bigBed path degrades to bigBedToBed")
+if missing:
+    raise SystemExit("MISSING IMPORTS:\n  " + "\n  ".join(missing))
+print("import smoke test OK")
+PY
+
+ENV PATH=/usr/local/bin:$PATH
 
 EXPOSE 8765
 
+# Default entrypoint launches the local dashboard; on HPC we override this with
+# `singularity exec gameca.sif python query.py ...`.
 CMD ["python", "ui.py", "--local"]

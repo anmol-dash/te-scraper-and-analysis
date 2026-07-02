@@ -23,3 +23,7 @@ results4/l1mdtf_i/06_primers/all_18mer_candidates_metrics.csv
 results3/l1mdtf_i/l1mdtf_i_aligned.fa
 iap_pres_nomotif/
 stage11v4/
+# TE family analysis result folders (large generated outputs)
+iapltr1a_mm/
+mt2_mm/
+l1md_gf/

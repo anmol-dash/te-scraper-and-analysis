@@ -1,14 +1,27 @@
 Bootstrap: docker
 From: python:3.11-slim-bookworm
 
-# GAMECA Apptainer/Singularity image (#9)
-# Build:  apptainer build gameca.sif gameca.def      (or: singularity build ...)
-# Run:    apptainer run gameca.sif --config gameca.yaml
-# The %runscript wraps gameca_pipeline.py so the whole DAG runs from one command
-# on any HPC cluster — no per-cluster install required.
+# GAMECA Apptainer/Singularity image.
+#
+# Preferred build path is docker:// (see build_sif.sh / Dockerfile), which is
+# the source of truth. This .def is the FAKEROOT FALLBACK for clusters where you
+# build the .sif directly instead of pulling a Docker image:
+#
+#   apptainer build --fakeroot gameca.sif gameca.def
+#   (or: singularity build --fakeroot gameca.sif gameca.def)
+#
+# The container ships its own glibc 2.36, so the manylinux_2_28 wheels that fail
+# on old-glibc HPC nodes (pybigtools, MOODS-python, numba) install cleanly here.
+#
+# Code is BAKED into /opt/gameca/code by default. At runtime you can OVERRIDE it
+# by bind-mounting your working copy over the same path (bind wins over baked):
+#   singularity exec -B "$PWD":/opt/gameca/code --pwd /opt/gameca/code \
+#       gameca.sif python query.py --family MT2_Mm --assembly mm10 ...
+#
+# Fold prediction (ColabFold) is NOT here — it uses the separate colabfold.sif.
 
 %files
-    requirements.txt /opt/gameca/requirements.txt
+    . /opt/gameca/code
 
 %post
     set -eu
@@ -17,17 +30,37 @@ From: python:3.11-slim-bookworm
     apt-get install -y --no-install-recommends \
         bedtools build-essential ca-certificates gcc git \
         libbz2-dev libcurl4-openssl-dev liblzma-dev libssl-dev \
-        mafft procps wget zlib1g-dev
-    # UCSC liftOver (single static binary) for ortholog / multi-assembly stages (#5 #7)
-    wget -q http://hgdownload.soe.ucsc.edu/admin/exe/linux.x86_64/liftOver \
-        -O /usr/local/bin/liftOver && chmod +x /usr/local/bin/liftOver || \
-        echo "WARNING: liftOver download failed; ortholog/multiassembly stages will degrade gracefully"
+        mafft procps tabix wget zlib1g-dev
+    # UCSC static binaries for ortholog / multi-assembly / JASPAR bigBed stages.
+    for _b in liftOver bigBedToBed bigWigToBedGraph; do
+        wget -q "http://hgdownload.soe.ucsc.edu/admin/exe/linux.x86_64/$_b" \
+            -O "/usr/local/bin/$_b" && chmod +x "/usr/local/bin/$_b" \
+            || echo "WARNING: $_b download failed; that stage will degrade gracefully"
+    done
     rm -rf /var/lib/apt/lists/*
 
     python -m pip install --no-cache-dir --upgrade pip setuptools wheel
-    python -m pip install --no-cache-dir -r /opt/gameca/requirements.txt
+    python -m pip install --no-cache-dir -r /opt/gameca/code/requirements.txt
 
-    mkdir -p /opt/gameca/code
+    # Build te_fast for Linux (the committed .so is a macOS build; without this
+    # the pipeline falls back to slow pure-Python).
+    cd /opt/gameca/code
+    python setup_cython.py build_ext --inplace
+    python -c "import te_fast; print('te_fast built:', te_fast.__file__)"
+
+    # Import smoke test — the reason this container exists.
+    python - <<'PY'
+import importlib
+mods = ["numpy","pandas","scipy","sklearn","umap","hdbscan","numba",
+        "Bio","pysam","MOODS","requests","yaml","te_fast"]
+missing = []
+for m in mods:
+    try: importlib.import_module(m)
+    except Exception as e: missing.append(f"{m}: {e}")
+if missing:
+    raise SystemExit("MISSING IMPORTS:\n  " + "\n  ".join(missing))
+print("import smoke test OK")
+PY
 
 %environment
     export MPLBACKEND=Agg
@@ -35,19 +68,20 @@ From: python:3.11-slim-bookworm
     export NUMBA_CACHE_DIR=/tmp/numba-cache
     export PYTHONUNBUFFERED=1
     export GAMECA_HOME=/opt/gameca/code
+    export PATH=/usr/local/bin:$PATH
 
 %runscript
-    # Default entrypoint = the YAML/DAG pipeline runner. Bind-mount your working
-    # directory:  apptainer run -B "$PWD":/work --pwd /work gameca.sif --config gameca.yaml
-    exec python "${GAMECA_HOME}/gameca_pipeline.py" "$@"
+    # Default entrypoint = the main pipeline. Bind-mount your data dir:
+    #   singularity run -B "$PWD":/work --pwd /work gameca.sif --family MT2_Mm ...
+    exec python "${GAMECA_HOME}/query.py" "$@"
 
 %labels
     Application GAMECA
-    Description TE analysis pipeline (phylogenetics, gRNA, fold, overlays)
+    Description TE analysis pipeline (phylogenetics, gRNA, overlays, motifs)
 
 %help
-    GAMECA containerized pipeline. Mount your data and run a config:
-      apptainer run -B "$PWD":/work --pwd /work gameca.sif --config gameca.yaml
-    The code is expected at $GAMECA_HOME (/opt/gameca/code); bind-mount the repo:
-      apptainer run -B "$PWD":/opt/gameca/code -B /data:/data --pwd /opt/gameca/code \
-        gameca.sif --config gameca.yaml
+    Containerized GAMECA. Typical HPC use routes through `singularity exec`:
+      singularity exec -B "$WORK":"$WORK" -B "$GENOME_DIR":"$GENOME_DIR" \
+        --pwd "$WORK" gameca.sif python query.py --family MT2_Mm --assembly mm10 ...
+    Code is baked at $GAMECA_HOME; bind-mount over it to use a working copy.
+    Fold prediction uses the separate colabfold.sif (CUDA, run with --nv).
