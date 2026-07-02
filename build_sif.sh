@@ -22,10 +22,10 @@
 
 set -euo pipefail
 
-IMAGE="${IMAGE:-gameca:latest}"                 # docker tag (Path A build/push)
+IMAGE="${IMAGE:-ghcr.io/anmol-dash/gameca:latest}"   # docker tag (Path A build/push)
 SIF="${SIF:-gameca.sif}"                        # output image
 RUNTIME="${RUNTIME:-$(command -v singularity || command -v apptainer || echo singularity)}"
-REMOTE_IMAGE="${REMOTE_IMAGE:-}"                 # e.g. docker://ghcr.io/you/gameca:latest
+REMOTE_IMAGE="${REMOTE_IMAGE:-}"                 # e.g. docker://ghcr.io/anmol-dash/gameca:latest
 DEF="${DEF:-}"                                   # e.g. gameca.def for fakeroot build
 
 if [ -n "$REMOTE_IMAGE" ]; then
