@@ -71,9 +71,16 @@ WORKDIR /opt/gameca/code
 
 # Install Python deps first so the layer caches across code edits. numpy/Cython
 # must be present before the te_fast extension is built below.
+#
+# ColabFold is deliberately excluded here: colabfold[alphafold] pins
+# jax/alphafold/tensorflow with no CPU-only linux wheels, which makes the resolve
+# impossible, and fold prediction runs from the separate CUDA colabfold.sif
+# anyway (run_fold_prediction.py --colabfold-cmd). We strip just that line and
+# keep requirements.txt as the single source of truth.
 COPY requirements.txt .
 RUN python -m pip install --upgrade pip setuptools wheel \
-    && python -m pip install -r requirements.txt
+    && grep -viE '^[[:space:]]*colabfold' requirements.txt > /tmp/requirements.docker.txt \
+    && python -m pip install -r /tmp/requirements.docker.txt
 
 # Bake the repository into the image. .dockerignore keeps out the desktop app,
 # genomes, caches and prior results (those get bind-mounted at runtime).
