@@ -30,6 +30,7 @@ Speed options:
 import argparse
 import datetime
 import ast
+import json
 import os
 import re
 import shutil
@@ -3012,6 +3013,23 @@ def run_pipeline(args):
     for stage, seconds in stage_times.items():
         print(f"    {stage:<14} {seconds:>8.1f}s")
     print()
+
+    # Machine-readable timing summary so scaling/benchmark harnesses can compare
+    # per-stage cost across families and input sizes without parsing stdout.
+    try:
+        timing_summary = {
+            "family":        FAMILY_NAME,
+            "assembly":      getattr(args, "assembly", None),
+            "n_sequences":   int(len(df_family)),
+            "n_clusters":    int(n_clusters) if "n_clusters" in dir() else None,
+            "max_loci":      getattr(args, "max_loci", None),
+            "total_seconds": round(total, 2),
+            "stage_seconds": {k: round(v, 2) for k, v in stage_times.items()},
+        }
+        (OUT_DIR / "stage_times.json").write_text(json.dumps(timing_summary, indent=2))
+        print(f"  Stage timings:   stage_times.json")
+    except Exception as _e:
+        print(f"  WARNING: could not write stage_times.json: {_e}")
     print(f"  Sequences:       {FAMILY_NAME.lower()}_sequences.csv")
     print(f"  Dashboard:       07_visualizations/index.html")
     print(f"  CIAlign:         cialign_plots/index.html")
