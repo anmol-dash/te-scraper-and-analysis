@@ -2,7 +2,7 @@
 
 GAMECA is a modular transposable-element (TE) analysis pipeline — prepare → cluster → align → motif → GO → expression → primers — with integrated **LSF** and **Slurm** HPC support. This repository ships the Python tooling plus a **Tauri** desktop shell that wraps the workflow in a native UI and communicates with a bundled Python sidecar over newline-delimited JSON (NDJSON) IPC.
 
-Current version: **v0.4.14**
+Current version: **v0.4.42**
 
 ## Download
 
@@ -160,6 +160,26 @@ If `te_fast.cpython-*.so` is present it is used automatically; the pipeline fall
 - **Scripts** (`te_prep.py`, `hpc_client.py`, `ui.py`, etc.): updated silently from the latest commit on `main` every time the app launches.
 - **App binary**: when a new GitHub Release is published with a version tag higher than the running version, users see an in-app prompt to download and install the new DMG.
 
+## Nextflow / HPC pipeline
+
+Besides the desktop app, GAMECA ships a **Nextflow DSL2** workflow that runs the
+full pipeline on an LSF/Slurm cluster with real per-module parallelism, `-resume`,
+and a reproducible container. This is the recommended path for running GAMECA as a
+shared, multi-user tool on HPC.
+
+```bash
+# on the cluster: build the container image (pulls the prebuilt GHCR image, no root)
+REMOTE_IMAGE=docker://ghcr.io/anmol-dash/gameca:latest ./build_sif.sh
+
+# run a family through Nextflow + the container
+nextflow run nextflow/main.nf --family HERVK9 --assembly hg38 \
+    --genome_fasta /path/to/hg38.fa --container_sif "$PWD/gameca.sif" \
+    --outdir results -profile lsf,singularity
+```
+
+See **[nextflow/README.md](nextflow/README.md)** for the full setup, profiles,
+samplesheet format, and how to embed GAMECA as a subworkflow in another pipeline.
+
 ## Documentation
 
 | Doc | Contents |
@@ -168,3 +188,7 @@ If `te_fast.cpython-*.so` is present it is used automatically; the pipeline fall
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Sidecar, PyInstaller, macOS gatekeeper |
 | [docs/ADDING_A_COMMAND.md](docs/ADDING_A_COMMAND.md) | End-to-end: Python CLI → IPC → UI |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Dev setup, tests, PR checklist |
+
+## License
+
+Released under the [MIT License](LICENSE).
