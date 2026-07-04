@@ -18,7 +18,12 @@ import matplotlib.cm as cm
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 from Bio.PDB import PDBParser
 
-PDFLATEX = "/Users/anmol/Library/TinyTeX/bin/universal-darwin/pdflatex"
+# Resolve pdflatex portably: explicit override, then whatever is on PATH
+# (cluster/Linux), then the local TinyTeX install as a last resort. This keeps
+# the report buildable on HPC nodes, not just the original macOS machine.
+PDFLATEX = (os.environ.get("PDFLATEX")
+            or shutil.which("pdflatex")
+            or "/Users/anmol/Library/TinyTeX/bin/universal-darwin/pdflatex")
 BASE = Path(__file__).parent
 
 # ── Column display names ──────────────────────────────────────────────────────
@@ -1673,7 +1678,16 @@ def generate_report(family_dir_str):
     # ── Compile ──────────────────────────────────────────────────────────────
     print(f'[{family}] Compiling (pass 1)…')
     env = os.environ.copy()
-    env['PATH'] = '/Users/anmol/Library/TinyTeX/bin/universal-darwin:' + env.get('PATH', '')
+    # Prepend the TinyTeX bin only if it exists (macOS dev box); on the cluster
+    # pdflatex is found via PATH / $PDFLATEX instead.
+    _tinytex = '/Users/anmol/Library/TinyTeX/bin/universal-darwin'
+    if os.path.isdir(_tinytex):
+        env['PATH'] = _tinytex + ':' + env.get('PATH', '')
+    if not (os.path.isabs(PDFLATEX) and os.path.exists(PDFLATEX)) and shutil.which(PDFLATEX) is None:
+        print(f'[{family}] ✗ pdflatex not found (looked for "{PDFLATEX}"). '
+              f'report.tex was written to {tex_path}; install TeX or set $PDFLATEX '
+              f'to build the PDF.')
+        return
     # Run three passes (no halt-on-error) so cross-references, the ToC and the
     # lists of figures/tables fully resolve; a transient first-pass error does
     # not abort the later passes that produce the final PDF.
