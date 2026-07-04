@@ -3,12 +3,13 @@
 # submit_scaling_test.sh — end-to-end GAMECA test that runs the WHOLE pipeline
 # from scratch (UCSC pull → clustering → alignment → motif/TFBS → expression →
 # Stage-11 → LaTeX report) for a family, at several input sizes, and reports how
-# long each stage takes as a function of size.
+# long each stage takes — and how much memory it needs — as a function of size.
 #
 # You only give it a family name. It sweeps --max-loci over SIZES (default
 # 100/500/1000/2000/all), runs the full pipeline from scratch for each, reads the
-# per-stage timings that query.py writes to stage_times.json, and prints + saves
-# a consolidated timing table (scaling_timings.csv).
+# per-stage timings and peak memory that query.py writes to stage_times.json, and
+# prints + saves a consolidated timing + memory table (scaling_timings.csv),
+# including a suggested LSF -M value per size.
 #
 # Usage:
 #   chmod +x submit_scaling_test.sh
@@ -105,22 +106,46 @@ for f in files:
     recs.append(d)
     for s in d.get("stage_seconds", {}):
         if s not in stages: stages.append(s)
-cols = ["family", "assembly", "n_sequences", "n_clusters", "max_loci", "total_seconds"] + stages
+cols = ["family", "assembly", "n_sequences", "n_clusters", "max_loci",
+        "total_seconds", "peak_rss_mb"] + stages
 out_csv = os.path.join(root, "scaling_timings.csv")
 with open(out_csv, "w", newline="") as fh:
     w = csv.writer(fh); w.writerow(cols)
     for d in recs:
         w.writerow([d.get("family"), d.get("assembly"), d.get("n_sequences"),
-                    d.get("n_clusters"), d.get("max_loci"), d.get("total_seconds")]
+                    d.get("n_clusters"), d.get("max_loci"), d.get("total_seconds"),
+                    d.get("peak_rss_mb")]
                    + [d.get("stage_seconds", {}).get(s, "") for s in stages])
 # pretty print: sort by n_sequences so the scaling trend is visible
 recs.sort(key=lambda d: (d.get("n_sequences") or 0))
+print("### TIMING (seconds) ###")
 hdr = f'{"family":<12}{"n_seq":>7}{"clust":>6}{"total_s":>9}   ' + "".join(f"{s[:11]:>12}" for s in stages)
 print(hdr); print("-" * len(hdr))
 for d in recs:
     row = f'{str(d.get("family"))[:11]:<12}{d.get("n_sequences") or 0:>7}{d.get("n_clusters") or 0:>6}{d.get("total_seconds") or 0:>9.1f}   '
     row += "".join(f'{d.get("stage_seconds",{}).get(s,0):>12.1f}' for s in stages)
     print(row)
+
+# ── Memory requirements section ──────────────────────────────────────────────
+print("\n### MEMORY REQUIREMENTS ###")
+print("Peak resident memory per run, and a suggested LSF -M (peak x 1.3 headroom).")
+mhdr = f'{"family":<12}{"n_seq":>7}{"peak_MB":>10}{"peak_GB":>9}{"suggest_-M(MB)":>16}'
+print(mhdr); print("-" * len(mhdr))
+have_mem = False
+for d in recs:
+    pk = d.get("peak_rss_mb")
+    if pk is None:
+        print(f'{str(d.get("family"))[:11]:<12}{d.get("n_sequences") or 0:>7}{"n/a":>10}{"n/a":>9}{"n/a":>16}')
+        continue
+    have_mem = True
+    sug = int(-(-pk * 1.3 // 100) * 100)   # round up to nearest 100 MB
+    print(f'{str(d.get("family"))[:11]:<12}{d.get("n_sequences") or 0:>7}{pk:>10.1f}{pk/1024:>9.2f}{sug:>16}')
+if have_mem:
+    worst = max((d["peak_rss_mb"] for d in recs if d.get("peak_rss_mb")), default=0)
+    print(f'\nProvision at least {int(-(-worst*1.3//100)*100)} MB '
+          f'(-M {int(-(-worst*1.3//100)*100)}) for the largest size tested.')
+else:
+    print("peak_rss_mb unavailable (resource module missing?) — memory not captured.")
 print(f"\nSaved: {out_csv}")
 PYEOF
 PY

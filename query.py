@@ -32,6 +32,10 @@ import datetime
 import ast
 import json
 import os
+try:
+    import resource            # unix-only; used for peak-memory reporting
+except Exception:              # pragma: no cover - non-unix fallback
+    resource = None
 import re
 import shutil
 import subprocess
@@ -3014,8 +3018,21 @@ def run_pipeline(args):
         print(f"    {stage:<14} {seconds:>8.1f}s")
     print()
 
-    # Machine-readable timing summary so scaling/benchmark harnesses can compare
-    # per-stage cost across families and input sizes without parsing stdout.
+    # Peak resident memory for this run (the whole pipeline is one process, so
+    # ru_maxrss is the true peak). This is the number to size an LSF -M request
+    # against. ru_maxrss is KB on Linux, bytes on macOS.
+    peak_rss_mb = None
+    if resource is not None:
+        try:
+            _ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            peak_rss_mb = round(_ru / (1024 * 1024 if sys.platform == "darwin" else 1024), 1)
+            print(f"  Peak memory:     {peak_rss_mb:.1f} MB "
+                  f"({peak_rss_mb/1024:.2f} GB)")
+        except Exception as _e:
+            print(f"  WARNING: could not read peak memory: {_e}")
+
+    # Machine-readable timing + memory summary so scaling/benchmark harnesses can
+    # compare per-stage cost across families and input sizes without parsing stdout.
     try:
         timing_summary = {
             "family":        FAMILY_NAME,
@@ -3024,6 +3041,7 @@ def run_pipeline(args):
             "n_clusters":    int(n_clusters) if "n_clusters" in dir() else None,
             "max_loci":      getattr(args, "max_loci", None),
             "total_seconds": round(total, 2),
+            "peak_rss_mb":   peak_rss_mb,
             "stage_seconds": {k: round(v, 2) for k, v in stage_times.items()},
         }
         (OUT_DIR / "stage_times.json").write_text(json.dumps(timing_summary, indent=2))
