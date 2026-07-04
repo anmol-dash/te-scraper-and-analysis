@@ -1220,6 +1220,39 @@ def build_tfbs_analysis(out_dir, family_name):
         counts = df_ov.groupby([cluster_col, motif_col]).size().reset_index(name="Binding_Sites")
         counts.to_csv(tfbs_dir / "cluster_tf_binding_counts.csv", index=False)
 
+        # Per-motif site multiplicity: separate binding *sites* from *insertions*.
+        # A single TE copy can contain several sites for the same motif, which is
+        # why raw site counts (above and in overall_motif_counts.csv) exceed the
+        # number of loci. Here we report, per motif, the total sites, the number
+        # of distinct insertions carrying >=1 site (n_loci, <= copy count), and
+        # the number carrying >1 site (n_loci_multisite). All from real overlaps.
+        try:
+            # The TE-locus coordinates are the first three columns of the overlap
+            # table (cols_v written before the motif-side columns in te_motif.py).
+            locus_cols = list(df_ov.columns[:3])
+            id_col = next((c for c in ("Motif_ID", "Motif_id", "matrix_id")
+                           if c in df_ov.columns), None)
+            per_locus = (df_ov.groupby([motif_col] + locus_cols)
+                              .size().reset_index(name="sites"))
+            mult = (per_locus.groupby(motif_col)
+                    .agg(n_loci=("sites", "size"),
+                         n_loci_multisite=("sites", lambda s: int((s > 1).sum())),
+                         n_sites=("sites", "sum"))
+                    .reset_index())
+            mult["mean_sites_per_locus"] = (
+                mult["n_sites"] / mult["n_loci"]).round(2)
+            if id_col:
+                id_map = (df_ov.dropna(subset=[id_col])
+                              .drop_duplicates(motif_col)
+                              .set_index(motif_col)[id_col])
+                mult["Motif_ID"] = mult[motif_col].map(id_map)
+            order = ([motif_col] + (["Motif_ID"] if id_col else []) +
+                     ["n_sites", "n_loci", "n_loci_multisite", "mean_sites_per_locus"])
+            mult = mult[order].sort_values("n_sites", ascending=False)
+            mult.to_csv(tfbs_dir / "motif_site_multiplicity.csv", index=False)
+        except Exception as exc:
+            progress_print(f"  motif_site_multiplicity.csv failed: {exc}")
+
         top = counts.sort_values("Binding_Sites", ascending=False).head(30)
         fig = go.Figure(data=go.Bar(
             x=top["Binding_Sites"],

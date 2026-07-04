@@ -801,12 +801,14 @@ def ch_overview(d, stats, cl_rows, seq_figs=None):
     tex += (
         r'\section{Genomic Copy Statistics}' + '\n'
         f'The \\textit{{{esc(stats.get("family","?"))}}} dataset comprises {esc(stats.get("n_copies","?"))} genomic copies '
-        f'recovered from the {esc(assembly)} RepeatMasker annotation. Sequence lengths span '
-        f'{esc(stats.get("range_len","?"))}\\,bp (mean {esc(stats.get("mean_len","?"))}\\,bp, '
-        f'median {esc(stats.get("median_len","?"))}\\,bp, SD {esc(stats.get("std_len","?"))}\\,bp), '
-        f'reflecting the fragmented nature of many TE insertions due to post-insertion deletions and truncations. '
+        f'recovered from the {esc(assembly)} RepeatMasker annotation. Sequence length is '
+        f'{esc(stats.get("mean_len","?"))}\\,bp on average '
+        f'(median {esc(stats.get("median_len","?"))}\\,bp, SD {esc(stats.get("std_len","?"))}\\,bp); '
+        f'the distribution is right-skewed by a small number of full-length insertions, so the mean, '
+        f'median and SD summarise the family better than the raw min--max span, which is dominated by outliers. '
         f'Mean GC content is {esc(stats.get("gc_mean","?"))}\\%. '
-        f'Expression data are available across {esc(stats.get("expr_cols","?"))} samples.\n\n'
+        f'Per-copy expression across {esc(stats.get("expr_cols","?"))} samples is analysed in the '
+        f'Gene Expression chapter.\n\n'
     )
 
     if seq_figs and seq_figs.get('seq_stats_panel'):
@@ -947,7 +949,8 @@ def ch_consensus(d):
         tex += notavail('consensus summary')
     return tex
 
-def ch_motif(d):
+def ch_motif(d, stats=None):
+    stats = stats or {}
     tex = r'\chapter{Transcription Factor Binding Site Analysis}' + '\n\n'
     tex += (
         r'\section{JASPAR 2022 Motif Intersection}' + '\n'
@@ -964,12 +967,39 @@ def ch_motif(d):
     p = get_fig(d / 'motif_analysis', 'overall_top_motifs')
     if p: tex += fig_latex(p, 'Top JASPAR motifs overlapping TE loci.', 'fig:top_motifs')
 
+    # Explain why site counts can exceed the number of copies, and give the
+    # per-motif breakdown that separates sites from insertions.
+    tex += (
+        '\\paragraph{Interpreting the counts.} These values count \\emph{binding sites}, not '
+        'insertions. A single TE copy frequently contains several occurrences of the same motif, '
+        'so the site count for a motif — and the total in Figure~\\ref{fig:top_motifs} — can and '
+        'usually does exceed the number of ' + esc(stats.get('family', '?')) + ' loci '
+        '(' + esc(stats.get('n_copies', '?')) + '). To make this explicit, '
+        'Table~\\ref{tab:motif_multiplicity} reports, for each motif, the total number of sites '
+        '(\\texttt{n\\_sites}), the number of distinct insertions carrying at least one site '
+        '(\\texttt{n\\_loci}, which never exceeds the copy count), the number of insertions carrying '
+        '\\emph{more than one} site (\\texttt{n\\_loci\\_multisite}), and the mean sites per occupied '
+        'insertion. The JASPAR matrix identifier is shown alongside each TF name where the source '
+        'annotation provides it.\n\n'
+    )
+    hm, rowsm = read_csv(d / '05_tfbs' / 'motif_site_multiplicity.csv', max_rows=25)
+    if rowsm:
+        tex += longtable(hm, rowsm,
+                         'Per-motif site multiplicity: sites vs.\\ occupied insertions vs.\\ '
+                         'insertions with more than one site (top 25 by site count).',
+                         'tab:motif_multiplicity',
+                         note='n\\_sites: total binding sites. n\\_loci: distinct insertions with '
+                              '$\\geq$1 site. n\\_loci\\_multisite: insertions with $>$1 site for that motif.')
+
     tex += r'\section{Per-cluster TF Binding Site Counts}' + '\n'
     tex += (
         'Binding site counts per cluster were aggregated to identify differential TFBS enrichment '
         'across sequence subtypes. The top 20 rows of the per-cluster binding count matrix are shown in '
         'Table~\\ref{tab:tfbs_counts}. The full interactive heatmap is available in '
-        '\\texttt{05\\_tfbs/cluster\\_tf\\_binding\\_heatmap.html}.\n\n'
+        '\\texttt{05\\_tfbs/cluster\\_tf\\_binding\\_heatmap.html}. As in the previous section, each '
+        'cell counts binding \\emph{sites}, so a cluster\'s value for a motif can exceed the number '
+        'of copies in that cluster whenever insertions carry multiple sites of the same motif; see '
+        'Table~\\ref{tab:motif_multiplicity} for the sites-per-insertion breakdown.\n\n'
     )
     h2, rows2 = read_csv(d / '05_tfbs' / 'cluster_tf_binding_counts.csv', max_rows=20)
     if rows2:
@@ -1000,6 +1030,11 @@ def ch_motif_gains(d):
         'itself encodes regulatory information for those TFs. The fraction of binding sites classified '
         'as "gained" (absent in shuffled controls) is reported as \\textit{pct\\_gained}. '
         'The top 25 gained motifs are listed in Table~\\ref{tab:motif_gains}.\n\n'
+        'Here too, \\texttt{n\\_gained} and \\texttt{n\\_total} count individual binding \\emph{sites}, '
+        'not insertions: because a single copy can contribute several sites of the same motif, both '
+        'values may exceed the number of family loci. The \\texttt{copies\\_with\\_gain} column gives '
+        'the complementary insertion-level figure — the number of distinct copies with at least one '
+        'gained site — which never exceeds the copy count.\n\n'
     )
     tex += longtable(h, rows, 'Top 25 gained JASPAR TF binding motifs (ranked by $N$ gained).',
                      'tab:motif_gains',
@@ -1036,6 +1071,46 @@ def ch_go(d):
         else:
             tex += fig_latex(pngs[i], f'GO Biological Process enrichment: {labels[i]}.',
                              f'fig:go_{pngs[i].stem}', width=r'0.7\linewidth')
+    return tex
+
+def ch_expression(d):
+    ed = d / 'expression_plots'
+    tex = r'\chapter{Gene Expression Analysis}' + '\n\n'
+    stats_csv = ed / 'expression_stats.csv'
+    h, rows = read_csv(stats_csv, max_rows=30) if stats_csv.exists() else ([], [])
+    box  = get_fig(ed, 'boxplot_all')
+    prof = get_fig(ed, 'stage_profile')
+    peak = get_fig(ed, 'peak_stage_summary')
+    chrm = get_fig(ed, 'chromosomal_expression')
+    if not rows and not any([box, prof, peak, chrm]):
+        return tex + notavail('gene expression')
+
+    tex += (
+        'Per-copy expression values supplied with the input were summarised per cluster and per '
+        'sample/stage. Unlike a single family-wide mean, this exposes whether particular sequence '
+        'subtypes (clusters) drive the family\'s expression and in which sample or developmental '
+        'stage that expression peaks. All values below are computed directly from the supplied '
+        'expression columns; no values are imputed.\n\n'
+    )
+    if box:
+        tex += fig_latex(box, 'Per-cluster expression distribution across all samples '
+                              '(box = interquartile range, whiskers = full range).', 'fig:expr_box')
+    if prof:
+        tex += fig_latex(prof, 'Mean expression per sample/stage (bars, all copies) with '
+                               'per-cluster profiles overlaid (lines).', 'fig:expr_profile')
+    if peak or chrm:
+        tex += twofigs(peak, 'Peak-expression stage per cluster.', 'fig:expr_peak',
+                       chrm, 'Mean expression per chromosome.', 'fig:expr_chrom')
+    if rows:
+        tex += r'\section{Per-cluster Expression Statistics}' + '\n'
+        tex += ('Table~\\ref{tab:expr_stats} reports, for each cluster and expression column, the '
+                'mean, median, standard deviation, coefficient of variation, and the fraction of '
+                'zero-expression copies.\n\n')
+        tex += longtable(h, rows, 'Per-cluster expression statistics (first 30 rows).',
+                         'tab:expr_stats',
+                         cols=['Cluster', 'Label', 'n', 'mean', 'median', 'std', 'cv', 'pct_zero'],
+                         note='cv: coefficient of variation (std/mean). pct\\_zero: percent of copies '
+                              'with zero expression in that column.')
     return tex
 
 def ch_ltr_struct(d):
@@ -1566,9 +1641,10 @@ def generate_report(family_dir_str):
     body += ch_overview(d, stats, cl_rows, seq_figs=seq_figs)
     body += ch_clustering(d)
     body += ch_consensus(d)
-    body += ch_motif(d)
+    body += ch_motif(d, stats)
     body += ch_motif_gains(d)
     body += ch_go(d)
+    body += ch_expression(d)
     body += ch_ltr_struct(d)
     body += ch_divergence(d)
     body += ch_phylo(d)
