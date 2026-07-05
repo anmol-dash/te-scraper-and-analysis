@@ -56,6 +56,15 @@ def check_cialign():
         return False
 
 
+def check_trimal():
+    """Return True if trimAl is in PATH."""
+    try:
+        subprocess.run(["trimal", "--version"], capture_output=True)
+        return True
+    except FileNotFoundError:
+        return False
+
+
 def _count_fasta_seqs(fasta_path):
     """Count '>' header lines in a FASTA file."""
     n = 0
@@ -180,8 +189,10 @@ def alignment_stats(aligned_fasta):
 
 # ── CIAlign helper ──────────────────────────────────────────────────────────
 
-MAX_CIALIGN_SEQS = 25000   # subsample alignment to this many seqs before CIAlign
-CIALIGN_TIMEOUT  = 3600    # seconds; CIAlign hangs forever on huge inputs otherwise
+MAX_CIALIGN_SEQS      = 25000   # subsample alignment to this many seqs before CIAlign
+CIALIGN_TIMEOUT       = 3600    # seconds; CIAlign hangs forever on huge inputs otherwise
+TRIMAL_TIMEOUT        = 1800    # seconds; trimAl fallback cleaning
+CIALIGN_FALLBACK_SEQS = 1000    # seqs to display when retrying after a trimAl fallback
 
 
 def _subsample_fasta(input_fasta, output_fasta, max_seqs):
@@ -209,18 +220,53 @@ def _subsample_fasta(input_fasta, output_fasta, max_seqs):
     return output_fasta
 
 
-def run_cialign(input_fasta, output_stem, label="", timeout=CIALIGN_TIMEOUT):
+def run_trimal(input_fasta, output_fasta, timeout=TRIMAL_TIMEOUT):
+    """Clean an alignment with trimAl (-automated1 heuristic).
+
+    Used as the CIAlign fallback: trimAl's column-trimming is far cheaper
+    than CIAlign's own cleaning + plotting pass, so it can shrink a huge or
+    gappy alignment down to something CIAlign can actually finish on retry.
+    """
+    input_fasta, output_fasta = Path(input_fasta), Path(output_fasta)
+    cmd = ["trimal", "-in", str(input_fasta), "-out", str(output_fasta), "-automated1"]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _pp(f"    trimAl TIMEOUT after {timeout}s for {input_fasta.name}")
+        return False
+    except FileNotFoundError:
+        _pp("    trimAl not found — cannot fall back")
+        return False
+    if result.returncode == 0 and output_fasta.exists():
+        _pp(f"    trimAl cleaned {input_fasta.name} → {output_fasta.name}")
+        return True
+    _pp(f"    trimAl failed for {input_fasta.name}: {result.stderr[:200]}")
+    return False
+
+
+def run_cialign(input_fasta, output_stem, label="", timeout=CIALIGN_TIMEOUT,
+                 max_seqs=MAX_CIALIGN_SEQS, _fallback_attempted=False):
     """Run CIAlign cleaning + plotting on *input_fasta*.
-    Subsamples automatically if the alignment is larger than MAX_CIALIGN_SEQS."""
+
+    Subsamples automatically if the alignment is larger than *max_seqs*.
+
+    Design choice: if CIAlign fails outright or times out (>1h on huge
+    alignments), don't just give up — clean the alignment with trimAl
+    (-automated1, much cheaper than CIAlign's own cleaning pass) and retry
+    CIAlign once on the trimAl-cleaned alignment, capped at
+    CIALIGN_FALLBACK_SEQS (1000) sequences for display. This keeps massive
+    families (tens of thousands of loci) from silently ending up with no
+    alignment visualization at all.
+    """
     import os
     input_fasta = Path(input_fasta)
     output_stem = Path(output_stem)
 
     n_seqs = _count_fasta_seqs(input_fasta)
     run_fasta = input_fasta
-    if n_seqs > MAX_CIALIGN_SEQS:
+    if n_seqs > max_seqs:
         subsample_fa = output_stem.parent / (output_stem.name + '_cialign_input.fa')
-        run_fasta = Path(_subsample_fasta(input_fasta, subsample_fa, MAX_CIALIGN_SEQS))
+        run_fasta = Path(_subsample_fasta(input_fasta, subsample_fa, max_seqs))
 
     cmd = [
         "CIAlign",
@@ -238,16 +284,31 @@ def run_cialign(input_fasta, output_stem, label="", timeout=CIALIGN_TIMEOUT):
             cmd, capture_output=True, text=True, timeout=timeout,
             env={**os.environ, "MPLBACKEND": "Agg"}
         )
+        failed, reason = (result.returncode != 0), result.stderr[:200]
     except subprocess.TimeoutExpired:
-        _pp(f"    CIAlign TIMEOUT after {timeout}s for {label} — skipping plots")
-        return False
-    if result.returncode == 0:
+        failed, reason = True, f"TIMEOUT after {timeout}s"
+
+    if not failed:
         pngs = list(output_stem.parent.glob(f"{output_stem.name}*.png"))
         _pp(f"    CIAlign {label}: {len(pngs)} plots ({n_seqs:,} seqs)")
         return True
-    else:
-        _pp(f"    CIAlign failed for {label}: {result.stderr[:200]}")
+
+    _pp(f"    CIAlign failed for {label}: {reason}")
+
+    if _fallback_attempted:
+        _pp(f"    CIAlign fallback (trimAl) also failed for {label} — skipping plots")
         return False
+
+    trimmed_fa = output_stem.parent / (output_stem.name + '_trimal_cleaned.fa')
+    if not run_trimal(input_fasta, trimmed_fa):
+        return False
+
+    _pp(f"    Retrying CIAlign on trimAl-cleaned alignment ({label}), "
+        f"capped at {CIALIGN_FALLBACK_SEQS:,} seqs")
+    return run_cialign(
+        trimmed_fa, output_stem, label=f"{label} [trimAl fallback]",
+        timeout=timeout, max_seqs=CIALIGN_FALLBACK_SEQS, _fallback_attempted=True,
+    )
 
 
 def _cialign_index_html(cialign_dir, family_name, df):
@@ -324,6 +385,9 @@ def run_alignment_pipeline(df, out_dir, family_name="FAMILY"):
     out_dir = Path(out_dir)
     mafft_ok = check_mafft()
     cialign_ok = check_cialign()
+    trimal_ok = check_trimal()
+    if cialign_ok and not trimal_ok:
+        _pp("  Note: trimAl not found — CIAlign failures/timeouts will not have a fallback")
 
     family_lower = family_name.lower()
     consensus_dir = out_dir / "05_consensus"
@@ -493,6 +557,7 @@ def run_alignment_pipeline(df, out_dir, family_name="FAMILY"):
     return {
         "mafft_available": mafft_ok,
         "cialign_available": cialign_ok,
+        "trimal_available": trimal_ok,
         "global_alignment": str(global_aligned) if global_aligned.exists() else None,
         "cluster_consensus_summary": cluster_summaries,
     }

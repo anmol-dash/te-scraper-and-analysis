@@ -29,6 +29,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # System toolchain + bioinformatics binaries the pipeline shells out to
 # (mafft, bedtools, liftOver, bigBedToBed/bigWigToBedGraph for JASPAR bigBed).
+# trimal is the fallback alignment cleaner when CIAlign fails or times out
+# (>1h) on huge alignments — see te_alignment.run_cialign()/README.md.
 # default-jre-headless + curl are here so the baked-in Nextflow (installed below)
 # can run — needed when query.py --stage11-nextflow orchestrates the
 # post-alignment analyses from *inside* the container.
@@ -48,6 +50,7 @@ RUN apt-get update \
         mafft \
         procps \
         tabix \
+        trimal \
         wget \
         zlib1g-dev \
     && rm -rf /var/lib/apt/lists/* \

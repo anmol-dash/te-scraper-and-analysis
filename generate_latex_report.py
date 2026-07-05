@@ -892,6 +892,10 @@ def ch_clustering(d):
         'All copies were globally aligned with MAFFT (\\texttt{--auto} mode) and subsequently cleaned with '
         'CIAlign, which removes gap-heavy columns, insertion-rich sequences, and poorly aligning outliers '
         'to produce a representative cleaned alignment for consensus derivation and divergence estimation. '
+        'For very large alignments, CIAlign\\textquotesingle{}s cleaning and plotting pass can fail outright '
+        'or exceed a 1-hour timeout; when this happens the pipeline falls back to cleaning the alignment with '
+        'trimAl (\\texttt{-automated1}) and retries CIAlign once on the trimAl-cleaned alignment, capped at '
+        '1{,}000 displayed sequences, rather than omitting the alignment visualization entirely. '
         'Figure~\\ref{fig:align_global} shows the global alignment before and after CIAlign processing.\n\n'
     )
     align_stats = read_txt(d / '04_alignments' / 'alignment_stats.txt')

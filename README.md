@@ -49,7 +49,7 @@ Data prep
 
 Core analysis
   Clustering            – k-mer · SVD · UMAP · HDBSCAN  → cluster_summary.csv
-  Alignment             – MAFFT · CIAlign · consensus
+  Alignment             – MAFFT · CIAlign (trimAl fallback) · consensus
 
 Enrichment
   Motif                 – JASPAR + Fisher + HOMER
@@ -69,6 +69,26 @@ Results
   Retrieve              – rsync results to local machine
   File browser          – remote filesystem with sort, CSV viewer, HTML plots
 ```
+
+### Design choice: CIAlign failure/timeout fallback
+
+CIAlign's own cleaning + plotting pass can fail outright or hang (capped at a
+1-hour timeout) on very large alignments — massive families like `AluSx1` can
+have tens of thousands of loci per cluster, and CIAlign wasn't built for that
+scale. Rather than silently ending up with no alignment visualization at all,
+`te_alignment.run_cialign()` falls back once, automatically:
+
+1. If CIAlign fails (non-zero exit) or times out (>3600s), clean the same
+   alignment with **trimAl** (`-automated1` heuristic) instead — trimAl's
+   column-trimming is far cheaper than CIAlign's own cleaning step and
+   finishes in minutes even on huge alignments.
+2. Retry CIAlign once on the trimAl-cleaned alignment, this time capped at
+   **1,000 sequences** for display (down from the normal 25,000-sequence
+   subsample cap) so the retry itself can't time out the same way.
+
+If trimAl isn't installed, or the trimAl-cleaned retry also fails, the stage
+logs the failure and moves on (alignment/consensus output is unaffected —
+only the CIAlign visualization plots are skipped).
 
 ## Supported assemblies
 
@@ -125,7 +145,7 @@ test_jaspar_path.py       JASPAR cache path resolution tests
 | Desktop app | macOS 12+ (arm64 or x86_64) |
 | Python tooling | Python 3.11+ (auto-installed in venv on first launch) |
 | HPC cluster | LSF (`bsub`) or Slurm (`sbatch`); SSH access from your Mac |
-| Bioinformatics | MAFFT, bedtools on the cluster; see `requirements.txt` |
+| Bioinformatics | MAFFT, bedtools, CIAlign on the cluster; trimAl recommended (CIAlign failure/timeout fallback — see Design choices below); see `requirements.txt` |
 
 ## Building from source
 
