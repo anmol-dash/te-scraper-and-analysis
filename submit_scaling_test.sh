@@ -18,6 +18,9 @@
 #   SIZES="200 1000 5000 all" FAMILY=MT2_Mm ./submit_scaling_test.sh
 #   # cross-family sweep (each pair run at full size):
 #   FAMILIES="AluY:hg38,MT2_Mm:mm10,L1HS:hg38" ./submit_scaling_test.sh
+#   # run every size through the full-pipeline Nextflow DAG (query.py --nextflow)
+#   # instead of the in-process pipeline, to scale-test the per-stage DAG too:
+#   USE_NEXTFLOW=1 FAMILY=MT2_Mm ASSEMBLY=mm10 ./submit_scaling_test.sh
 #
 # NB: from-scratch runs fetch loci + sequences from UCSC. Compute nodes often
 # need an HTTPS proxy (forwarded below if your login shell sets one) or use -Is
@@ -39,8 +42,26 @@ QUEUE="${QUEUE:-normal}"
 N_CORES="${N_CORES:-4}"
 MEM_MB="${MEM_MB:-24000}"
 WALL="${WALL:-24:00}"                       # HH:MM — whole sweep runs in one job
+USE_NEXTFLOW="${USE_NEXTFLOW:-0}"           # 1 = run each size via query.py --nextflow
+NEXTFLOW_PROFILE="${NEXTFLOW_PROFILE:-lsf,singularity}"
 
 mkdir -p "$OUT_DIR"
+
+# Check for nextflow up front if it was requested — fail fast with a clear
+# message rather than silently falling back to the in-process pipeline deep
+# inside a running bsub job (query.py --nextflow does fall back on its own,
+# but that defeats the point of a scaling test that's meant to exercise the
+# Nextflow DAG specifically).
+NEXTFLOW_FLAGS=""
+if [ "$USE_NEXTFLOW" = "1" ]; then
+  if ! command -v nextflow >/dev/null 2>&1; then
+    echo "ERROR: USE_NEXTFLOW=1 but 'nextflow' is not on PATH." >&2
+    echo "       Install it or drop USE_NEXTFLOW to scale-test the in-process pipeline instead." >&2
+    exit 1
+  fi
+  NEXTFLOW_FLAGS="--nextflow --nextflow-profile $NEXTFLOW_PROFILE"
+  echo "Nextflow detected — each size will run via: query.py --nextflow --nextflow-profile $NEXTFLOW_PROFILE"
+fi
 
 # Forward an HTTPS proxy into the job so the UCSC fetch works from compute nodes.
 PROXY_PREFIX=""
@@ -84,7 +105,7 @@ JOB_SH="$OUT_DIR/_run_scaling_test.sh"
     [ -n "$RMSK_DIR" ] && src="$src --rmsk-dir $RMSK_DIR"
     echo "echo; echo '==================== $tag ===================='"
     echo "SECONDS=0"
-    echo "$PYTHON query.py --local --family $fam --assembly $asm --output $(printf '%q' "$run_dir") $cap $src || echo \"  RUN FAILED: $tag (rc=\$?)\""
+    echo "$PYTHON query.py --local --family $fam --assembly $asm --output $(printf '%q' "$run_dir") $cap $src $NEXTFLOW_FLAGS || echo \"  RUN FAILED: $tag (rc=\$?)\""
     # Report is part of 'all the tests'; PDF is optional (graceful if no TeX).
     echo "$PYTHON generate_latex_report.py $(printf '%q' "$run_dir") || echo \"  report build skipped/failed: $tag\""
     echo "echo \"  wall for $tag: \${SECONDS}s\""
@@ -202,6 +223,11 @@ if [ -n "$FAMILIES" ]; then
   echo "  Families: $FAMILIES  (each at full size)"
 else
   echo "  Family:   $FAMILY ($ASSEMBLY)   Sizes: $SIZES"
+fi
+if [ "$USE_NEXTFLOW" = "1" ]; then
+  echo "  Engine:   Nextflow full-pipeline DAG (-profile $NEXTFLOW_PROFILE)"
+else
+  echo "  Engine:   in-process (set USE_NEXTFLOW=1 to scale-test the Nextflow DAG instead)"
 fi
 echo "  Out dir:  $OUT_DIR"
 echo "  Logs:     scaling_test.<JOBID>.out / .err"

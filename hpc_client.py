@@ -257,6 +257,15 @@ class HPCClient:
             # Auto-detect python binary
             self._python = self._detect_python()
 
+            # Check whether nextflow is available for --nextflow /
+            # --post-alignment-analyses-nextflow (query.py falls back to the
+            # in-process pipeline if it isn't, but warn up front).
+            self.has_nextflow = self._detect_nextflow()
+            if self.has_nextflow:
+                print("Nextflow detected — --nextflow / --post-alignment-analyses-nextflow available")
+            else:
+                print("Nextflow: NOT found on PATH — --nextflow will fall back to the in-process pipeline")
+
             # Check whether this node can reach the internet (login nodes usually can,
             # compute nodes usually cannot).  Uses curl to avoid Python DNS quirks.
             print("Checking internet connectivity (UCSC/Dfam)...")
@@ -548,6 +557,18 @@ exit 1
             if code == 0 and out.strip():
                 return binary
         return "python3"  # best guess if neither found
+
+    def _detect_nextflow(self) -> bool:
+        """Check whether nextflow (and the java it needs) is on the remote PATH.
+
+        query.py's --nextflow / --post-alignment-analyses-nextflow flags shell
+        out to `nextflow run ...` from inside the submitted job; if it's
+        missing there, query.py itself falls back to the in-process pipeline,
+        but surfacing that here lets the UI warn before a job is even
+        submitted rather than only after it's deep into a running bsub job.
+        """
+        out, _, code = self.run_command("command -v nextflow && command -v java")
+        return code == 0 and out.strip() != ""
 
     def _check_internet(self) -> bool:
         """Test whether this node can reach UCSC via curl (more reliable than Python DNS).

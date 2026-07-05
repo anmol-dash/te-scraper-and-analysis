@@ -52,7 +52,8 @@ def _check_hpc_environment():
     on_lsf   = bool(os.environ.get("LSB_JOBID")    or os.environ.get("LSB_HOSTS"))
     if on_slurm or on_lsf:
         return
-    if "--test" in sys.argv or "--local" in sys.argv or "--help" in sys.argv or "-h" in sys.argv:
+    if ("--test" in sys.argv or "--local" in sys.argv or "--help" in sys.argv
+            or "-h" in sys.argv or "--run-stage" in sys.argv or "--nextflow" in sys.argv):
         return
     print(
         "\n"
@@ -218,7 +219,19 @@ def parse_args(argv=None):
                         "nextflow is unavailable")
     p.add_argument("--nextflow-profile", type=str, default=None,
                    help="Nextflow -profile to use when --post-alignment-analyses-nextflow "
-                        "is set (e.g. 'lsf,singularity')")
+                        "or --nextflow is set (e.g. 'lsf,singularity')")
+    p.add_argument("--nextflow", action="store_true",
+                   help="Delegate the entire pipeline (Stages 1-11) to Nextflow "
+                        "(nextflow/main.nf) as per-stage parallel processes, instead "
+                        "of running in-process; falls back to the in-process pipeline "
+                        "if nextflow is unavailable or the run fails")
+    p.add_argument("--run-stage",
+                   choices=["genome", "data", "sequences", "stats", "clustering",
+                            "dashboard", "alignment", "motif", "primers", "standout"],
+                   default=None,
+                   help="Run exactly one pipeline stage against an existing/new "
+                        "--output folder and exit. Used by the Nextflow per-stage "
+                        "processes; each stage loads whatever it needs from disk.")
     p.add_argument("--skip-motif",    action="store_true",
                    help="Skip JASPAR motif / TF binding analysis")
     p.add_argument("--skip-go",       action="store_true",
@@ -2426,189 +2439,136 @@ def _run_standout_analysis(args, out_dir, dirs, family_name, stage_times):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# MAIN PIPELINE
+# NEXTFLOW: full-pipeline delegation
 # ═══════════════════════════════════════════════════════════════════════════
 
-def run_pipeline(args):
-    """Execute the full TE analysis pipeline."""
+def _run_full_pipeline_nextflow(args, out_dir, family_name):
+    """Delegate the entire pipeline (Stages 1-11) to the Nextflow pipeline
+    (nextflow/main.nf), which runs each stage as its own parallel/resumable
+    process instead of one in-process Python function.
+
+    Returns True on success, False if Nextflow is unavailable or the run
+    failed — callers should fall back to running run_pipeline()'s normal
+    in-process body when this returns False.
+    """
+    nf = shutil.which("nextflow")
+    if not nf:
+        _diag("  NEXTFLOW: nextflow not on PATH")
+        return False
+
+    if hasattr(sys, "_MEIPASS"):
+        script_dir = Path(sys._MEIPASS)
+    else:
+        script_dir = Path(__file__).resolve().parent
+    main_nf = script_dir / "nextflow" / "main.nf"
+    if not main_nf.exists():
+        _diag(f"  NEXTFLOW: {main_nf} not found")
+        return False
+
+    assembly = getattr(args, "assembly", "hg38") or "hg38"
+    profile  = getattr(args, "nextflow_profile", None)
+    cmd = [nf, "run", str(main_nf),
+           "--family",      family_name,
+           "--assembly",    assembly,
+           "--outdir",      str(Path(args.output).resolve()),
+           "--gameca_home", str(script_dir),
+           "-resume"]
+    if args.genome:
+        cmd += ["--genome_fasta", args.genome]
+    if profile:
+        cmd += ["-profile", profile]
+
+    _diag(f"  NEXTFLOW (full pipeline): {' '.join(cmd)}")
+    print(f"  Handing full pipeline to Nextflow: {main_nf.name}")
+    rc = subprocess.run(cmd, cwd=str(script_dir)).returncode
+    if rc == 0:
+        print("  Nextflow pipeline complete.")
+        return True
+    _diag(f"  NEXTFLOW (full pipeline): FAILED rc={rc}")
+    print(f"  WARNING: Nextflow full-pipeline run failed (rc={rc}).")
+    return False
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# STAGE FUNCTIONS (each independently invocable — loads from disk if the
+# in-memory value isn't passed in — so they can run either sequentially
+# in-process via run_pipeline(), or standalone via --run-stage as one
+# Nextflow process each)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _setup_output(args):
+    """Create OUT_DIR/DIRS for this family and point the module-level diag
+    log at it. Returns (family_name, out_dir, dirs)."""
     global OUT_DIR, _DIAG_LOG_PATH
-
-    FAMILY_NAME = args.family
-    HG38_FA = args.genome
-    BASE_OUT_DIR = Path(args.output)
-
-    OUT_DIR = BASE_OUT_DIR / FAMILY_NAME.lower()
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-
-    # ── Diagnostic log ──────────────────────────────────────────────────────
-    _DIAG_LOG_PATH = str(OUT_DIR / "pipeline_diagnostic.log")
-    _diag("=" * 70)
-    _diag(f"PIPELINE START  family={FAMILY_NAME}  out={OUT_DIR.resolve()}")
-    _diag(f"Python: {sys.version}")
-    _diag(f"Args: {vars(args)}")
-    _diag(f"CWD: {os.getcwd()}")
-    _diag(f"sys.stdin.isatty={getattr(sys.stdin, 'isatty', lambda: False)()}")
-    _diag("=" * 70)
-
-    DIRS = {
-        "data":          OUT_DIR / "01_data",
-        "stats":         OUT_DIR / "02_statistics",
-        "clustering":    OUT_DIR / "03_clustering",
-        "alignments":    OUT_DIR / "04_alignments",
-        "consensus":     OUT_DIR / "05_consensus",
-        "primers":       OUT_DIR / "06_primers",
-        "visualizations": OUT_DIR / "07_visualizations",
-        "motif":         OUT_DIR / "motif_analysis",
-        "enrichment":    OUT_DIR / "enrichment_results",
-        "go":            OUT_DIR / "go_annotations",
-        "tfbs":          OUT_DIR / "05_tfbs",
+    family_name = args.family
+    base_out_dir = Path(args.output)
+    out_dir = base_out_dir / family_name.lower()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    OUT_DIR = out_dir
+    _DIAG_LOG_PATH = str(out_dir / "pipeline_diagnostic.log")
+    dirs = {
+        "data":          out_dir / "01_data",
+        "stats":         out_dir / "02_statistics",
+        "clustering":    out_dir / "03_clustering",
+        "alignments":    out_dir / "04_alignments",
+        "consensus":     out_dir / "05_consensus",
+        "primers":       out_dir / "06_primers",
+        "visualizations": out_dir / "07_visualizations",
+        "motif":         out_dir / "motif_analysis",
+        "enrichment":    out_dir / "enrichment_results",
+        "go":            out_dir / "go_annotations",
+        "tfbs":          out_dir / "05_tfbs",
     }
-    for d in DIRS.values():
+    for d in dirs.values():
         d.mkdir(parents=True, exist_ok=True)
-    _diag(f"Output dirs created: {[str(d) for d in DIRS.values()]}")
+    return family_name, out_dir, dirs
 
-    if args.validate_existing:
-        validate_existing_outputs(OUT_DIR, FAMILY_NAME)
 
-    if args.resume_from == "alignment":
-        # Load df_family from the already-clustered CSV then run stage 7 onwards.
-        clustered_csv = DIRS["data"] / f"{FAMILY_NAME.lower()}_clustered.csv"
-        if not clustered_csv.exists():
-            candidates = sorted(Path(OUT_DIR).glob("**/*_clustered.csv"))
-            if candidates:
-                clustered_csv = candidates[0]
-        if not clustered_csv.exists():
-            print(f"ERROR: no clustered CSV found under {OUT_DIR}; cannot resume alignment")
-            sys.exit(1)
-        import pandas as _pd_resume
-        df_family = _pd_resume.read_csv(clustered_csv, low_memory=False)
-        _diag(f"  Loaded df_family from {clustered_csv} ({len(df_family)} rows)")
-        genome_cache = type('_NullCache', (), {'is_loaded': False})()
-        t0 = time.time()
-        _diag("STAGE 7: Alignment (resume)")
-        print("\n=== ALIGNMENT ===")
+def _load_raw_csv(dirs, family_name):
+    csv_path = dirs["data"] / f"{family_name.lower()}_raw.csv"
+    if not csv_path.exists():
+        print(f"ERROR: no raw data CSV found at {csv_path}; run --run-stage data first")
+        sys.exit(1)
+    return pd.read_csv(csv_path, low_memory=False)
+
+
+def _load_with_sequences_csv(dirs, family_name):
+    csv_path = dirs["data"] / f"{family_name.lower()}_with_sequences.csv"
+    if not csv_path.exists():
+        print(f"ERROR: no with-sequences CSV found at {csv_path}; cannot resume from this stage")
+        sys.exit(1)
+    return pd.read_csv(csv_path, low_memory=False)
+
+
+def _load_clustered_csv(dirs, out_dir, family_name):
+    clustered_csv = dirs["data"] / f"{family_name.lower()}_clustered.csv"
+    if not clustered_csv.exists():
+        candidates = sorted(Path(out_dir).glob("**/*_clustered.csv"))
+        if candidates:
+            clustered_csv = candidates[0]
+    if not clustered_csv.exists():
+        print(f"ERROR: no clustered CSV found under {out_dir}; cannot resume from this stage")
+        sys.exit(1)
+    df = pd.read_csv(clustered_csv, low_memory=False)
+    _diag(f"  Loaded df_family from {clustered_csv} ({len(df)} rows)")
+    return df, clustered_csv
+
+
+def _load_expr_cols(dirs):
+    p = dirs["data"] / "expr_cols.json"
+    if p.exists():
         try:
-            run_alignment_pipeline(df_family, OUT_DIR, FAMILY_NAME)
-            _diag("  Alignment OK")
-        except Exception as e:
-            _diag(f"  Alignment FAILED: {type(e).__name__}: {e}\n{traceback.format_exc()}")
-            log_error("ALIGNMENT", e)
-        _checkpoint(OUT_DIR, "stage7_alignment")
+            return json.loads(p.read_text())
+        except Exception:
+            return []
+    return []
 
-        if not args.skip_motif:
-            _diag("STAGE 9: Motif / TFBS / GO (resume)")
-            print("\n=== MOTIF / TFBS / GO ===")
-            try:
-                run_motif_stage_full(args, OUT_DIR, DIRS, FAMILY_NAME,
-                                     clustered_csv=str(clustered_csv))
-                _diag("  Motif stage OK")
-            except SystemExit as e:
-                if e.code not in (0, None):
-                    sys.exit(e.code or 1)
-            except Exception as e:
-                _diag(f"  Motif FAILED: {type(e).__name__}: {e}\n{traceback.format_exc()}")
-                log_error("MOTIF / TFBS / GO", e)
-            _checkpoint(OUT_DIR, "stage9_motif")
 
-        if not args.skip_primers:
-            _diag("STAGE 10: Primers (resume)")
-            print("\n=== PRIMER DESIGN ===")
-            try:
-                design_primers(
-                    df_family,
-                    primer_k=args.primer_kmer,
-                    top_global=args.top_global,
-                    top_cluster=args.top_cluster,
-                    genome_fa=None,
-                    genome_cache=None,
-                    primer_timeout=args.primer_timeout,
-                    out_dir=DIRS["primers"],
-                    family_name=FAMILY_NAME,
-                )
-                _diag("  Primers OK")
-            except Exception as e:
-                _diag(f"  Primers FAILED: {type(e).__name__}: {e}\n{traceback.format_exc()}")
-                log_error("PRIMER DESIGN", e)
-            _checkpoint(OUT_DIR, "stage10_primers")
-
-        _diag("STAGE 11: Standout analysis (resume)")
-        _stage_times_r = {}
-        try:
-            _run_standout_analysis(args, OUT_DIR, DIRS, FAMILY_NAME, _stage_times_r)
-        except SystemExit:
-            raise
-        except Exception as e:
-            _diag(f"  Standout FAILED: {type(e).__name__}: {e}\n{traceback.format_exc()}")
-            log_error("STANDOUT", e)
-        print(f"\nResume run complete (alignment + stages 9-11).")
-        return None
-
-    if args.resume_from in {"motif", "tfbs", "go"}:
-        try:
-            run_motif_tfbs_go(
-                args, OUT_DIR, DIRS, FAMILY_NAME,
-                run_motif=args.resume_from == "motif",
-                run_tfbs=args.resume_from in {"motif", "tfbs"},
-                run_go=args.resume_from in {"motif", "tfbs", "go"},
-            )
-        except SystemExit:
-            raise
-        except Exception as e:
-            log_error(f"RESUME FROM {args.resume_from.upper()}", e)
-            sys.exit(1)
-        print("\nResume run complete.")
-        return None
-
-    if args.resume_from == "standout":
-        # Skip all pipeline stages — run only Stage 11 standout analysis modules.
-        # Used by the parallel-job submission path as Job 5 after Jobs 2-4 complete.
-        _pipeline_start_sa = time.time()
-        _stage_times_sa = {}
-        try:
-            _run_standout_analysis(args, OUT_DIR, DIRS, FAMILY_NAME, _stage_times_sa)
-        except SystemExit:
-            raise
-        except Exception as e:
-            log_error("RESUME FROM STANDOUT", e)
-            sys.exit(1)
-        total_sa = time.time() - _pipeline_start_sa
-        print(f"\nResume run complete (standout analysis only, {total_sa:.0f}s).")
-        return None
-
-    pipeline_start = time.time()
-    stage_times = {}
-
-    def _record(name):
-        t = time.time() - pipeline_start
-        stage_times[name] = t
-        progress_print(f"  [TIMING] {name}: {t:.1f}s total")
-
-    print("\n" + "=" * 60)
-    print(f"TE ANALYSIS PIPELINE")
-    print(f"  Family:  {FAMILY_NAME}")
-    print(f"  Output:  {OUT_DIR.resolve()}")
-    print(f"  DiagLog: {_DIAG_LOG_PATH}")
-    print(f"  Genome:  {HG38_FA or '(not provided)'}")
-    if getattr(args, "local", False):
-        print(f"  Mode:    LOCAL  (assembly={getattr(args, 'assembly', 'hg38')})")
-    print(f"  K-mer:   {args.kmer}")
-    print(f"  UMAP:    pca_dims={args.pca_dims}, n_epochs={args.n_epochs}, "
-          f"random_state={'None/multicore' if args.random_state == 0 else args.random_state}, "
-          f"skip_tsne={args.skip_tsne}")
-    print(f"  Threads: OMP={os.environ.get('OMP_NUM_THREADS', '(unset)')} "
-          f"MKL={os.environ.get('MKL_NUM_THREADS', '(unset)')} "
-          f"OPENBLAS={os.environ.get('OPENBLAS_NUM_THREADS', '(unset)')} "
-          f"NUMBA={os.environ.get('NUMBA_NUM_THREADS', '(unset)')}")
-    print(f"  Cache:   NUMBA_CACHE_DIR={os.environ.get('NUMBA_CACHE_DIR', '(unset)')}")
-    print(f"  Date:    {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    _check_jaspar_env(args)
-    print("=" * 60)
-
-    # ── 1. Load genome ──────────────────────────────────────────────────────
+def _stage1_genome(args, out_dir):
     _diag("STAGE 1: Load genome")
     print("\n=== LOADING REFERENCE GENOME ===")
-    progress_print(f"Genome path argument: {HG38_FA or '(none)'}")
-    genome_cache = GenomeCache(HG38_FA, cache_dir=str(OUT_DIR))
+    progress_print(f"Genome path argument: {args.genome or '(none)'}")
+    genome_cache = GenomeCache(args.genome, cache_dir=str(out_dir))
     genome_cache.load()
     if genome_cache.is_loaded:
         progress_print("Genome loaded — local extraction + fast primer search enabled")
@@ -2616,10 +2576,11 @@ def run_pipeline(args):
     else:
         progress_print("Genome not available — UCSC API fallback for sequences")
         _diag("Genome: NOT loaded — will use UCSC API")
-    _checkpoint(OUT_DIR, "stage1_genome", f"loaded={genome_cache.is_loaded}")
+    _checkpoint(out_dir, "stage1_genome", f"loaded={genome_cache.is_loaded}")
+    return genome_cache
 
-    # ── 2. Load data ────────────────────────────────────────────────────────
-    t0 = time.time()
+
+def _stage2_load_data(args, family_name, out_dir):
     _diag("STAGE 2: Load data")
     print("\n=== LOADING DATA ===")
     try:
@@ -2631,9 +2592,8 @@ def run_pipeline(args):
         if args.test:
             progress_print("Creating mock test data...")
             df_family = create_test_data()
-            FAMILY_NAME = "TEST_TE"
+            family_name = "TEST_TE"
         elif getattr(args, "local", False) and not args.input:
-            # Local mode: auto-download rmsk and build DataFrame from coords
             df_family = _load_local_data(args)
         elif args.input:
             if not Path(args.input).exists():
@@ -2647,13 +2607,13 @@ def run_pipeline(args):
                 else:
                     raise ValueError(f"Missing required column 'TE_name'. Columns: {list(df_raw.columns)}")
             df_family = df_raw[
-                df_raw["TE_name"].str.contains(FAMILY_NAME, case=False, na=False)
+                df_raw["TE_name"].str.contains(family_name, case=False, na=False)
             ].copy().reset_index(drop=True)
-            progress_print(f"Filtered: {len(df_family)} instances of {FAMILY_NAME}")
+            progress_print(f"Filtered: {len(df_family)} instances of {family_name}")
         elif "df" in globals():
             df_raw = globals()["df"]
             df_family = df_raw[
-                df_raw["TE_name"].str.contains(FAMILY_NAME, case=False, na=False)
+                df_raw["TE_name"].str.contains(family_name, case=False, na=False)
             ].copy().reset_index(drop=True)
         else:
             raise RuntimeError(
@@ -2664,8 +2624,8 @@ def run_pipeline(args):
             )
 
         if len(df_family) == 0:
-            _diag(f"  ERROR: No sequences found for family '{FAMILY_NAME}'")
-            print(f"ERROR: No sequences found for family '{FAMILY_NAME}'")
+            _diag(f"  ERROR: No sequences found for family '{family_name}'")
+            print(f"ERROR: No sequences found for family '{family_name}'")
             sys.exit(1)
         progress_print(f"  {len(df_family)} sequences to analyze")
         _diag(f"  Loaded {len(df_family)} rows  columns={list(df_family.columns)}")
@@ -2675,17 +2635,16 @@ def run_pipeline(args):
         _diag(f"  FAILED: {type(e).__name__}: {e}\n{traceback.format_exc()}")
         log_error("LOAD DATA", e)
         sys.exit(1)
-    stage_times["Load Data"] = time.time() - t0
-    _checkpoint(OUT_DIR, "stage2_load_data", f"rows={len(df_family)}  cols={list(df_family.columns)}")
+    _checkpoint(out_dir, "stage2_load_data", f"rows={len(df_family)}  cols={list(df_family.columns)}")
+    return df_family, family_name
 
-    # ── 3. Fetch sequences ──────────────────────────────────────────────────
-    t0 = time.time()
+
+def _stage3_sequences(args, df_family, genome_cache, dirs, out_dir, family_name):
     _diag("STAGE 3: Fetch sequences")
     print("\n=== FETCHING SEQUENCES ===")
     try:
         _diag(f"  has_seq={'Seq' in df_family.columns}  genome_loaded={genome_cache.is_loaded}")
         def _seqs_are_valid(col):
-            """True only if the Seq column has real (non-all-N) sequences for every row."""
             if col.isna().any():
                 return False
             strs = col.astype(str)
@@ -2703,7 +2662,6 @@ def run_pipeline(args):
                     raise ValueError(f"Missing column '{col}' for sequence extraction")
 
             if genome_cache.is_loaded:
-                # Fast local extraction — vectorized per-row, no network
                 progress_print(f"Extracting {len(df_family)} sequences from local genome...")
                 failed = []
                 seqlist = []
@@ -2726,7 +2684,6 @@ def run_pipeline(args):
                     progress_print(f"  {len(failed)} sequences failed extraction")
                 _add_ucsc_urls(df_family, assembly, fetched_from_ucsc=False)
             else:
-                # Parallel UCSC API fetch — ~10x faster than sequential
                 assembly = getattr(args, "assembly", "hg38") or "hg38"
                 n_workers = getattr(args, "fetch_workers", 3)
                 progress_print(f"UCSC fetch settings: assembly={assembly}, workers={n_workers}")
@@ -2745,7 +2702,6 @@ def run_pipeline(args):
                 )
                 df_family["Seq"] = seqlist
                 _add_ucsc_urls(df_family, assembly, fetched_from_ucsc=True)
-                # Validate — if the compute node lost internet mid-run, most seqs will be all-N
                 _n_seqs_total = len(df_family)
                 _n_all_n = df_family["Seq"].astype(str).apply(
                     lambda s: set(s.upper()) <= {"N"}
@@ -2759,42 +2715,38 @@ def run_pipeline(args):
 
         _seq_ok = df_family["Seq"].notna().sum() if "Seq" in df_family.columns else 0
         _diag(f"  Sequences filled: {_seq_ok}/{len(df_family)}")
-        df_family.to_csv(DIRS["data"] / f"{FAMILY_NAME.lower()}_with_sequences.csv", index=False)
-        _diag(f"  Saved: {DIRS['data'] / (FAMILY_NAME.lower() + '_with_sequences.csv')}")
+        df_family.to_csv(dirs["data"] / f"{family_name.lower()}_with_sequences.csv", index=False)
+        _diag(f"  Saved: {dirs['data'] / (family_name.lower() + '_with_sequences.csv')}")
     except Exception as e:
         _diag(f"  FAILED: {type(e).__name__}: {e}\n{traceback.format_exc()}")
         log_error("FETCH SEQUENCES", e)
         sys.exit(1)
-    stage_times["Sequences"] = time.time() - t0
-    _checkpoint(OUT_DIR, "stage3_sequences", f"seq_ok={_seq_ok}/{len(df_family)}")
-    if getattr(args, "stop_after", None) == "sequences":
-        print("[Pipeline] Stopping after sequences stage."); sys.exit(0)
+    _checkpoint(out_dir, "stage3_sequences", f"seq_ok={_seq_ok}/{len(df_family)}")
+    return df_family
 
-    # ── 4. Statistics ───────────────────────────────────────────────────────
-    t0 = time.time()
+
+def _stage4_statistics(df_family, dirs, out_dir, family_name):
     _diag("STAGE 4: Statistics")
     print("\n=== BASIC STATISTICS ===")
     try:
         expr_cols = compute_basic_stats(
             df_family,
-            label=f" — {FAMILY_NAME}",
-            output_file=DIRS["stats"] / "overall_statistics.txt"
+            label=f" — {family_name}",
+            output_file=dirs["stats"] / "overall_statistics.txt"
         )
         _diag(f"  expr_cols={expr_cols}")
     except Exception as e:
         _diag(f"  Statistics FAILED (non-fatal): {type(e).__name__}: {e}\n{traceback.format_exc()}")
         expr_cols = []
-    stage_times["Statistics"] = time.time() - t0
-    _checkpoint(OUT_DIR, "stage4_statistics", f"expr_cols={expr_cols}")
-    if getattr(args, "stop_after", None) == "stats":
-        print("[Pipeline] Stopping after stats stage."); sys.exit(0)
+    (dirs["data"] / "expr_cols.json").write_text(json.dumps(expr_cols))
+    _checkpoint(out_dir, "stage4_statistics", f"expr_cols={expr_cols}")
+    return expr_cols
 
-    # ── 5. Clustering ───────────────────────────────────────────────────────
-    t0 = time.time()
+
+def _stage5_clustering(args, df_family, dirs, out_dir, family_name):
     _diag("STAGE 5: Clustering")
     print("\n=== CLUSTERING ===")
 
-    # min_cluster_size: use explicit arg if provided, else prompt interactively
     _n_seqs = len(df_family)
     _mcs_default = max(5, _n_seqs // 5)
     if args.min_cluster_size is not None:
@@ -2840,8 +2792,8 @@ def run_pipeline(args):
             df_family, cluster_labels = clustering_analysis(
                 df_family, kmer=args.kmer,
                 min_cluster_size=_min_cluster_size,
-                out_dir=DIRS["clustering"],
-                family_name=FAMILY_NAME,
+                out_dir=dirs["clustering"],
+                family_name=family_name,
                 debug=args.debug,
                 pca_dims=args.pca_dims,
                 n_epochs=args.n_epochs,
@@ -2853,13 +2805,12 @@ def run_pipeline(args):
             )
             _diag(f"  clustering_analysis returned — Cluster col present: {'Cluster' in df_family.columns}")
 
-        df_family.to_csv(DIRS["data"] / f"{FAMILY_NAME.lower()}_clustered.csv", index=False)
+        df_family.to_csv(dirs["data"] / f"{family_name.lower()}_clustered.csv", index=False)
         n_clusters = len([c for c in df_family["Cluster"].unique() if c >= 0])
         progress_print(f"  {n_clusters} clusters, {(df_family['Cluster']==-1).sum()} noise")
         _diag(f"  n_clusters={n_clusters}  noise={(df_family['Cluster']==-1).sum()}")
 
-        # Write coordinates/strand/sequence summary to base output dir
-        _seq_csv = OUT_DIR / f"{FAMILY_NAME.lower()}_sequences.csv"
+        _seq_csv = out_dir / f"{family_name.lower()}_sequences.csv"
         _strand_series = df_family.apply(_row_strand, axis=1)
         _seq_out = pd.DataFrame({
             "chr":      df_family["chr"].values,
@@ -2875,15 +2826,14 @@ def run_pipeline(args):
         log_error("CLUSTERING", e)
         df_family["Cluster"] = 0
         n_clusters = 0
-        df_family.to_csv(DIRS["data"] / f"{FAMILY_NAME.lower()}_clustered.csv", index=False)
-    stage_times["Clustering"] = time.time() - t0
-    _checkpoint(OUT_DIR, "stage5_clustering", f"n_clusters={n_clusters}")
-    if getattr(args, "stop_after", None) == "clustering":
-        print("[Pipeline] Stopping after clustering stage."); sys.exit(0)
+        df_family.to_csv(dirs["data"] / f"{family_name.lower()}_clustered.csv", index=False)
+    _checkpoint(out_dir, "stage5_clustering", f"n_clusters={n_clusters}")
+    return df_family, n_clusters
 
-    # Per-cluster stats: text files written per cluster, summary via SQL
+
+def _stage5b_percluster_stats(df_family, dirs):
     _diag("  Writing per-cluster stats")
-    cs_dir = DIRS["stats"] / "per_cluster"
+    cs_dir = dirs["stats"] / "per_cluster"
     cs_dir.mkdir(exist_ok=True)
     for cl in sorted(df_family["Cluster"].unique()):
         c_df = df_family[df_family["Cluster"] == cl]
@@ -2892,112 +2842,333 @@ def run_pipeline(args):
             output_file=cs_dir / f"cluster_{cl}_statistics.txt"
         )
     sql_summary = _cluster_summary_sql(df_family)
-    sql_summary.to_csv(DIRS["stats"] / "cluster_summary.csv", index=False)
+    sql_summary.to_csv(dirs["stats"] / "cluster_summary.csv", index=False)
     _diag(f"  cluster_summary.csv written  shape={sql_summary.shape}")
 
-    # ── 6. Dashboard ────────────────────────────────────────────────────────
-    t0 = time.time()
+
+def _stage6_dashboard(df_family, expr_cols, dirs, out_dir, family_name):
     _diag("STAGE 6: Dashboard")
     print("\n=== VISUALIZATION DASHBOARD ===")
     try:
-        build_dashboard(df_family, expr_cols, DIRS["visualizations"], FAMILY_NAME)
+        build_dashboard(df_family, expr_cols, dirs["visualizations"], family_name)
         _diag("  Dashboard built OK")
     except Exception as e:
         _diag(f"  Dashboard FAILED (non-fatal): {type(e).__name__}: {e}\n{traceback.format_exc()}")
-    stage_times["Dashboard"] = time.time() - t0
-    _checkpoint(OUT_DIR, "stage6_dashboard")
-    if getattr(args, "stop_after", None) == "dashboard":
-        print("[Pipeline] Stopping after dashboard stage."); sys.exit(0)
+    _checkpoint(out_dir, "stage6_dashboard")
 
-    # ── 7. Alignment ────────────────────────────────────────────────────────
-    if not args.skip_alignment:
-        t0 = time.time()
-        _diag("STAGE 7: Alignment")
-        print("\n=== ALIGNMENT ===")
-        try:
-            run_alignment_pipeline(df_family, OUT_DIR, FAMILY_NAME)
-            _diag("  Alignment OK")
-        except Exception as e:
-            _diag(f"  Alignment FAILED (non-fatal): {type(e).__name__}: {e}\n{traceback.format_exc()}")
-            log_error("ALIGNMENT", e)
-        stage_times["Alignment"] = time.time() - t0
-        _checkpoint(OUT_DIR, "stage7_alignment")
-        if getattr(args, "stop_after", None) == "alignment":
-            print("[Pipeline] Stopping after alignment stage."); sys.exit(0)
-    else:
-        _diag("STAGE 7: Alignment SKIPPED (--skip-alignment)")
 
-    # ── 9. JASPAR motif / TF binding / GO analysis ─────────────────────────
-    if not args.skip_motif:
-        t0 = time.time()
-        _diag("STAGE 9: Motif / TFBS / GO")
-        clustered_csv = DIRS["data"] / f"{FAMILY_NAME.lower()}_clustered.csv"
-        _diag(f"  clustered_csv={clustered_csv}  exists={clustered_csv.exists()}")
-        _diag(f"  jaspar_bed={getattr(args,'jaspar_bed',None)}  p_threshold={getattr(args,'p_threshold',None)}")
-        try:
-            run_motif_stage_full(args, OUT_DIR, DIRS, FAMILY_NAME,
-                                 clustered_csv=str(clustered_csv))
-            _diag("  Motif stage completed OK")
-        except SystemExit as e:
-            if e.code in (0, None):
-                _diag(f"  Motif stage SystemExit code={e.code} (clean)")
-            else:
-                _diag(f"  Motif stage SystemExit code={e.code}")
-                progress_print(f"  Motif/GO stage did not complete (exit={e.code})")
-                (DIRS["motif"] / "MOTIF_ANALYSIS_FAILED.txt").write_text(
-                    f"Motif stage exited with code {e.code}.\n"
-                    "Check the log, genome build, JASPAR BED path, and bedtools availability.\n"
-                )
-                # Die hard so the LSF job is marked FAILED (not "Successfully
-                # completed") and we can keep iterating on the real fix.
-                progress_print("[Pipeline] FATAL: motif stage failed — aborting job.")
-                sys.exit(e.code or 1)
-        except Exception as e:
-            _diag(f"  Motif FAILED: {type(e).__name__}: {e}\n{traceback.format_exc()}")
-            log_error("MOTIF / TFBS / GO", e)
-            (DIRS["motif"] / "MOTIF_ANALYSIS_FAILED.txt").write_text(
-                f"Motif stage failed: {type(e).__name__}: {e}\n"
+def _stage7_alignment(df_family, out_dir, family_name):
+    _diag("STAGE 7: Alignment")
+    print("\n=== ALIGNMENT ===")
+    try:
+        run_alignment_pipeline(df_family, out_dir, family_name)
+        _diag("  Alignment OK")
+    except Exception as e:
+        _diag(f"  Alignment FAILED (non-fatal): {type(e).__name__}: {e}\n{traceback.format_exc()}")
+        log_error("ALIGNMENT", e)
+    _checkpoint(out_dir, "stage7_alignment")
+
+
+def _stage9_motif(args, out_dir, dirs, family_name, clustered_csv, fatal_on_error=True):
+    _diag("STAGE 9: Motif / TFBS / GO")
+    _diag(f"  clustered_csv={clustered_csv}  exists={Path(clustered_csv).exists()}")
+    _diag(f"  jaspar_bed={getattr(args,'jaspar_bed',None)}  p_threshold={getattr(args,'p_threshold',None)}")
+    try:
+        run_motif_stage_full(args, out_dir, dirs, family_name, clustered_csv=str(clustered_csv))
+        _diag("  Motif stage completed OK")
+    except SystemExit as e:
+        if e.code in (0, None):
+            _diag(f"  Motif stage SystemExit code={e.code} (clean)")
+        else:
+            _diag(f"  Motif stage SystemExit code={e.code}")
+            progress_print(f"  Motif/GO stage did not complete (exit={e.code})")
+            (dirs["motif"] / "MOTIF_ANALYSIS_FAILED.txt").write_text(
+                f"Motif stage exited with code {e.code}.\n"
+                "Check the log, genome build, JASPAR BED path, and bedtools availability.\n"
             )
-            # Die hard so the LSF job is marked FAILED (not "Successfully
-            # completed") and we can keep iterating on the real fix.
+            progress_print("[Pipeline] FATAL: motif stage failed — aborting job.")
+            sys.exit(e.code or 1)
+    except Exception as e:
+        _diag(f"  Motif FAILED: {type(e).__name__}: {e}\n{traceback.format_exc()}")
+        log_error("MOTIF / TFBS / GO", e)
+        (dirs["motif"] / "MOTIF_ANALYSIS_FAILED.txt").write_text(
+            f"Motif stage failed: {type(e).__name__}: {e}\n"
+        )
+        if fatal_on_error:
             progress_print(f"[Pipeline] FATAL: motif stage failed ({type(e).__name__}: {e}) — aborting job.")
             sys.exit(1)
-        stage_times["Motif+TFBS+GO"] = time.time() - t0
-        _checkpoint(OUT_DIR, "stage9_motif")
-        if getattr(args, "stop_after", None) in {"motif", "go"}:
-            print("[Pipeline] Stopping after motif/go stage."); sys.exit(0)
-    else:
-        _diag("STAGE 9: Motif SKIPPED (--skip-motif)")
+    _checkpoint(out_dir, "stage9_motif")
 
-    # ── 10. Primer design ───────────────────────────────────────────────────
-    if not args.skip_primers:
-        t0 = time.time()
-        _diag("STAGE 10: Primer design")
-        print("\n=== PRIMER DESIGN ===")
+
+def _stage10_primers(args, df_family, out_dir, dirs, family_name, genome_cache=None):
+    _diag("STAGE 10: Primer design")
+    print("\n=== PRIMER DESIGN ===")
+    try:
+        use_genome = genome_cache is not None and not args.skip_genome
+        if use_genome and getattr(args, "parallel_primers", False) and genome_cache.is_loaded:
+            genome_cache._default_parallel = True
+        design_primers(
+            df_family,
+            primer_k=args.primer_kmer,
+            top_global=args.top_global,
+            top_cluster=args.top_cluster,
+            genome_fa=args.genome if use_genome else None,
+            genome_cache=genome_cache if use_genome else None,
+            primer_timeout=args.primer_timeout,
+            out_dir=dirs["primers"],
+            family_name=family_name,
+        )
+        _diag("  Primer design OK")
+    except Exception as e:
+        _diag(f"  Primer design FAILED: {type(e).__name__}: {e}\n{traceback.format_exc()}")
+        log_error("PRIMER DESIGN", e)
+    _checkpoint(out_dir, "stage10_primers")
+
+
+def _run_single_stage(args):
+    """Run exactly one named pipeline stage (--run-stage) against
+    --family/--output and exit. Each branch loads whatever upstream state it
+    needs from disk, since this always runs in its own process (one Nextflow
+    task per stage)."""
+    family_name, out_dir, dirs = _setup_output(args)
+    stage = args.run_stage
+    _DIAG_LOG_PATH_msg = f"RUN-STAGE: {stage}"
+    _diag(_DIAG_LOG_PATH_msg)
+
+    if stage == "genome":
+        _stage1_genome(args, out_dir)
+
+    elif stage == "data":
+        df_family, family_name = _stage2_load_data(args, family_name, out_dir)
+        df_family.to_csv(dirs["data"] / f"{family_name.lower()}_raw.csv", index=False)
+
+    elif stage == "sequences":
+        genome_cache = _stage1_genome(args, out_dir)
+        df_family = _load_raw_csv(dirs, family_name)
+        _stage3_sequences(args, df_family, genome_cache, dirs, out_dir, family_name)
+
+    elif stage == "stats":
+        df_family = _load_with_sequences_csv(dirs, family_name)
+        _stage4_statistics(df_family, dirs, out_dir, family_name)
+
+    elif stage == "clustering":
+        df_family = _load_with_sequences_csv(dirs, family_name)
+        df_family, n_clusters = _stage5_clustering(args, df_family, dirs, out_dir, family_name)
+        _stage5b_percluster_stats(df_family, dirs)
+
+    elif stage == "dashboard":
+        df_family, _ = _load_clustered_csv(dirs, out_dir, family_name)
+        expr_cols = _load_expr_cols(dirs)
+        _stage6_dashboard(df_family, expr_cols, dirs, out_dir, family_name)
+
+    elif stage == "alignment":
+        df_family, _ = _load_clustered_csv(dirs, out_dir, family_name)
+        _stage7_alignment(df_family, out_dir, family_name)
+
+    elif stage == "motif":
+        df_family, clustered_csv = _load_clustered_csv(dirs, out_dir, family_name)
+        _stage9_motif(args, out_dir, dirs, family_name, clustered_csv, fatal_on_error=True)
+
+    elif stage == "primers":
+        df_family, _ = _load_clustered_csv(dirs, out_dir, family_name)
+        genome_cache = None if args.skip_genome else _stage1_genome(args, out_dir)
+        _stage10_primers(args, df_family, out_dir, dirs, family_name, genome_cache)
+
+    elif stage == "standout":
+        stage_times = {}
+        _run_standout_analysis(args, out_dir, dirs, family_name, stage_times)
+
+    print(f"\n[Pipeline] --run-stage {stage} complete.")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# MAIN PIPELINE
+# ═══════════════════════════════════════════════════════════════════════════
+
+def run_pipeline(args):
+    """Execute the full TE analysis pipeline."""
+    global OUT_DIR, _DIAG_LOG_PATH
+
+    FAMILY_NAME, OUT_DIR, DIRS = _setup_output(args)
+    HG38_FA = args.genome
+
+    _diag("=" * 70)
+    _diag(f"PIPELINE START  family={FAMILY_NAME}  out={OUT_DIR.resolve()}")
+    _diag(f"Python: {sys.version}")
+    _diag(f"Args: {vars(args)}")
+    _diag(f"CWD: {os.getcwd()}")
+    _diag(f"sys.stdin.isatty={getattr(sys.stdin, 'isatty', lambda: False)()}")
+    _diag("=" * 70)
+    _diag(f"Output dirs created: {[str(d) for d in DIRS.values()]}")
+
+    if args.validate_existing:
+        validate_existing_outputs(OUT_DIR, FAMILY_NAME)
+
+    if getattr(args, "nextflow", False):
+        if _run_full_pipeline_nextflow(args, OUT_DIR, FAMILY_NAME):
+            return None
+        print("  Falling back to in-process pipeline.")
+
+    # Granular motif/tfbs/go-only resume (distinct from the generic stage
+    # cascade below — lets a user re-run just TFBS or just GO without
+    # redoing the full JASPAR motif overlap step).
+    if args.resume_from in {"motif", "tfbs", "go"}:
         try:
-            if getattr(args, "parallel_primers", False) and genome_cache.is_loaded:
-                genome_cache._default_parallel = True
-            design_primers(
-                df_family,
-                primer_k=args.primer_kmer,
-                top_global=args.top_global,
-                top_cluster=args.top_cluster,
-                genome_fa=None if args.skip_genome else HG38_FA,
-                genome_cache=None if args.skip_genome else genome_cache,
-                primer_timeout=args.primer_timeout,
-                out_dir=DIRS["primers"],
-                family_name=FAMILY_NAME,
+            run_motif_tfbs_go(
+                args, OUT_DIR, DIRS, FAMILY_NAME,
+                run_motif=args.resume_from == "motif",
+                run_tfbs=args.resume_from in {"motif", "tfbs"},
+                run_go=args.resume_from in {"motif", "tfbs", "go"},
             )
-            _diag("  Primer design OK")
+        except SystemExit:
+            raise
         except Exception as e:
-            _diag(f"  Primer design FAILED: {type(e).__name__}: {e}\n{traceback.format_exc()}")
-            log_error("PRIMER DESIGN", e)
-        stage_times["Primers"] = time.time() - t0
-        _checkpoint(OUT_DIR, "stage10_primers")
-        if getattr(args, "stop_after", None) == "primers":
-            print("[Pipeline] Stopping after primers stage."); sys.exit(0)
+            log_error(f"RESUME FROM {args.resume_from.upper()}", e)
+            sys.exit(1)
+        print("\nResume run complete.")
+        return None
+
+    if args.resume_from == "standout":
+        # Skip all pipeline stages — run only Stage 11 standout analysis modules.
+        # Used by the parallel-job submission path as the final job after the
+        # earlier stage jobs complete.
+        _pipeline_start_sa = time.time()
+        _stage_times_sa = {}
+        try:
+            _run_standout_analysis(args, OUT_DIR, DIRS, FAMILY_NAME, _stage_times_sa)
+        except SystemExit:
+            raise
+        except Exception as e:
+            log_error("RESUME FROM STANDOUT", e)
+            sys.exit(1)
+        total_sa = time.time() - _pipeline_start_sa
+        print(f"\nResume run complete (standout analysis only, {total_sa:.0f}s).")
+        return None
+
+    pipeline_start = time.time()
+    stage_times = {}
+
+    genome_cache = None
+    df_family = None
+    expr_cols = []
+    n_clusters = 0
+
+    order = ["genome", "data", "sequences", "stats", "clustering", "dashboard",
+              "alignment", "motif", "primers", "standout"]
+    resume = args.resume_from
+    stop_after = getattr(args, "stop_after", None)
+    start_idx = order.index(resume) if resume in order else 0
+
+    if start_idx > 0:
+        # Reload the minimal upstream state needed to enter mid-pipeline.
+        if resume == "sequences":
+            genome_cache = _stage1_genome(args, OUT_DIR)
+            df_family = _load_raw_csv(DIRS, FAMILY_NAME)
+        elif resume == "stats":
+            df_family = _load_with_sequences_csv(DIRS, FAMILY_NAME)
+        elif resume == "clustering":
+            df_family = _load_with_sequences_csv(DIRS, FAMILY_NAME)
+        elif resume == "dashboard":
+            df_family, _ = _load_clustered_csv(DIRS, OUT_DIR, FAMILY_NAME)
+            expr_cols = _load_expr_cols(DIRS)
+            n_clusters = len([c for c in df_family["Cluster"].unique() if c >= 0])
+        elif resume in ("alignment", "primers"):
+            df_family, _ = _load_clustered_csv(DIRS, OUT_DIR, FAMILY_NAME)
+            n_clusters = len([c for c in df_family["Cluster"].unique() if c >= 0])
+            genome_cache = (_stage1_genome(args, OUT_DIR) if resume == "primers"
+                             else type('_NullCache', (), {'is_loaded': False})())
+        print(f"\n[Pipeline] Resuming from stage: {resume}")
     else:
-        _diag("STAGE 10: Primers SKIPPED (--skip-primers)")
+        print("\n" + "=" * 60)
+        print(f"TE ANALYSIS PIPELINE")
+        print(f"  Family:  {FAMILY_NAME}")
+        print(f"  Output:  {OUT_DIR.resolve()}")
+        print(f"  DiagLog: {_DIAG_LOG_PATH}")
+        print(f"  Genome:  {HG38_FA or '(not provided)'}")
+        if getattr(args, "local", False):
+            print(f"  Mode:    LOCAL  (assembly={getattr(args, 'assembly', 'hg38')})")
+        print(f"  K-mer:   {args.kmer}")
+        print(f"  UMAP:    pca_dims={args.pca_dims}, n_epochs={args.n_epochs}, "
+              f"random_state={'None/multicore' if args.random_state == 0 else args.random_state}, "
+              f"skip_tsne={args.skip_tsne}")
+        print(f"  Threads: OMP={os.environ.get('OMP_NUM_THREADS', '(unset)')} "
+              f"MKL={os.environ.get('MKL_NUM_THREADS', '(unset)')} "
+              f"OPENBLAS={os.environ.get('OPENBLAS_NUM_THREADS', '(unset)')} "
+              f"NUMBA={os.environ.get('NUMBA_NUM_THREADS', '(unset)')}")
+        print(f"  Cache:   NUMBA_CACHE_DIR={os.environ.get('NUMBA_CACHE_DIR', '(unset)')}")
+        print(f"  Date:    {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        _check_jaspar_env(args)
+        print("=" * 60)
+
+    if start_idx <= order.index("genome"):
+        genome_cache = _stage1_genome(args, OUT_DIR)
+
+    if start_idx <= order.index("data"):
+        t0 = time.time()
+        df_family, FAMILY_NAME = _stage2_load_data(args, FAMILY_NAME, OUT_DIR)
+        df_family.to_csv(DIRS["data"] / f"{FAMILY_NAME.lower()}_raw.csv", index=False)
+        stage_times["Load Data"] = time.time() - t0
+
+    if start_idx <= order.index("sequences"):
+        t0 = time.time()
+        df_family = _stage3_sequences(args, df_family, genome_cache, DIRS, OUT_DIR, FAMILY_NAME)
+        stage_times["Sequences"] = time.time() - t0
+        if stop_after == "sequences":
+            print("[Pipeline] Stopping after sequences stage."); return None
+
+    if start_idx <= order.index("stats"):
+        t0 = time.time()
+        expr_cols = _stage4_statistics(df_family, DIRS, OUT_DIR, FAMILY_NAME)
+        stage_times["Statistics"] = time.time() - t0
+        if stop_after == "stats":
+            print("[Pipeline] Stopping after stats stage."); return None
+
+    if start_idx <= order.index("clustering"):
+        t0 = time.time()
+        df_family, n_clusters = _stage5_clustering(args, df_family, DIRS, OUT_DIR, FAMILY_NAME)
+        stage_times["Clustering"] = time.time() - t0
+        if stop_after == "clustering":
+            print("[Pipeline] Stopping after clustering stage."); return None
+        _stage5b_percluster_stats(df_family, DIRS)
+
+    if start_idx <= order.index("dashboard"):
+        t0 = time.time()
+        _stage6_dashboard(df_family, expr_cols, DIRS, OUT_DIR, FAMILY_NAME)
+        stage_times["Dashboard"] = time.time() - t0
+        if stop_after == "dashboard":
+            print("[Pipeline] Stopping after dashboard stage."); return None
+
+    if start_idx <= order.index("alignment"):
+        if not args.skip_alignment:
+            t0 = time.time()
+            _stage7_alignment(df_family, OUT_DIR, FAMILY_NAME)
+            stage_times["Alignment"] = time.time() - t0
+            if stop_after == "alignment":
+                print("[Pipeline] Stopping after alignment stage."); return None
+        else:
+            _diag("STAGE 7: Alignment SKIPPED (--skip-alignment)")
+
+    if start_idx <= order.index("motif"):
+        if not args.skip_motif:
+            t0 = time.time()
+            clustered_csv = DIRS["data"] / f"{FAMILY_NAME.lower()}_clustered.csv"
+            _stage9_motif(args, OUT_DIR, DIRS, FAMILY_NAME, clustered_csv, fatal_on_error=True)
+            stage_times["Motif+TFBS+GO"] = time.time() - t0
+            if stop_after in {"motif", "go"}:
+                print("[Pipeline] Stopping after motif/go stage."); return None
+        else:
+            _diag("STAGE 9: Motif SKIPPED (--skip-motif)")
+
+    if start_idx <= order.index("primers"):
+        if not args.skip_primers:
+            t0 = time.time()
+            _stage10_primers(args, df_family, OUT_DIR, DIRS, FAMILY_NAME,
+                              genome_cache if not args.skip_genome else None)
+            stage_times["Primers"] = time.time() - t0
+            if stop_after == "primers":
+                print("[Pipeline] Stopping after primers stage."); return None
+        else:
+            _diag("STAGE 10: Primers SKIPPED (--skip-primers)")
 
     # ── 11. Standout analysis modules ───────────────────────────────────────
     _run_standout_analysis(args, OUT_DIR, DIRS, FAMILY_NAME, stage_times)
@@ -3087,4 +3258,7 @@ def run_pipeline(args):
 if __name__ == "__main__":
     _check_hpc_environment()
     args = parse_args()
-    run_pipeline(args)
+    if args.run_stage:
+        _run_single_stage(args)
+    else:
+        run_pipeline(args)

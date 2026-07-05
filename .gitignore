@@ -1,5 +1,10 @@
 __pycache__/
 .DS_Store
+# Nextflow runtime artifacts (work dirs, resumable session cache, logs)
+work/
+.nextflow/
+.nextflow.log*
+results_test/
 # ColabFold runtime artifacts (large; not source)
 colabfold_params/
 *.sif
