@@ -106,22 +106,22 @@ def parse_args(argv=None):
                    help="Path to genome FASTA (enables local extraction + primer search)")
     p.add_argument("--output",   type=str, default="results",
                    help="Base output directory (default: results)")
-    p.add_argument("--kmer",     type=int, default=6,
-                   help="K-mer size for clustering (default: 6; use --primer-kmer for primers)")
+    p.add_argument("--kmer",     type=int, default=10,
+                   help="K-mer size for clustering (default: 10; use --primer-kmer for primers)")
     p.add_argument("--pca-dims", type=int, default=50,
                    help="SVD components fed into UMAP/t-SNE clustering (default: 50)")
     p.add_argument("--n-epochs", type=int, default=200,
                    help="UMAP optimisation epochs for clustering (default: 200)")
     p.add_argument("--random-state", type=int, default=42,
                    help="Clustering random seed; pass 0 to enable multicore UMAP")
-    p.add_argument("--n-neighbors",    type=int,   default=30,
-                   help="UMAP n_neighbors (default: 30)")
+    p.add_argument("--n-neighbors",    type=int,   default=15,
+                   help="UMAP n_neighbors (default: 15)")
     p.add_argument("--min-dist",       type=float, default=0.0,
                    help="UMAP min_dist (default: 0.0)")
-    p.add_argument("--min-cluster-size", type=int, default=None,
-                   help="HDBSCAN min_cluster_size (default: N//5, min 5)")
-    p.add_argument("--min-samples",    type=int,   default=7,
-                   help="HDBSCAN min_samples (default: 7)")
+    p.add_argument("--min-cluster-size", type=int, default=100,
+                   help="HDBSCAN min_cluster_size (default: 100)")
+    p.add_argument("--min-samples",    type=int,   default=5,
+                   help="HDBSCAN min_samples (default: 5)")
     p.add_argument("--skip-tsne", action="store_true",
                    help="Skip t-SNE during clustering for faster UMAP/PCA pipeline runs")
     p.add_argument("--primer-kmer",  type=int, default=18, help="Primer k-mer size")

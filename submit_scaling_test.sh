@@ -88,6 +88,7 @@ JOB_SH="$OUT_DIR/_run_scaling_test.sh"
     # Report is part of 'all the tests'; PDF is optional (graceful if no TeX).
     echo "$PYTHON generate_latex_report.py $(printf '%q' "$run_dir") || echo \"  report build skipped/failed: $tag\""
     echo "echo \"  wall for $tag: \${SECONDS}s\""
+    echo "du -sb $(printf '%q' "$run_dir") 2>/dev/null | cut -f1 > $(printf '%q' "$run_dir")/disk_usage_bytes.txt"
   done
 
   # ── Aggregate every stage_times.json into one table ──────────────────────────
@@ -96,25 +97,36 @@ echo; echo "==================== TIMING SUMMARY ===================="
 python3 - "$OUT_DIR" <<'PYEOF'
 import json, sys, glob, os, csv
 root = sys.argv[1]
-files = sorted(glob.glob(os.path.join(root, "run_*", "stage_times.json")))
+files = sorted(glob.glob(os.path.join(root, "run_*", "*", "stage_times.json")))
 if not files:
     print("No stage_times.json found — did any run complete?"); sys.exit(0)
 recs, stages = [], []
 for f in files:
     try: d = json.load(open(f))
     except Exception as e: print(f"  skip {f}: {e}"); continue
+    # stage_times.json lives at run_<tag>/<family_lower>/stage_times.json;
+    # disk_usage_bytes.txt is written one level up, at run_<tag>/.
+    run_dir = os.path.dirname(os.path.dirname(f))
+    disk_bytes = None
+    du_file = os.path.join(run_dir, "disk_usage_bytes.txt")
+    if os.path.exists(du_file):
+        try:
+            disk_bytes = int(open(du_file).read().strip())
+        except Exception:
+            disk_bytes = None
+    d["disk_bytes"] = disk_bytes
     recs.append(d)
     for s in d.get("stage_seconds", {}):
         if s not in stages: stages.append(s)
 cols = ["family", "assembly", "n_sequences", "n_clusters", "max_loci",
-        "total_seconds", "peak_rss_mb"] + stages
+        "total_seconds", "peak_rss_mb", "disk_bytes"] + stages
 out_csv = os.path.join(root, "scaling_timings.csv")
 with open(out_csv, "w", newline="") as fh:
     w = csv.writer(fh); w.writerow(cols)
     for d in recs:
         w.writerow([d.get("family"), d.get("assembly"), d.get("n_sequences"),
                     d.get("n_clusters"), d.get("max_loci"), d.get("total_seconds"),
-                    d.get("peak_rss_mb")]
+                    d.get("peak_rss_mb"), d.get("disk_bytes")]
                    + [d.get("stage_seconds", {}).get(s, "") for s in stages])
 # pretty print: sort by n_sequences so the scaling trend is visible
 recs.sort(key=lambda d: (d.get("n_sequences") or 0))
@@ -146,6 +158,27 @@ if have_mem:
           f'(-M {int(-(-worst*1.3//100)*100)}) for the largest size tested.')
 else:
     print("peak_rss_mb unavailable (resource module missing?) — memory not captured.")
+
+# ── Disk space section ────────────────────────────────────────────────────────
+print("\n### DISK SPACE ###")
+print("Total output directory size per run (du -sb; includes all_overlaps.tsv, JASPAR BED, CIAlign PNGs, etc).")
+shdr = f'{"family":<12}{"n_seq":>7}{"size_MB":>10}{"size_GB":>9}'
+print(shdr); print("-" * len(shdr))
+have_disk = False
+for d in recs:
+    db = d.get("disk_bytes")
+    if db is None:
+        print(f'{str(d.get("family"))[:11]:<12}{d.get("n_sequences") or 0:>7}{"n/a":>10}{"n/a":>9}')
+        continue
+    have_disk = True
+    mb = db / (1024 * 1024)
+    print(f'{str(d.get("family"))[:11]:<12}{d.get("n_sequences") or 0:>7}{mb:>10.1f}{mb/1024:>9.2f}')
+if have_disk:
+    worst_db = max((d["disk_bytes"] for d in recs if d.get("disk_bytes")), default=0)
+    print(f'\nLargest run used {worst_db/(1024*1024):.1f} MB ({worst_db/(1024**3):.2f} GB) on disk — '
+          f'plan scratch/output storage accordingly per family run.')
+else:
+    print("disk_usage_bytes.txt unavailable — disk usage not captured.")
 print(f"\nSaved: {out_csv}")
 PYEOF
 PY

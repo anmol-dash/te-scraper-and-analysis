@@ -4,6 +4,7 @@
 % Packages
 % ---------------------------------------------------------------------------
 \usepackage[T1]{fontenc}
+\usepackage{lmodern}
 \usepackage[utf8]{inputenc}
 \usepackage[margin=1in]{geometry}
 \usepackage{graphicx}
@@ -198,9 +199,13 @@ assembling many independent tools and ad-hoc scripts. We present \textbf{GAMECA}
 Alignment, Motif, Expression and Clustering Analysis), a modular pipeline that chains these
 downstream steps behind a single interface and runs them either locally or on LSF/Slurm
 high-performance-computing (HPC) clusters. A native desktop application drives a Python
-backend over a streaming protocol; engineering for the practical bottlenecks---an in-memory
-genome cache that removes repeated multi-gigabyte FASTA reads, plus optional compiled hot
-paths---keeps whole-family analysis tractable. We position GAMECA against both TE-specific
+backend over a streaming protocol, and the same engine is exposed as a Nextflow DSL2
+workflow~\citep{ditommaso2017} that follows nf-core conventions~\citep{ewels2020}, so the
+copy-resolved analysis modules run as parallel, individually-resourced, resumable tasks and
+the whole pipeline can be embedded as a subworkflow in other DSL2 pipelines. Engineering for
+the practical bottlenecks---an in-memory genome cache that removes repeated multi-gigabyte
+FASTA reads, plus optional compiled hot paths---keeps whole-family analysis tractable. We
+position GAMECA against both TE-specific
 tools and general analysis platforms, showing that it uniquely packages the downstream
 TE-family workflow behind an accessible, HPC-ready interface, and illustrate it end-to-end on
 the \emph{MT2\_Mm} mouse ERV family using locus-level expression quantified by
@@ -260,7 +265,11 @@ packages analyses as reusable modules~\citep{genepattern2006}; and nf-core/Nextf
 container-backed pipelines portable across most HPC schedulers and cloud
 providers~\citep{ewels2020,ditommaso2017}. These are powerful substrates, but none ships a
 ready-made downstream-TE-family workflow: the user must still locate, wrap and wire each
-stage and supply the TE-specific logic.
+stage and supply the TE-specific logic. GAMECA does not compete with this substrate---it
+builds on it: the pipeline ships a Nextflow DSL2 implementation
+(Section~\ref{sec:orchestration}) that follows the nf-core meta and module conventions and is
+importable as a subworkflow, so GAMECA supplies exactly the TE-specific workflow that the
+general platforms leave to the user while inheriting their portability and reproducibility.
 
 \emph{GAMECA's niche} is therefore the otherwise-empty intersection of downstream-TE-family
 coverage and accessible, HPC-ready execution. The comparison is one of \emph{scope and
@@ -313,8 +322,9 @@ progress and result events, so long-running jobs report live status and can be c
 This separation keeps the scientific code in plain Python---usable on its own from the
 command line---while the UI remains a thin, replaceable client.
 
-The analysis backend consists of a driver script that orchestrates the stages, one
-single-responsibility module per stage, and an SSH client that connects the workflow to a
+The analysis backend consists of a driver script (\texttt{query.py}) that orchestrates the
+core stages, one single-responsibility module per stage, a family of standalone
+\texttt{run\_*.py} analysis modules, and an SSH client that connects the workflow to a
 remote cluster. In \emph{local mode} GAMECA executes entirely on the user's machine, fetching
 sequence from the UCSC API~\citep{kent2002ucsc} when no local FASTA is available. In
 \emph{HPC mode} it uploads the analysis code to a login node, submits a batch job, streams
@@ -323,6 +333,13 @@ UCSC sequence, JASPAR motifs~\citep{castromondragon2022jaspar}, mygene.info
 annotation~\citep{xin2016mygene}---is reached through a thin adapter, so the rest of the
 pipeline is source-agnostic and adding an assembly or swapping a source is a localised
 change.
+
+Orchestration is deliberately decoupled from the analysis code. The driver can run the
+downstream modules itself as a sequential subprocess loop, or delegate them to a Nextflow DSL2
+layer~\citep{ditommaso2017} that executes the same unmodified Python modules as parallel,
+individually-scheduled tasks (Section~\ref{sec:orchestration}). No scientific code is
+duplicated between the two: the Python modules remain the single implementation, and the
+Nextflow layer is a thin wrapper that calls them.
 
 \begin{figure}[h]
   \centering
@@ -438,6 +455,115 @@ $\cythonSpeedupKmer{}\times$ for $k$-mer matrix construction.
     \texttt{GenomeCache}. \textbf{Right}: runtime of the Cython hot paths versus their
     pure-Python equivalents on real family sequences. Ratios are written from the run.}
   \label{fig:bench}
+\end{figure}
+
+\paragraph{Scaling with input size.}
+To characterise how wall time, peak memory, and disk footprint grow with family size, the
+full pipeline (UCSC sequence fetch through Stage~11 and the LaTeX report) was run from scratch
+on MT2\_Mm (mm10) at five \texttt{-{}-max-loci} caps, each a fresh LSF job (job 97784432, 4 cores,
+24\,GB requested, single-threaded UCSC/JASPAR fetch as the bottleneck rather than
+CPU-parallel stages). Table~\ref{tab:scaling} reports the numbers written by \texttt{query.py} to
+\texttt{stage\_times.json} (wall time via \texttt{ru\_maxrss}) together with the two dominant
+on-disk artefacts logged at the motif stage: the per-run JASPAR bigBed subset and the
+TE$\times$motif overlap table.
+
+\begin{table}[h]
+  \centering
+  \footnotesize
+  \setlength{\tabcolsep}{5pt}
+  \renewcommand{\arraystretch}{1.2}
+  \begin{tabular}{@{}r r r r r r@{}}
+    \toprule
+    \textbf{Loci cap} & \textbf{Sequences} & \textbf{Wall time} & \textbf{Peak RSS} &
+      \textbf{JASPAR BED} & \textbf{Overlap table} \\
+    \midrule
+    100  & 100  & 9.8 min   & 0.62 GB & 7.6 MB   & 11.4 MB \\
+    500  & 500  & 40.0 min  & 1.33 GB & 37.8 MB  & 57.5 MB \\
+    1000 & 1000 & 70.0 min  & 2.20 GB & 75.2 MB  & 114.4 MB \\
+    2000 & 2000 & 134.3 min & 3.91 GB & 150.7 MB & 228.8 MB \\
+    all  & 2641 & 175.4 min & 4.96 GB & 197.7 MB & 299.8 MB \\
+    \bottomrule
+  \end{tabular}
+  \caption{Wall time, peak resident memory, and the two largest per-run on-disk artefacts as a
+    function of \texttt{-{}-max-loci}, MT2\_Mm on mm10. The motif/JASPAR stage dominates wall
+    time at every size (e.g.\ 8190\,s of the 10522\,s total at $N=2641$), driven by the
+    per-run bigBed query against JASPAR (no \texttt{tabix}/\texttt{bgzip} available on this
+    node, so the intersect fell back to a full-file \texttt{bedtools} scan); peak memory and
+    the overlap-table size both scale roughly linearly with $N$.}
+  \label{tab:scaling}
+\end{table}
+
+Two follow-on fixes are implied directly by this run. First, \texttt{tabix}/\texttt{bgzip} were
+absent on the compute node, so JASPAR intersection fell back to a full-file \texttt{bedtools}
+scan at every size instead of the seek-based \texttt{tabix} subsetting the motif stage otherwise
+prefers (Section~\ref{sec:pipeline}); provisioning those binaries (or the container image that
+bundles them) removes the largest single cost in the table. Second, the JASPAR bigBed subset is
+re-downloaded and re-queried per run rather than cached across families on the same assembly,
+so repeated sweeps pay the multi-thousand-second query cost every time; the per-run total disk
+footprint (beyond the two artefacts above) is now captured directly via \texttt{du} in
+\texttt{submit\_scaling\_test.sh} for future sweeps rather than estimated.
+
+% ===========================================================================
+\section{Workflow orchestration with Nextflow}
+\label{sec:orchestration}
+
+The driver's built-in orchestration runs the downstream analysis modules
+(Section~\ref{sec:standout}) in a sequential subprocess loop---correct, but a poor fit for a
+scheduler, because the fifteen modules are mutually independent yet share a single job's
+resource envelope and cannot be resumed individually. GAMECA therefore ships a second
+orchestration layer that expresses the pipeline as a Nextflow DSL2
+workflow~\citep{ditommaso2017} following the nf-core module and \texttt{meta}-map
+conventions~\citep{ewels2020}. The Python code is unchanged; the Nextflow layer only calls it.
+
+\paragraph{Structure.}
+The workflow is factored into processes, subworkflows and a composable end-to-end unit
+(Figure~\ref{fig:nextflow}). A \texttt{GAMECA\_CORE} process runs \texttt{query.py} Stages
+1--10 (invoked with \texttt{-{}-skip-standout}) and emits the family folder. A \texttt{STANDOUT}
+subworkflow then builds a module registry that mirrors the driver's internal module list---the
+single source of truth on the Nextflow side---and scatters it: one \texttt{GAMECA\_STANDOUT}
+task per module, each reading the clustered table and consensus FASTAs from the staged folder
+and writing into an isolated output directory. Because the modules are independent, they run
+concurrently; their outputs are gathered per family and merged back into the family folder.
+The top-level \texttt{GAMECA} subworkflow chains \texttt{CORE} $\to$ \texttt{STANDOUT} and is
+exported for reuse, so an external nf-core-style pipeline can \texttt{include \{ GAMECA \}} and
+drop the entire TE-family workflow into its own DAG. Two entrypoints are provided: a full
+run driven by a samplesheet (\texttt{family,assembly,input}), which fans each family out to one
+core task, fifteen module tasks and a collection step; and a post-alignment entrypoint that
+runs only the module scatter/gather against an already-built folder.
+
+\paragraph{Delegation from the driver.}
+Invoking \texttt{query.py -{}-post-alignment-analyses-nextflow} runs Stages 1--10 in-process
+and then hands the finished folder to the Nextflow post-alignment entrypoint, so the fifteen
+modules execute concurrently under the scheduler instead of in the sequential loop; if the
+\texttt{nextflow} executable is absent the driver transparently falls back to the in-process
+loop. This makes the parallel path opt-in and non-breaking for existing command-line use.
+
+\paragraph{Resources, resume and portability.}
+Each process carries an nf-core resource label (\texttt{process\_low/medium/high}) whose CPU,
+memory and wall-time requests scale with the retry attempt and are clamped by a
+\texttt{resourceLimits} ceiling derived from \texttt{-{}-max\_cpus/-{}-max\_memory/-{}-max\_time},
+so an individual module requests only what it needs and no task can exceed the site's limits.
+\texttt{GAMECA\_CORE} carries the high-memory label to hold the in-memory genome cache
+(Section~\ref{sec:hpc}). Execution backend and container runtime are selected purely by profile
+(\texttt{lsf}, \texttt{slurm}, \texttt{singularity}, \texttt{docker}, \texttt{test}); the
+\texttt{singularity}/\texttt{docker} profiles route every process through the same GAMECA image
+used for containerised HPC execution, eliminating host-level dependency drift. Nextflow's
+content-addressed work directories give per-task \texttt{-resume}, and every run emits an
+execution timeline, trace, resource report and a rendered DAG for provenance. A \texttt{test}
+profile validates the entire DAG through process stubs, requiring neither the genome, network
+access nor the scientific dependencies.
+
+\begin{figure}[h]
+  \centering
+  \resizebox{0.85\textwidth}{!}{\figorbox{fig_nextflow_dag}}
+  \caption{Nextflow DSL2 orchestration. \texttt{GAMECA\_CORE} runs \texttt{query.py} Stages
+    1--10; the \texttt{STANDOUT} subworkflow scatters the copy-resolved analysis modules into
+    independent, individually-resourced \texttt{GAMECA\_STANDOUT} tasks that run in parallel and
+    are gathered back per family. The composable \texttt{GAMECA} subworkflow (\texttt{CORE}
+    $\to$ \texttt{STANDOUT}) is importable into other DSL2 pipelines; execution backend and
+    container runtime are chosen by profile (\texttt{lsf}/\texttt{slurm},
+    \texttt{singularity}/\texttt{docker}).}
+  \label{fig:nextflow}
 \end{figure}
 
 % ===========================================================================
@@ -562,8 +688,8 @@ Beyond the core clustering/expression/primer workflow, GAMECA bundles a set of
 copy-resolved analyses that TE biologists otherwise assemble by hand. Each module
 is a standalone \texttt{run\_*.py} script with a matching HPC submitter
 (\texttt{submit\_*.py}), writes its own measured-values macros and figures, and
-can be composed into a single reproducible run through the declarative pipeline
-(Section~\ref{sec:pipeline-dag}). All numbers below are emitted by the scripts at
+is registered as an independent Nextflow task so the full set runs in parallel under a
+scheduler (Section~\ref{sec:orchestration}). All numbers below are emitted by the scripts at
 run time; unrun modules render as ``(pending run)''.
 
 \paragraph{Subfamily phylogenetics, divergence age, and master elements
@@ -673,12 +799,13 @@ Every run emits a machine-readable provenance manifest---git SHA \provGitSha,
 \provBedtoolsVer)---and stage checkpoints enabling resume. This report was built
 from a manifest of \provNStages{} recorded stage(s).
 
-\paragraph{One declarative run and one container (\texttt{gameca\_pipeline.py}, \texttt{gameca.def}).}
+\paragraph{One parallel run and one container.}
 \label{sec:pipeline-dag}
-All modules above compose into a single \texttt{gameca.yaml}: stages form a DAG via
-\texttt{depends\_on}, are topologically ordered, skip completed stages on resume,
-and run identically on LSF, Slurm, or locally (Section~\ref{sec:hpc}) and inside an
-Apptainer/Singularity image for install-free HPC execution.
+All modules above are registered on the Nextflow side (Section~\ref{sec:orchestration}), where
+the \texttt{STANDOUT} subworkflow scatters them into independent, individually-resourced tasks
+that run concurrently and resume per-task, identically on LSF, Slurm, or locally
+(Section~\ref{sec:hpc}). The \texttt{singularity}/\texttt{docker} profiles execute every task
+inside the same GAMECA container image, giving install-free, reproducible HPC execution.
 
 \begin{figure}[h]\centering\resizebox{0.8\textwidth}{!}{\figorbox{reports8/stage11_l1mdt/fig_phylo_tree}}
   \caption{\texttt{\phyloFamily}: neighbour-joining tree of cluster consensuses /
@@ -730,9 +857,11 @@ Apptainer/Singularity image for install-free HPC execution.
 GAMECA fills a specific gap: the accessible, reproducible, cluster-ready \emph{downstream}
 analysis of a named TE family, complementing rather than replacing discovery tools such as
 RepeatModeler2~\citep{flynn2020} and general platforms such as Galaxy~\citep{galaxy2022} and
-nf-core~\citep{ewels2020}. Its contributions are integration (one interface over seven stages
-and two run modes), portability (automatic LSF/Slurm support), and the engineering that
-makes whole-family analysis practical (the in-memory genome cache and compiled hot paths).
+nf-core~\citep{ewels2020}. Its contributions are integration (one interface over the core
+stages, the copy-resolved analysis modules and two run modes), portability (a Nextflow DSL2
+implementation that follows nf-core conventions, runs on LSF/Slurm/local under container
+profiles, and is importable as a subworkflow), and the engineering that makes whole-family
+analysis practical (the in-memory genome cache and compiled hot paths).
 Reproducibility is built in: dependencies are pinned, the environment is rebuilt
 deterministically in a per-run virtual environment, stochastic steps use fixed seeds, and the
 checkpoint-per-stage structure lets a published analysis be re-executed stage-by-stage from
@@ -828,8 +957,8 @@ Section~\ref{sec:comparison} positions GAMECA against tool scope and interface;
 Table~S-Bench provides a complementary step-count comparison.  The manual workflow
 requires \benchManualSteps{} distinct user commands (UCSC Table Browser download,
 \texttt{awk} filter, \texttt{bedtools getfasta}, MAFFT, R clustering, divergence
-scripting, motif analysis, LTR annotation, expression overlay, and report
-generation), versus \benchGAMECAsteps{} for GAMECA.  Wall-clock timings are recorded
+scripting, motif analysis, LTR annotation, and expression overlay), versus
+\benchGAMECAsteps{} for GAMECA.  Wall-clock timings are recorded
 per-stage in \texttt{pipeline\_diagnostic.log} and summarised in
 \texttt{reports/benchmark\_table.csv}; the stage-timing bar chart is
 \texttt{reports/fig\_benchmark.png} (Figs.~\ref{fig:benchmark}--\ref{fig:benchmark_steps}):
@@ -870,8 +999,9 @@ from the clustering output and require only a call to the UCSC liftOver utility,
 is already available on most HPC systems.
 
 Future work includes broadening assembly support to rheMac10 and additional non-human
-primates, recording data-source versions for full provenance, and extending the
-cloud/container deployment paths the architecture already anticipates.
+primates, recording data-source versions for full provenance, and extending the Nextflow
+implementation to the cloud executors (AWS Batch, Google Batch) it already supports in
+principle through the DSL2 backend abstraction.
 
 % ===========================================================================
 \section*{Code availability}

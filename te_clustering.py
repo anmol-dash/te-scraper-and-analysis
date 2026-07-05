@@ -12,15 +12,16 @@ Pipeline (optimised for biological sequences):
   → HDBSCAN       (on UMAP 2-D embedding)
 
 Key speed levers vs the old implementation:
-  - k=6 default  (was 18): 4^6 = 4096 max features vs potentially 100k+ 18-mers
+  - k=10 default: CountVectorizer char n-grams, ngram_range=(10, 10)
   - TruncatedSVD 50 dims before UMAP (was PCA 2 dims *after* UMAP ran on raw matrix)
   - Sparse matrix never densified until SVD output
   - n_jobs=-1 on UMAP and HDBSCAN
   - float32 throughout; n_epochs capped
   - Large-N (>20k): fit UMAP on random subset, transform the rest
+  - HDBSCAN defaults: min_samples=5, min_cluster_size=100 (UMAP: n_neighbors=15, min_dist=0.0)
 
 Standalone usage:
-    python te_clustering.py --input clustered_data.csv --kmer 6
+    python te_clustering.py --input clustered_data.csv --kmer 10
 """
 
 import argparse
@@ -58,18 +59,17 @@ def _pbar(cur, tot, prefix="Progress", length=40):
 
 # ── main clustering function ────────────────────────────────────────────────
 
-def clustering_analysis(df, kmer=6, min_cluster_size=None, out_dir=None,
+def clustering_analysis(df, kmer=10, min_cluster_size=100, out_dir=None,
                         family_name="FAMILY", debug=False,
                         pca_dims=50, n_epochs=200, random_state=42,
-                        compute_tsne=True, n_neighbors=30, min_dist=0.0,
-                        min_samples=7):
+                        compute_tsne=True, n_neighbors=15, min_dist=0.0,
+                        min_samples=5):
     """Run k-mer + SVD + UMAP/PCA/tSNE + HDBSCAN clustering on df['Seq'].
 
     Args:
         df:               DataFrame with a 'Seq' column.
-        kmer:             K-mer length.  6 is recommended for DNA (k=18 was the
-                          old default but creates >100k sparse features).
-        min_cluster_size: HDBSCAN min_cluster_size (default N//7, min 5).
+        kmer:             K-mer length (default: 10).
+        min_cluster_size: HDBSCAN min_cluster_size (default: 100).
         out_dir:          Path-like; visualisations saved here.
         family_name:      String used in plot titles / filenames.
         debug:            Print verbose UMAP/t-SNE output.
@@ -377,22 +377,22 @@ def _parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  python te_clustering.py --input data.csv --kmer 6\n"
-            "  python te_clustering.py --input data.csv --kmer 6 --pca-dims 100 --n-epochs 150\n"
+            "  python te_clustering.py --input data.csv --kmer 10\n"
+            "  python te_clustering.py --input data.csv --kmer 10 --pca-dims 100 --n-epochs 150\n"
         ),
     )
     p.add_argument("--input",    required=True, help="Input CSV (must have Seq column)")
     p.add_argument("--output",   default=None,  help="Output CSV (default: overwrite input)")
-    p.add_argument("--kmer",     type=int, default=6,
-                   help="K-mer length (default 6; was 18 in older versions)")
+    p.add_argument("--kmer",     type=int, default=10,
+                   help="K-mer length (default 10)")
     p.add_argument("--pca-dims", type=int, default=50,
                    help="SVD components fed into UMAP / t-SNE (default 50)")
     p.add_argument("--n-epochs", type=int, default=200,
                    help="UMAP optimisation epochs (default 200)")
-    p.add_argument("--min-cluster-size", type=int, default=120)
-    p.add_argument("--n-neighbors",    type=int,   default=30,  help="UMAP n_neighbors (default 30)")
+    p.add_argument("--min-cluster-size", type=int, default=100)
+    p.add_argument("--n-neighbors",    type=int,   default=15,  help="UMAP n_neighbors (default 15)")
     p.add_argument("--min-dist",       type=float, default=0.0, help="UMAP min_dist (default 0.0)")
-    p.add_argument("--min-samples",    type=int,   default=7,   help="HDBSCAN min_samples (default 7)")
+    p.add_argument("--min-samples",    type=int,   default=5,   help="HDBSCAN min_samples (default 5)")
     p.add_argument("--out-dir",  default=".", help="Directory for visualisation files")
     p.add_argument("--family",   default="FAMILY", help="Family name for plot titles")
     p.add_argument("--random-state", type=int, default=42,
