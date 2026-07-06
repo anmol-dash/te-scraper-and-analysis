@@ -18,7 +18,7 @@ Key speed levers vs the old implementation:
   - n_jobs=-1 on UMAP and HDBSCAN
   - float32 throughout; n_epochs capped
   - Large-N (>20k): fit UMAP on random subset, transform the rest
-  - HDBSCAN defaults: min_samples=5, min_cluster_size=100 (UMAP: n_neighbors=15, min_dist=0.0)
+  - HDBSCAN defaults: min_samples=5, min_cluster_size=100 (UMAP: n_neighbors=30, min_dist=0.0)
 
 Standalone usage:
     python te_clustering.py --input clustered_data.csv --kmer 10
@@ -62,7 +62,7 @@ def _pbar(cur, tot, prefix="Progress", length=40):
 def clustering_analysis(df, kmer=10, min_cluster_size=100, out_dir=None,
                         family_name="FAMILY", debug=False,
                         pca_dims=50, n_epochs=200, random_state=42,
-                        compute_tsne=True, n_neighbors=15, min_dist=0.0,
+                        compute_tsne=True, n_neighbors=30, min_dist=0.0,
                         min_samples=5):
     """Run k-mer + SVD + UMAP/PCA/tSNE + HDBSCAN clustering on df['Seq'].
 
@@ -390,7 +390,7 @@ def _parse_args():
     p.add_argument("--n-epochs", type=int, default=200,
                    help="UMAP optimisation epochs (default 200)")
     p.add_argument("--min-cluster-size", type=int, default=100)
-    p.add_argument("--n-neighbors",    type=int,   default=15,  help="UMAP n_neighbors (default 15)")
+    p.add_argument("--n-neighbors",    type=int,   default=30,  help="UMAP n_neighbors (default 30)")
     p.add_argument("--min-dist",       type=float, default=0.0, help="UMAP min_dist (default 0.0)")
     p.add_argument("--min-samples",    type=int,   default=5,   help="HDBSCAN min_samples (default 5)")
     p.add_argument("--out-dir",  default=".", help="Directory for visualisation files")

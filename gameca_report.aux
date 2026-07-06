@@ -1,0 +1,206 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\citation{bourque2018}
+\citation{flynn2020}
+\citation{ditommaso2017}
+\citation{ewels2020}
+\citation{yang2019squire}
+\citation{lander2001}
+\citation{bourque2018}
+\citation{wicker2007}
+\citation{flynn2020}
+\citation{hubley2016}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{1}{section.1}\protected@file@percent }
+\citation{galaxy2022,genepattern2006,ewels2020,ditommaso2017}
+\citation{flynn2020}
+\citation{flynn2020}
+\citation{hubley2016}
+\citation{yang2019squire}
+\citation{galaxy2022}
+\citation{genepattern2006}
+\citation{ewels2020,ditommaso2017}
+\citation{flynn2020}
+\citation{hubley2016}
+\citation{yang2019squire}
+\citation{galaxy2022}
+\citation{genepattern2006}
+\citation{ewels2020}
+\citation{kent2002ucsc}
+\citation{castromondragon2022jaspar}
+\citation{xin2016mygene}
+\@writefile{toc}{\contentsline {section}{\numberline {2}How GAMECA differs from existing tools}{2}{section.2}\protected@file@percent }
+\newlabel{sec:comparison}{{2}{2}{How GAMECA differs from existing tools}{section.2}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {3}Design and architecture}{2}{section.3}\protected@file@percent }
+\newlabel{sec:arch}{{3}{2}{Design and architecture}{section.3}{}}
+\citation{ditommaso2017}
+\citation{hubley2016}
+\citation{kent2002ucsc}
+\citation{mcinnes2018umap}
+\citation{mcinnes2017hdbscan}
+\citation{katoh2002mafft}
+\citation{tumescheit2022cialign}
+\citation{castromondragon2022jaspar}
+\citation{quinlan2010bedtools}
+\citation{xin2016mygene}
+\citation{yang2019squire}
+\citation{pedregosa2011}
+\citation{mcinnes2018umap}
+\citation{mcinnes2017hdbscan}
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Capability comparison on documented features. \textcolor {green!45!black}{\text  {$\mathsurround \z@ \mathchar "458$}}~built-in; \textcolor {orange!85!black}{$\circ $}~partial, or possible but the user must assemble/configure it; \textcolor {black!30}{$\times $}~not provided. \emph  {TE-family focus}: purpose-built for TE families (RepeatModeler2 for discovery, RepeatMasker/Dfam for annotation, SQuIRE for expression). \emph  {Downstream characterisation}: the named-family workflow of clustering, consensus, motif/GO, expression and primers behind one interface. No cross-tool runtime is claimed.}}{3}{table.caption.1}\protected@file@percent }
+\providecommand*\caption@xref[2]{\@setref\relax\@undefined{#1}}
+\newlabel{tab:comparison}{{1}{3}{Capability comparison on documented features. \cYes ~built-in; \cPart ~partial, or possible but the user must assemble/configure it; \cNo ~not provided. \emph {TE-family focus}: purpose-built for TE families (RepeatModeler2 for discovery, RepeatMasker/Dfam for annotation, SQuIRE for expression). \emph {Downstream characterisation}: the named-family workflow of clustering, consensus, motif/GO, expression and primers behind one interface. No cross-tool runtime is claimed}{table.caption.1}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces GAMECA's three-layer architecture. A Tauri/React desktop shell drives a Python analysis sidecar over a streaming NDJSON protocol; the backend runs locally or stages and submits jobs to an LSF/Slurm cluster. Coordinate, sequence, motif and annotation data are pulled from RMSK/Dfam, UCSC, JASPAR and mygene.info through uniform adapters.}}{3}{figure.caption.2}\protected@file@percent }
+\newlabel{fig:arch}{{1}{3}{GAMECA's three-layer architecture. A Tauri/React desktop shell drives a Python analysis sidecar over a streaming NDJSON protocol; the backend runs locally or stages and submits jobs to an LSF/Slurm cluster. Coordinate, sequence, motif and annotation data are pulled from RMSK/Dfam, UCSC, JASPAR and mygene.info through uniform adapters}{figure.caption.2}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {4}The analysis pipeline}{3}{section.4}\protected@file@percent }
+\newlabel{sec:pipeline}{{4}{3}{The analysis pipeline}{section.4}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces The GAMECA pipeline stages. Each stage consumes a tabular checkpoint and emits one, allowing partial re-runs.}}{4}{table.caption.3}\protected@file@percent }
+\newlabel{tab:stages}{{2}{4}{The GAMECA pipeline stages. Each stage consumes a tabular checkpoint and emits one, allowing partial re-runs}{table.caption.3}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {5}HPC integration and performance}{4}{section.5}\protected@file@percent }
+\newlabel{sec:hpc}{{5}{4}{HPC integration and performance}{section.5}{}}
+\@writefile{toc}{\contentsline {paragraph}{Scheduler-agnostic execution.}{4}{section*.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{An in-memory genome cache.}{4}{section*.5}\protected@file@percent }
+\citation{behnel2011cython}
+\@writefile{toc}{\contentsline {paragraph}{Compiled hot paths.}{5}{section*.6}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Performance engineering, measured live on the cluster. \textbf  {Left}: genome-access time when the reference is re-read per search versus loaded once into \texttt  {GenomeCache}. \textbf  {Right}: runtime of the Cython hot paths versus their pure-Python equivalents on real family sequences. Ratios are written from the run.}}{5}{figure.caption.7}\protected@file@percent }
+\newlabel{fig:bench}{{2}{5}{Performance engineering, measured live on the cluster. \textbf {Left}: genome-access time when the reference is re-read per search versus loaded once into \texttt {GenomeCache}. \textbf {Right}: runtime of the Cython hot paths versus their pure-Python equivalents on real family sequences. Ratios are written from the run}{figure.caption.7}{}}
+\@writefile{toc}{\contentsline {paragraph}{Scaling with input size.}{5}{section*.8}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces Wall time, peak resident memory, and the two largest per-run on-disk artefacts as a function of \texttt  {-{}-max-loci}, MT2\_Mm on mm10. The motif/JASPAR stage dominates wall time at every size (e.g.\ 8190\,s of the 10522\,s total at $N=2641$), driven by the per-run bigBed query against JASPAR (no \texttt  {tabix}/\texttt  {bgzip} available on this node, so the intersect fell back to a full-file \texttt  {bedtools} scan); peak memory and the overlap-table size both scale roughly linearly with $N$.}}{5}{table.caption.9}\protected@file@percent }
+\newlabel{tab:scaling}{{3}{5}{Wall time, peak resident memory, and the two largest per-run on-disk artefacts as a function of \texttt {-{}-max-loci}, MT2\_Mm on mm10. The motif/JASPAR stage dominates wall time at every size (e.g.\ 8190\,s of the 10522\,s total at $N=2641$), driven by the per-run bigBed query against JASPAR (no \texttt {tabix}/\texttt {bgzip} available on this node, so the intersect fell back to a full-file \texttt {bedtools} scan); peak memory and the overlap-table size both scale roughly linearly with $N$}{table.caption.9}{}}
+\citation{ditommaso2017}
+\citation{ewels2020}
+\@writefile{toc}{\contentsline {section}{\numberline {6}Workflow orchestration with Nextflow}{6}{section.6}\protected@file@percent }
+\newlabel{sec:orchestration}{{6}{6}{Workflow orchestration with Nextflow}{section.6}{}}
+\@writefile{toc}{\contentsline {paragraph}{Structure.}{6}{section*.10}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Delegation from the driver.}{6}{section*.11}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Resources, resume and portability.}{6}{section*.12}\protected@file@percent }
+\citation{macfarlan2012,peaston2004}
+\citation{yang2019squire}
+\citation{macfarlan2012,peaston2004}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces Nextflow DSL2 orchestration. \texttt  {GAMECA\_CORE} runs \texttt  {query.py} Stages 1--10; the \texttt  {STANDOUT} subworkflow scatters the copy-resolved analysis modules into independent, individually-resourced \texttt  {GAMECA\_STANDOUT} tasks that run in parallel and are gathered back per family. The composable \texttt  {GAMECA} subworkflow (\texttt  {CORE} $\to $ \texttt  {STANDOUT}) is importable into other DSL2 pipelines; execution backend and container runtime are chosen by profile (\texttt  {lsf}/\texttt  {slurm}, \texttt  {singularity}/\texttt  {docker}).}}{7}{figure.caption.13}\protected@file@percent }
+\newlabel{fig:nextflow}{{3}{7}{Nextflow DSL2 orchestration. \texttt {GAMECA\_CORE} runs \texttt {query.py} Stages 1--10; the \texttt {STANDOUT} subworkflow scatters the copy-resolved analysis modules into independent, individually-resourced \texttt {GAMECA\_STANDOUT} tasks that run in parallel and are gathered back per family. The composable \texttt {GAMECA} subworkflow (\texttt {CORE} $\to $ \texttt {STANDOUT}) is importable into other DSL2 pipelines; execution backend and container runtime are chosen by profile (\texttt {lsf}/\texttt {slurm}, \texttt {singularity}/\texttt {docker})}{figure.caption.13}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {7}Worked example: MT2\_Mm in the mouse genome}{7}{section.7}\protected@file@percent }
+\newlabel{sec:examples}{{7}{7}{Worked example: MT2\_Mm in the mouse genome}{section.7}{}}
+\citation{bourque2018}
+\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces \emph  {MT2\_Mm} (\texttt  {mm10}) analysed end-to-end in a single GAMECA run. \textbf  {(a)} UMAP embedding of $k$-mer-encoded loci coloured by HDBSCAN cluster, with cluster sizes. \textbf  {(b)} Per-cluster mean SQuIRE expression across the six developmental stages. \textbf  {(c)} Per-cluster JASPAR motif enrichment heatmap, $-\log _{10}(p)$ from per-cluster Fisher exact tests, restricted to the most strongly enriched motifs.}}{8}{figure.caption.14}\protected@file@percent }
+\newlabel{fig:mt2}{{4}{8}{\emph {MT2\_Mm} (\texttt {mm10}) analysed end-to-end in a single GAMECA run. \textbf {(a)} UMAP embedding of $k$-mer-encoded loci coloured by HDBSCAN cluster, with cluster sizes. \textbf {(b)} Per-cluster mean SQuIRE expression across the six developmental stages. \textbf {(c)} Per-cluster JASPAR motif enrichment heatmap, $-\log _{10}(p)$ from per-cluster Fisher exact tests, restricted to the most strongly enriched motifs}{figure.caption.14}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {8}Cross-family application: LINE, SINE, and LTR elements}{8}{section.8}\protected@file@percent }
+\newlabel{sec:crossfamily}{{8}{8}{Cross-family application: LINE, SINE, and LTR elements}{section.8}{}}
+\@writefile{toc}{\contentsline {paragraph}{Repeat landscape.}{8}{section*.15}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Differential expression between clusters.}{8}{section*.16}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {9}Standout analysis modules}{8}{section.9}\protected@file@percent }
+\newlabel{sec:standout}{{9}{8}{Standout analysis modules}{section.9}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {5}{\ignorespaces UMAP clustering overview for all three cross-family elements: \emph  {L1Md\_T} (LINE), \emph  {B1\_Mus2} (SINE), and \emph  {IAPLTR1\_Mm} (LTR) in \texttt  {mm10}. Each panel shows the HDBSCAN partition coloured by cluster.}}{9}{figure.caption.17}\protected@file@percent }
+\newlabel{fig:line_sine_ltr_clustering}{{5}{9}{UMAP clustering overview for all three cross-family elements: \emph {L1Md\_T} (LINE), \emph {B1\_Mus2} (SINE), and \emph {IAPLTR1\_Mm} (LTR) in \texttt {mm10}. Each panel shows the HDBSCAN partition coloured by cluster}{figure.caption.17}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {6}{\ignorespaces \emph  {L1Md\_T} (LINE, \texttt  {mm10}) end-to-end in GAMECA. \textbf  {(a)} UMAP embedding coloured by HDBSCAN cluster. \textbf  {(b)} Per-cluster mean SQuIRE expression (log1p). \textbf  {(c)} Kimura divergence histogram (median 3.5{}\%).}}{9}{figure.caption.18}\protected@file@percent }
+\newlabel{fig:line_results}{{6}{9}{\emph {L1Md\_T} (LINE, \texttt {mm10}) end-to-end in GAMECA. \textbf {(a)} UMAP embedding coloured by HDBSCAN cluster. \textbf {(b)} Per-cluster mean SQuIRE expression (log1p). \textbf {(c)} Kimura divergence histogram (median \lOneTMedianDiv {}\%)}{figure.caption.18}{}}
+\@writefile{toc}{\contentsline {paragraph}{Subfamily phylogenetics, divergence age, and master elements (\texttt  {run\_phylo\_analysis.py}).}{9}{section*.22}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Allele-aware gRNA off-target and specificity/coverage Pareto (\texttt  {run\_grna\_offtarget.py}).}{9}{section*.23}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{3' transduction lineages (\texttt  {run\_transduction.py}).}{9}{section*.24}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {7}{\ignorespaces \emph  {B1\_Mus2} (SINE, \texttt  {mm10}). Layout as in Figure~\ref {fig:line_results}.}}{10}{figure.caption.19}\protected@file@percent }
+\newlabel{fig:sine_results}{{7}{10}{\emph {B1\_Mus2} (SINE, \texttt {mm10}). Layout as in Figure~\ref {fig:line_results}}{figure.caption.19}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {8}{\ignorespaces \emph  {IAPLTR1\_Mm} (LTR, \texttt  {mm10}). Layout as in Figure~\ref {fig:line_results}.}}{10}{figure.caption.20}\protected@file@percent }
+\newlabel{fig:ltr_results}{{8}{10}{\emph {IAPLTR1\_Mm} (LTR, \texttt {mm10}). Layout as in Figure~\ref {fig:line_results}}{figure.caption.20}{}}
+\@writefile{toc}{\contentsline {paragraph}{Antisense / bidirectional promoter activity (\texttt  {run\_antisense\_promoter.py}).}{10}{section*.25}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{CTCF sites and TAD-boundary proximity (\texttt  {run\_ctcf\_tad.py}).}{10}{section*.26}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Epigenetic / regulatory overlay (\texttt  {run\_epigenetic\_overlay.py}).}{10}{section*.27}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Orthologous-insertion calling across species (\texttt  {run\_ortholog\_insertion.py}) and multi-assembly liftover (\texttt  {run\_multiassembly\_liftover.py}).}{10}{section*.28}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Protein structure of consensus sequences (\texttt  {run\_fold\_prediction.py}).}{10}{section*.29}\protected@file@percent }
+\citation{tamura2021mega}
+\@writefile{lof}{\contentsline {figure}{\numberline {9}{\ignorespaces Repeat landscape: CpG-corrected Kimura substitution histograms for \emph  {L1Md\_T} (LINE), \emph  {B1\_Mus2} (SINE), and \emph  {IAPLTR1\_Mm} (LTR) in \texttt  {mm10}. Dashed vertical lines mark family medians.}}{11}{figure.caption.21}\protected@file@percent }
+\newlabel{fig:kimura}{{9}{11}{Repeat landscape: CpG-corrected Kimura substitution histograms for \emph {L1Md\_T} (LINE), \emph {B1\_Mus2} (SINE), and \emph {IAPLTR1\_Mm} (LTR) in \texttt {mm10}. Dashed vertical lines mark family medians}{figure.caption.21}{}}
+\@writefile{toc}{\contentsline {paragraph}{Repeat landscape and CpG-corrected divergence (\texttt  {run\_divergence.py}).}{11}{section*.30}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{LTR structural annotation (\texttt  {run\_ltr\_struct.py}).}{11}{section*.31}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Automatic subfamily resolution (\texttt  {run\_subfamily.py}).}{11}{section*.32}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Differential expression between clusters (\texttt  {te\_expression.py}).}{11}{section*.33}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Benchmarking against a manual workflow (\texttt  {run\_benchmark.py}).}{11}{section*.34}\protected@file@percent }
+\citation{flynn2020}
+\citation{galaxy2022}
+\citation{ewels2020}
+\@writefile{toc}{\contentsline {paragraph}{Reproducibility (\texttt  {te\_provenance.py}).}{12}{section*.35}\protected@file@percent }
+\newlabel{sec:pipeline-dag}{{9}{12}{One parallel run and one container}{section*.36}{}}
+\@writefile{toc}{\contentsline {paragraph}{One parallel run and one container.}{12}{section*.36}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {10}{\ignorespaces \texttt  {(pending run)}: neighbour-joining tree of cluster consensuses / representative copies.}}{12}{figure.caption.37}\protected@file@percent }
+\newlabel{fig:phylo_tree}{{10}{12}{\texttt {\phyloFamily }: neighbour-joining tree of cluster consensuses / representative copies}{figure.caption.37}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {11}{\ignorespaces \texttt  {(pending run)}: Kimura divergence-from-consensus and molecular-clock age distributions.}}{12}{figure.caption.38}\protected@file@percent }
+\newlabel{fig:phylo_div}{{11}{12}{\texttt {\phyloFamily }: Kimura divergence-from-consensus and molecular-clock age distributions}{figure.caption.38}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {12}{\ignorespaces \texttt  {(pending run)}: candidate master/source elements ranked by intactness vs divergence.}}{12}{figure.caption.39}\protected@file@percent }
+\newlabel{fig:phylo_master}{{12}{12}{\texttt {\phyloFamily }: candidate master/source elements ranked by intactness vs divergence}{figure.caption.39}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {10}Discussion}{12}{section.10}\protected@file@percent }
+\newlabel{sec:discussion}{{10}{12}{Discussion}{section.10}{}}
+\citation{yang2019squire}
+\@writefile{lof}{\contentsline {figure}{\numberline {13}{\ignorespaces \texttt  {IAP}: gRNA specificity-vs-coverage Pareto frontier over the full copy landscape.}}{13}{figure.caption.40}\protected@file@percent }
+\newlabel{fig:grna_pareto}{{13}{13}{\texttt {\grnaOTFamily }: gRNA specificity-vs-coverage Pareto frontier over the full copy landscape}{figure.caption.40}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {14}{\ignorespaces \texttt  {IAP}: 3' transduction lineage sizes and shared-tail $k$-mer matrix.}}{13}{figure.caption.41}\protected@file@percent }
+\newlabel{fig:transduction}{{14}{13}{\texttt {\transFamily }: 3' transduction lineage sizes and shared-tail $k$-mer matrix}{figure.caption.41}{}}
+\@writefile{toc}{\contentsline {paragraph}{Repeat landscape and evolutionary age.}{13}{section*.51}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{LTR structural annotation.}{13}{section*.52}\protected@file@percent }
+\citation{kimura1980}
+\citation{kimura1980}
+\@writefile{lof}{\contentsline {figure}{\numberline {15}{\ignorespaces \texttt  {IAP}: sense vs antisense promoter-motif counts per copy.}}{14}{figure.caption.42}\protected@file@percent }
+\newlabel{fig:antisense}{{15}{14}{\texttt {\antiFamily }: sense vs antisense promoter-motif counts per copy}{figure.caption.42}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {16}{\ignorespaces \texttt  {IAP}: CTCF-site provision (core motif $\pm $ ChIP overlap).}}{14}{figure.caption.43}\protected@file@percent }
+\newlabel{fig:ctcf}{{16}{14}{\texttt {\ctcfFamily }: CTCF-site provision (core motif $\pm $ ChIP overlap)}{figure.caption.43}{}}
+\@writefile{toc}{\contentsline {paragraph}{Repeat landscape and CpG-corrected divergence.}{14}{section*.53}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Automatic subfamily resolution.}{14}{section*.54}\protected@file@percent }
+\citation{robinson2010edger}
+\citation{love2014deseq2}
+\@writefile{lof}{\contentsline {figure}{\numberline {17}{\ignorespaces Repeat landscape: CpG-corrected Kimura divergence-from-consensus histogram, faceted by cluster.}}{15}{figure.caption.44}\protected@file@percent }
+\newlabel{fig:repeat_landscape}{{17}{15}{Repeat landscape: CpG-corrected Kimura divergence-from-consensus histogram, faceted by cluster}{figure.caption.44}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {18}{\ignorespaces LTR structural classification (full-length / solo-LTR / internal-only / truncated) by cluster.}}{15}{figure.caption.45}\protected@file@percent }
+\newlabel{fig:ltr_struct}{{18}{15}{LTR structural classification (full-length / solo-LTR / internal-only / truncated) by cluster}{figure.caption.45}{}}
+\@writefile{toc}{\contentsline {paragraph}{Differential expression between clusters.}{15}{section*.55}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{T2T-CHM13 support.}{15}{section*.56}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Benchmarking against a manual workflow.}{15}{section*.57}\protected@file@percent }
+\citation{chuong2017enhancers,bourque2018}
+\citation{gtex2020}
+\citation{gardner2017melt}
+\citation{ellrott2020tldr}
+\@writefile{lof}{\contentsline {figure}{\numberline {19}{\ignorespaces UPGMA dendrogram of cluster consensus sequences with provisional subfamily labels.}}{16}{figure.caption.46}\protected@file@percent }
+\newlabel{fig:subfamily_tree}{{19}{16}{UPGMA dendrogram of cluster consensus sequences with provisional subfamily labels}{figure.caption.46}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {20}{\ignorespaces Pairwise differential expression between clusters: $-\log _{10}(p_\mathrm  {adj})$ heatmap (Mann--Whitney $U$, BH-corrected).}}{16}{figure.caption.47}\protected@file@percent }
+\newlabel{fig:de_heatmap}{{20}{16}{Pairwise differential expression between clusters: $-\log _{10}(p_\mathrm {adj})$ heatmap (Mann--Whitney $U$, BH-corrected)}{figure.caption.47}{}}
+\@writefile{toc}{\contentsline {paragraph}{Epigenomics integration.}{16}{section*.58}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{TE-proximal gene regulatory network.}{16}{section*.59}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Somatic insertion detection.}{16}{section*.60}\protected@file@percent }
+\bibstyle{unsrtnat}
+\bibdata{references}
+\bibcite{bourque2018}{{1}{2018}{{Bourque et~al.}}{{Bourque, Burns, Gehring, Gorbunova, Seluanov, Hammell, Imbeault, Izsv{\'a}k, Levin, Macfarlan, Mager, and Feschotte}}}
+\bibcite{flynn2020}{{2}{2020}{{Flynn et~al.}}{{Flynn, Hubley, Goubert, Rosen, Clark, Feschotte, and Smit}}}
+\@writefile{lof}{\contentsline {figure}{\numberline {21}{\ignorespaces Differential-expression volcano plot: $\log _2$ fold-change vs.\ $-\log _{10}(p_\mathrm  {adj})$ across all cluster pairs and expression columns.}}{17}{figure.caption.48}\protected@file@percent }
+\newlabel{fig:de_volcano}{{21}{17}{Differential-expression volcano plot: $\log _2$ fold-change vs.\^^M$-\log _{10}(p_\mathrm {adj})$ across all cluster pairs and expression columns}{figure.caption.48}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {22}{\ignorespaces Per-stage wall-clock time for the GAMECA pipeline.}}{17}{figure.caption.49}\protected@file@percent }
+\newlabel{fig:benchmark}{{22}{17}{Per-stage wall-clock time for the GAMECA pipeline}{figure.caption.49}{}}
+\@writefile{toc}{\contentsline {paragraph}{Cross-species synteny.}{17}{section*.61}\protected@file@percent }
+\bibcite{ditommaso2017}{{3}{2017}{{Di~Tommaso et~al.}}{{Di~Tommaso, Chatzou, Floden, Barja, Palumbo, and Notredame}}}
+\bibcite{ewels2020}{{4}{2020}{{Ewels et~al.}}{{Ewels, Peltzer, Fillinger, Patel, Alneberg, Wilm, Garcia, Di~Tommaso, and Nahnsen}}}
+\bibcite{yang2019squire}{{5}{2019}{{Yang et~al.}}{{Yang, Ardeljan, Pacyna, Payer, and Burns}}}
+\bibcite{lander2001}{{6}{2001}{{Lander et~al.}}{{}}}
+\bibcite{wicker2007}{{7}{2007}{{Wicker et~al.}}{{Wicker, Sabot, Hua-Van, Bennetzen, Capy, Chalhoub, Flavell, Leroy, Morgante, Panaud, Paux, SanMiguel, and Schulman}}}
+\bibcite{hubley2016}{{8}{2016}{{Hubley et~al.}}{{Hubley, Finn, Clements, Eddy, Jones, Bao, Smit, and Wheeler}}}
+\bibcite{galaxy2022}{{9}{2022}{{The Galaxy Community}}{{}}}
+\bibcite{genepattern2006}{{10}{2006}{{Reich et~al.}}{{Reich, Liefeld, Gould, Lerner, Tamayo, and Mesirov}}}
+\bibcite{kent2002ucsc}{{11}{2002}{{Kent et~al.}}{{Kent, Sugnet, Furey, Roskin, Pringle, Zahler, and Haussler}}}
+\bibcite{castromondragon2022jaspar}{{12}{2022}{{Castro-Mondragon et~al.}}{{Castro-Mondragon, Riudavets-Puig, Rauluseviciute, Berhanu~Lemma, Turchi, Blanc-Mathieu, Lucas, Boddie, Khan, Manosalva~P{\'e}rez, et~al.}}}
+\@writefile{lof}{\contentsline {figure}{\numberline {23}{\ignorespaces User-facing step count: GAMECA vs.\ the equivalent manual workflow.}}{18}{figure.caption.50}\protected@file@percent }
+\newlabel{fig:benchmark_steps}{{23}{18}{User-facing step count: GAMECA vs.\ the equivalent manual workflow}{figure.caption.50}{}}
+\bibcite{xin2016mygene}{{13}{2016}{{Xin et~al.}}{{Xin, Mark, Afrasiabi, Tsueng, Juchler, Gopal, Stupp, Putman, Ainscough, Griffith, Torkamani, Whetzel, Mungall, Mooney, Su, and Wu}}}
+\bibcite{mcinnes2018umap}{{14}{2018}{{McInnes et~al.}}{{McInnes, Healy, and Melville}}}
+\bibcite{mcinnes2017hdbscan}{{15}{2017}{{McInnes et~al.}}{{McInnes, Healy, and Astels}}}
+\bibcite{katoh2002mafft}{{16}{2002}{{Katoh et~al.}}{{Katoh, Misawa, Kuma, and Miyata}}}
+\bibcite{tumescheit2022cialign}{{17}{2022}{{Tumescheit et~al.}}{{Tumescheit, Firth, and Brown}}}
+\bibcite{quinlan2010bedtools}{{18}{2010}{{Quinlan and Hall}}{{}}}
+\bibcite{pedregosa2011}{{19}{2011}{{Pedregosa et~al.}}{{Pedregosa, Varoquaux, Gramfort, Michel, Thirion, Grisel, Blondel, Prettenhofer, Weiss, Dubourg, Vanderplas, Passos, Cournapeau, Brucher, Perrot, and Duchesnay}}}
+\bibcite{behnel2011cython}{{20}{2011}{{Behnel et~al.}}{{Behnel, Bradshaw, Citro, Dalcin, Seljebotn, and Smith}}}
+\bibcite{macfarlan2012}{{21}{2012}{{Macfarlan et~al.}}{{Macfarlan, Gifford, Driscoll, Lettieri, Rowe, Bonanomi, Firth, Singer, Trono, and Pfaff}}}
+\bibcite{peaston2004}{{22}{2004}{{Peaston et~al.}}{{Peaston, Evsikov, Graber, de~Vries, Holbrook, Solter, and Knowles}}}
+\bibcite{tamura2021mega}{{23}{2021}{{Tamura et~al.}}{{Tamura, Stecher, and Kumar}}}
+\bibcite{kimura1980}{{24}{1980}{{Kimura}}{{}}}
+\bibcite{robinson2010edger}{{25}{2010}{{Robinson et~al.}}{{Robinson, McCarthy, and Smyth}}}
+\bibcite{love2014deseq2}{{26}{2014}{{Love et~al.}}{{Love, Huber, and Anders}}}
+\bibcite{chuong2017enhancers}{{27}{2017}{{Chuong et~al.}}{{Chuong, Elde, and Feschotte}}}
+\bibcite{gtex2020}{{28}{2020}{{GTEx Consortium}}{{}}}
+\bibcite{gardner2017melt}{{29}{2017}{{Gardner et~al.}}{{Gardner, Lam, Harris, Chuang, Scott, Pittard, Mills, {1000 Genomes Project Consortium}, and Devine}}}
+\bibcite{ellrott2020tldr}{{30}{2020}{{Ewing et~al.}}{{Ewing, Smits, Sanchez-Luque, Faivre, Brennan, Richardson, Cheetham, and Faulkner}}}
+\gdef \@abspage@last{20}

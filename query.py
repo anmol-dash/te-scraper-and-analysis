@@ -115,8 +115,8 @@ def parse_args(argv=None):
                    help="UMAP optimisation epochs for clustering (default: 200)")
     p.add_argument("--random-state", type=int, default=42,
                    help="Clustering random seed; pass 0 to enable multicore UMAP")
-    p.add_argument("--n-neighbors",    type=int,   default=15,
-                   help="UMAP n_neighbors (default: 15)")
+    p.add_argument("--n-neighbors",    type=int,   default=30,
+                   help="UMAP n_neighbors (default: 30)")
     p.add_argument("--min-dist",       type=float, default=0.0,
                    help="UMAP min_dist (default: 0.0)")
     p.add_argument("--min-cluster-size", type=int, default=100,
@@ -291,6 +291,52 @@ def _diag(msg):
     print(line, end="", flush=True)
 
 
+# Canonical pipeline stages in execution order: (checkpoint key, human label).
+# The checkpoint key matches the stage_name passed to _checkpoint(); a stage is
+# considered DONE when its CHECKPOINT_<KEY>.txt file exists on disk. Keeping the
+# done-set on disk (rather than in memory) means the checklist stays correct
+# across --resume-from runs and separately-submitted jobs writing the same dir.
+_PIPELINE_STAGES = [
+    ("stage1_genome",     "Genome load"),
+    ("stage2_load_data",  "Load data (RepeatMasker query)"),
+    ("stage3_sequences",  "Sequence extraction"),
+    ("stage4_statistics", "Statistics"),
+    ("stage5_clustering", "Clustering (UMAP + HDBSCAN)"),
+    ("stage6_dashboard",  "Dashboard"),
+    ("stage7_alignment",  "Alignment (MAFFT/CIAlign)  [optional — no downstream dependency]"),
+    ("stage9_motif",      "Motif + TFBS + GO"),
+    ("stage10_primers",   "Primer design"),
+    ("stage11_standout",  "Stage 11 standout analysis"),
+]
+
+
+def _write_status_checklist(out_dir):
+    """Rewrite PIPELINE_STATUS.txt — a live checklist of finished vs pending stages.
+
+    Always lives at the output root so you can `cat PIPELINE_STATUS.txt` (or watch
+    the tail of the job log) at any moment and see what has completed. Done-ness is
+    read from the CHECKPOINT_<KEY>.txt files each stage drops on completion, so this
+    reflects real on-disk progress rather than intended progress. A `[ ]` box means
+    a stage is either still pending or was skipped (e.g. --skip-alignment).
+    """
+    try:
+        out_dir = Path(out_dir)
+        lines = ["GAMECA pipeline — stage checklist",
+                 f"Updated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                 ""]
+        done = 0
+        for key, label in _PIPELINE_STAGES:
+            ckpt = out_dir / f"CHECKPOINT_{key.upper().replace(' ', '_')}.txt"
+            is_done = ckpt.exists()
+            done += is_done
+            lines.append(f"  [{'x' if is_done else ' '}] {label}")
+        lines.append("")
+        lines.append(f"  {done}/{len(_PIPELINE_STAGES)} stages complete")
+        (out_dir / "PIPELINE_STATUS.txt").write_text("\n".join(lines) + "\n")
+    except Exception:
+        pass
+
+
 def _checkpoint(out_dir, stage_name, details=""):
     """Write a STAGE_<name>_COMPLETE.txt checkpoint and log it."""
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -300,6 +346,7 @@ def _checkpoint(out_dir, stage_name, details=""):
         path.write_text(txt)
     except Exception:
         pass
+    _write_status_checklist(out_dir)
     _diag(f"CHECKPOINT {stage_name} — {details}")
 
 
@@ -3048,6 +3095,10 @@ def run_pipeline(args):
     pipeline_start = time.time()
     stage_times = {}
 
+    # Seed the live stage checklist so PIPELINE_STATUS.txt exists (all pending)
+    # from the very start of the run, before the first stage completes.
+    _write_status_checklist(OUT_DIR)
+
     genome_cache = None
     df_family = None
     expr_cols = []
@@ -3187,6 +3238,16 @@ def run_pipeline(args):
     print("  Stage timings:")
     for stage, seconds in stage_times.items():
         print(f"    {stage:<14} {seconds:>8.1f}s")
+    print()
+
+    # Final stage checklist — mirrors PIPELINE_STATUS.txt so the console tail and
+    # the on-disk file agree on what finished vs. was skipped/left pending.
+    _write_status_checklist(OUT_DIR)
+    print("  Stage checklist:")
+    for key, label in _PIPELINE_STAGES:
+        ckpt = OUT_DIR / f"CHECKPOINT_{key.upper().replace(' ', '_')}.txt"
+        print(f"    [{'x' if ckpt.exists() else ' '}] {label}")
+    print(f"    (also written to PIPELINE_STATUS.txt)")
     print()
 
     # Peak resident memory for this run (the whole pipeline is one process, so
