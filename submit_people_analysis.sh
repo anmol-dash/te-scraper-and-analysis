@@ -6,7 +6,6 @@
 #   Diego  : all L1Md  subfamilies (mm10)
 #   Claire : MT2_Mm (mm10) + all B2 subfamilies (mm10)
 #   Katie  : all IAP   subfamilies (mm10)
-#   Zach   : AluSx1 (hg38)
 #
 # Subfamilies are discovered live from the rmsk table. Exactly one family per
 # group runs the heavy ColabFold protein-fold calc (the most-abundant subfamily),

@@ -9,7 +9,6 @@ Layout produced under ``--base-dir``::
     <base>/Claire/MT2_Mm/               # MT2_Mm (mm10)
     <base>/Claire/<B2 subfamily>/       # all B2* subfamilies (mm10)
     <base>/Katie/<IAP subfamily>/       # all IAP* subfamilies (mm10)
-    <base>/Zach/AluSx1/                 # AluSx1 (hg38)
 
 Subfamilies are discovered live from the RepeatMasker (rmsk) table for the
 assembly (downloaded/cached via te_prep), so "all L1Md/B2/IAP subfamilies" tracks
@@ -59,7 +58,6 @@ PLAN = [
     {"person": "Claire", "label": "MT2_Mm", "assembly": "mm10", "families": ["MT2_Mm"]},
     {"person": "Claire", "label": "B2",   "assembly": "mm10", "discover": r"^B2(_|$)"},
     {"person": "Katie",  "label": "IAP",  "assembly": "mm10", "discover": r"^IAP"},
-    {"person": "Zach",   "label": "AluSx1", "assembly": "hg38", "families": ["AluSx1"]},
 ]
 
 
