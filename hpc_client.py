@@ -679,11 +679,16 @@ fi
                 f"#SBATCH --partition={queue}\n"
             )
         else:  # lsf
+            # span[hosts=1] forces all N slots onto ONE host. The pipeline is a
+            # single shared-memory process (threaded BLAS/MAFFT + a ~3GB genome
+            # cache loaded once), so slots scattered across hosts would be paid
+            # for but unusable and would over-subscribe the one host we land on.
             return (
                 f"#BSUB -J {job_name}\n"
                 f"#BSUB -o {job_out}\n"
                 f"#BSUB -e {job_err}\n"
                 f"#BSUB -n {cpus}\n"
+                f'#BSUB -R "span[hosts=1]"\n'
                 f"#BSUB -M {mem_mb}\n"
                 f"#BSUB -W {walltime}\n"
                 f"#BSUB -q {queue}\n"
@@ -927,7 +932,9 @@ fi
                 f"srun --mem={mem_gb}G --cpus-per-task={cpus} "
                 f"--partition={queue} --pty bash {runner_script}"
             )
-        return f"bsub -M {mem_mb} -n {cpus} -q {queue} -Is bash {runner_script}"
+        # span[hosts=1]: keep all slots on one host (shared-memory single process).
+        return (f'bsub -M {mem_mb} -n {cpus} -R "span[hosts=1]" '
+                f"-q {queue} -Is bash {runner_script}")
 
     def run_command(self, command: str, timeout: int = 300, stream_output: bool = False, cancel_event=None) -> tuple:
         """Execute a command on the remote server.

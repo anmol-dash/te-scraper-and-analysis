@@ -208,6 +208,15 @@ def parse_args(argv=None):
     p.add_argument("--debug",         action="store_true")
     p.add_argument("--skip-genome",   action="store_true", help="Skip genome-wide primer search")
     p.add_argument("--skip-alignment",action="store_true")
+    p.add_argument("--parallel-alignment", dest="parallel_alignment",
+                   action="store_true", default=True,
+                   help="Run Stage 7 alignment (MAFFT/CIAlign/trimAl) on a background "
+                        "thread so it overlaps motif/TFBS, primers, and Stage 11 instead "
+                        "of blocking them. Safe because nothing downstream depends on the "
+                        "alignment output. Default: ON. Ignored when --stop-after is set.")
+    p.add_argument("--no-parallel-alignment", dest="parallel_alignment",
+                   action="store_false",
+                   help="Disable background alignment; run Stage 7 inline (blocking).")
     p.add_argument("--skip-primers",  action="store_true")
     p.add_argument("--skip-standout", action="store_true",
                    help="Skip Stage 11 standout analysis modules "
@@ -3189,13 +3198,34 @@ def run_pipeline(args):
         if stop_after == "dashboard":
             print("[Pipeline] Stopping after dashboard stage."); return None
 
+    align_thread = None
     if start_idx <= order.index("alignment"):
         if not args.skip_alignment:
-            t0 = time.time()
-            _stage7_alignment(df_family, OUT_DIR, FAMILY_NAME)
-            stage_times["Alignment"] = time.time() - t0
-            if stop_after == "alignment":
-                print("[Pipeline] Stopping after alignment stage."); return None
+            # Parallel mode: alignment is a leaf stage (nothing downstream reads its
+            # output), so run it on a background thread and let motif/primers/standout
+            # proceed concurrently. MAFFT/CIAlign/trimAl are external processes, so the
+            # GIL is released during the heavy work. Disabled when --stop-after is set
+            # (a partial/debug run) to keep the single join point at the summary.
+            if getattr(args, "parallel_alignment", False) and not stop_after:
+                import threading
+                _align_df = df_family.copy()   # isolate from the concurrent primer stage
+
+                def _align_worker():
+                    _t0 = time.time()
+                    _stage7_alignment(_align_df, OUT_DIR, FAMILY_NAME)
+                    stage_times["Alignment"] = time.time() - _t0
+
+                align_thread = threading.Thread(target=_align_worker,
+                                                name="alignment", daemon=False)
+                align_thread.start()
+                _diag("STAGE 7: Alignment running in BACKGROUND (--parallel-alignment)")
+                print("\n=== ALIGNMENT (background) — pipeline continues while it runs ===")
+            else:
+                t0 = time.time()
+                _stage7_alignment(df_family, OUT_DIR, FAMILY_NAME)
+                stage_times["Alignment"] = time.time() - t0
+                if stop_after == "alignment":
+                    print("[Pipeline] Stopping after alignment stage."); return None
         else:
             _diag("STAGE 7: Alignment SKIPPED (--skip-alignment)")
 
@@ -3223,6 +3253,15 @@ def run_pipeline(args):
 
     # ── 11. Standout analysis modules ───────────────────────────────────────
     _run_standout_analysis(args, OUT_DIR, DIRS, FAMILY_NAME, stage_times)
+
+    # Wait for the background alignment thread (if any) so its checkpoint/timing
+    # are recorded before the summary. By now motif+primers+standout have run
+    # concurrently with it, so this join usually returns immediately.
+    if align_thread is not None:
+        if align_thread.is_alive():
+            print("\n[Pipeline] Downstream stages done — waiting for background "
+                  "alignment to finish...")
+        align_thread.join()
 
     # ── Summary ─────────────────────────────────────────────────────────────
     total = time.time() - pipeline_start
