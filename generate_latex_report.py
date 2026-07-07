@@ -1404,12 +1404,14 @@ def ch_fold(d, pdb_renders):
                          width=r'0.80\linewidth')
 
     # Per-ORF rendered structures
-    tex += r'\section{Per-ORF Structure Panels}' + '\n'
-    tex += (
-        'Each panel below shows (top row) two orthogonal views of the backbone C$\\alpha$ trace '
-        'coloured by pLDDT, and (bottom row) the per-residue pLDDT profile and the predicted '
-        'aligned error (PAE) matrix.\n\n'
-    )
+    has_orf_png = any(r['png'] and Path(r['png']).exists() for r in pdb_renders)
+    if has_orf_png:
+        tex += r'\section{Per-ORF Structure Panels}' + '\n'
+        tex += (
+            'Each panel below shows (top row) two orthogonal views of the backbone C$\\alpha$ trace '
+            'coloured by pLDDT, and (bottom row) the per-residue pLDDT profile and the predicted '
+            'aligned error (PAE) matrix.\n\n'
+        )
     for i, r in enumerate(pdb_renders):
         # short label: drop the redundant family-folder prefix
         short = r['name']
