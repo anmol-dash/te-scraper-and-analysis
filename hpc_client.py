@@ -42,6 +42,7 @@ import zipfile
 from pathlib import Path
 
 _STATE_FILE = Path.home() / ".hpc_te_state.json"
+_GHCR_IMAGE = "ghcr.io/anmol-dash/gameca:latest"  # published by .github/workflows/docker-image.yml
 
 try:
     import paramiko
@@ -114,6 +115,9 @@ class HPCClient:
             # absolute path of gameca.sif on the cluster, jobs run every `python`
             # call through `singularity exec <binds> gameca.sif python ...` instead
             # of building a venv — no glibc/import issues, nothing to pip-install.
+            # Left blank here; connect() auto-populates it via _ensure_container_sif()
+            # (local ./gameca.sif upload, or a docker://ghcr build on the cluster)
+            # unless the user has already set it explicitly.
             "CONTAINER_SIF": "",
             # Extra bind mounts, space-separated "src:dst" (or "src") entries. The
             # work dir, output dir and genome dir are bound automatically.
@@ -275,6 +279,14 @@ class HPCClient:
             else:
                 print("  Internet: NOT reachable from this node")
                 print("  Sequence fetching will require a local genome FASTA (--genome).")
+
+            # Auto-provision gameca.sif so CONTAINER_SIF doesn't have to be set by
+            # hand. Never let this block a successful connection.
+            try:
+                self._ensure_container_sif()
+            except Exception as e:
+                print(f"[GAMECA] Container auto-setup skipped ({e}); "
+                      "falling back to the venv path.")
 
             return True
 
@@ -705,6 +717,100 @@ fi
     def _container_sif(self):
         """Return the configured gameca.sif path, or '' if container mode is off."""
         return str(self.params.get("CONTAINER_SIF", "") or "").strip()
+
+    def _ensure_container_sif(self):
+        """Auto-provision gameca.sif on connect so CONTAINER_SIF need not be set by hand.
+
+        Precedence (skipped entirely if the user already set CONTAINER_SIF):
+          1. A local ./gameca.sif (built via build_sif.sh) is uploaded via SFTP
+             to a fixed path inside remote_work_dir, and reused across connects
+             if the remote copy already matches its size.
+          2. Otherwise, if singularity/apptainer is on the remote PATH, build
+             gameca.sif there directly from the published GHCR image
+             (see .github/workflows/docker-image.yml) and cache it at the same
+             fixed path for future connects.
+          3. If neither is possible, CONTAINER_SIF stays unset and jobs use the
+             existing venv path exactly as before.
+        """
+        if self._container_sif():
+            return  # user already configured it explicitly — don't override
+        if not self.remote_work_dir:
+            return
+
+        remote_sif = f"{self.remote_work_dir}/gameca.sif"
+        local_sif = Path("gameca.sif")
+
+        if local_sif.exists():
+            if self._upload_sif_if_stale(local_sif, remote_sif):
+                self.params["CONTAINER_SIF"] = remote_sif
+                print(f"[GAMECA] CONTAINER_SIF auto-set from local {local_sif} -> {remote_sif}")
+            return
+
+        out, _, code = self.run_command(
+            "command -v singularity 2>/dev/null || command -v apptainer 2>/dev/null"
+        )
+        runtime = out.strip().splitlines()[0] if code == 0 and out.strip() else ""
+        if not runtime:
+            print("[GAMECA] No local gameca.sif and no singularity/apptainer on the "
+                  "cluster PATH — container mode stays off (venv path used).")
+            return
+
+        out, _, code = self.run_command(f"test -f {shlex.quote(remote_sif)} && echo EXISTS")
+        if code == 0 and "EXISTS" in out:
+            self.params["CONTAINER_SIF"] = remote_sif
+            print(f"[GAMECA] Reusing cached {remote_sif}")
+            return
+
+        print(f"[GAMECA] Building gameca.sif on the cluster from {_GHCR_IMAGE} "
+              "(this can take several minutes)...")
+        build_cmd = (
+            f"cd {shlex.quote(self.remote_work_dir)} && "
+            f"{shlex.quote(runtime)} build gameca.sif docker://{_GHCR_IMAGE}"
+        )
+        out, err, code = self.run_command(build_cmd, timeout=1800, stream_output="summary")
+        if code == 0:
+            self.params["CONTAINER_SIF"] = remote_sif
+            print(f"[GAMECA] Built and cached {remote_sif}; CONTAINER_SIF set automatically.")
+        else:
+            print(f"[GAMECA] singularity build failed (exit {code}); container mode stays off.")
+            if err.strip():
+                print(err.strip()[-500:])
+
+    def _upload_sif_if_stale(self, local_path: Path, remote_path: str) -> bool:
+        """Upload local_path to remote_path via SFTP, skipping if sizes already match."""
+        local_size = local_path.stat().st_size
+        out, _, code = self.run_command(
+            f"stat -c %s {shlex.quote(remote_path)} 2>/dev/null "
+            f"|| stat -f %z {shlex.quote(remote_path)} 2>/dev/null"
+        )
+        remote_size = int(out.strip()) if code == 0 and out.strip().isdigit() else -1
+        if remote_size == local_size:
+            print(f"[GAMECA] Remote {remote_path} already matches local gameca.sif "
+                  f"({local_size:,} bytes) — reusing.")
+            return True
+
+        if not (self.use_sftp and self.sftp):
+            print("[GAMECA] SFTP unavailable — cannot upload local gameca.sif "
+                  f"({local_size / 1e9:.1f} GB); leaving CONTAINER_SIF unset.")
+            return False
+
+        print(f"[GAMECA] Uploading local gameca.sif ({local_size / 1e9:.2f} GB) "
+              f"to {remote_path} ...")
+        self.run_command(f"mkdir -p {shlex.quote(str(Path(remote_path).parent))}")
+        last_pct = [-1]
+
+        def _cb(sent, total):
+            pct = int(100 * sent / total) if total else 0
+            if pct != last_pct[0] and pct % 10 == 0:
+                last_pct[0] = pct
+                print(f"[GAMECA]   upload {pct}%")
+
+        try:
+            self.sftp.put(str(local_path), remote_path, callback=_cb)
+            return True
+        except Exception as e:
+            print(f"[GAMECA] Upload of gameca.sif failed: {e}")
+            return False
 
     def _container_setup_block(self):
         """Return a shell block that makes every subsequent `python` call run
@@ -1252,7 +1358,9 @@ fi
             print("    [30] SKIP_GO: 1 = skip GO enrichment")
             print("    [32] CONTAINER_SIF: absolute path to gameca.sif on the cluster. When set, jobs")
             print("         run every python step inside the container (no venv/pip/glibc issues).")
-            print("         Build it with build_sif.sh (docker:// or --fakeroot).")
+            print("         Auto-provisioned on connect: uploads a local ./gameca.sif if present, else")
+            print("         builds one on the cluster from ghcr.io/anmol-dash/gameca:latest via")
+            print("         singularity/apptainer. Set this manually to override or force a specific path.")
             print("    [33] CONTAINER_BINDS: extra Singularity bind mounts, space-separated src[:dst]")
             print("         (work dir, output dir and genome dir are bound automatically).")
             print()

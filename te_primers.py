@@ -23,6 +23,24 @@ from te_genome import GenomeCache, _search_single_chrom, reverse_complement
 MAJOR_CHROMS = [f"chr{i}" for i in range(1, 23)] + ["chrX", "chrY"]
 MAX_GENOME_HITS = 10_000
 
+# Numeric columns that are pipeline-generated annotations/coordinates, never
+# real per-sample expression values. Matched case-insensitively since input
+# CSVs use both "start"/"Start" and "chr"/"Chromosome" conventions.
+NON_EXPRESSION_NUMERIC_COLS = {
+    "start", "stop", "unnamed: 0", "chr", "cluster",
+    "swscore", "millidiv",
+    "pca_x", "pca_y", "umap_x", "umap_y", "tsne_x", "tsne_y",
+    "_total_expr",
+}
+
+
+def _detect_expr_cols(df):
+    """Return numeric columns that plausibly hold real per-sample expression
+    data, excluding genomic coordinates, clustering/embedding coordinates,
+    and other pipeline-derived numeric annotations (NON_EXPRESSION_NUMERIC_COLS)."""
+    numeric_cols = list(df.select_dtypes(include=[np.number]).columns)
+    return [c for c in numeric_cols if str(c).strip().lower() not in NON_EXPRESSION_NUMERIC_COLS]
+
 
 def _pp(msg):
     import datetime
@@ -223,13 +241,14 @@ def design_primers(df, primer_k=18, top_global=8, top_cluster=5,
     out_dir = Path(out_dir) if out_dir else Path(".")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Detect expression columns
-    numeric_cols = list(df.select_dtypes(include=[np.number]).columns)
-    exclude = {"start", "stop", "Unnamed: 0", "chr", "Cluster"}
-    expr_cols = [c for c in numeric_cols if c not in exclude]
+    # Detect expression columns. If none are present, primers are ranked by
+    # coverage alone rather than fabricating a "total expression" figure from
+    # unrelated numeric columns (genomic coordinates, clustering embeddings, etc).
+    expr_cols = _detect_expr_cols(df)
+    has_expr = bool(expr_cols)
 
     df = df.reset_index(drop=True).copy()
-    df["_total_expr"] = df[expr_cols].sum(axis=1) if expr_cols else 0
+    df["_total_expr"] = df[expr_cols].sum(axis=1) if has_expr else 0
     rows_total_expr = df["_total_expr"].to_dict()
 
     # Build global k-mer index
@@ -250,9 +269,15 @@ def design_primers(df, primer_k=18, top_global=8, top_cluster=5,
     ]
     kmer_df = pd.DataFrame(records)
 
-    top_cov_expr  = kmer_df.sort_values(["coverage", "total_expr"], ascending=[False, False]).head(top_global).copy()
-    top_expr_cov  = kmer_df.sort_values(["total_expr", "coverage"], ascending=[False, False]).head(top_global).copy()
-    selected = pd.concat([top_cov_expr["primer"], top_expr_cov["primer"]]).unique().tolist()
+    top_cov_expr = kmer_df.sort_values(["coverage", "total_expr"], ascending=[False, False]).head(top_global).copy()
+    if has_expr:
+        top_expr_cov = kmer_df.sort_values(["total_expr", "coverage"], ascending=[False, False]).head(top_global).copy()
+        selected = pd.concat([top_cov_expr["primer"], top_expr_cov["primer"]]).unique().tolist()
+    else:
+        # No real expression data: a second "rank by expression" pass would just
+        # duplicate/tie with the coverage ranking, so skip it entirely.
+        top_expr_cov = kmer_df.iloc[0:0].copy()
+        selected = top_cov_expr["primer"].unique().tolist()
 
     # Genome searches for selected primers
     primer_hits = {}
@@ -316,34 +341,45 @@ def design_primers(df, primer_k=18, top_global=8, top_cluster=5,
     kmer_out = kmer_df.copy()
     kmer_out["rows_covered"] = kmer_out["rows"].apply(_rows_str)
     kmer_out["rows_coordinates"] = kmer_out["rows"].apply(_coords_str)
-    kmer_out.sort_values(["coverage", "total_expr"], ascending=[False, False])\
+    sort_cols = ["coverage", "total_expr"] if has_expr else ["coverage"]
+    if not has_expr:
+        kmer_out = kmer_out.drop(columns=["total_expr"])
+    kmer_out.sort_values(sort_cols, ascending=[False] * len(sort_cols))\
             .to_csv(out_dir / f"all_{primer_k}mer_candidates_metrics.csv", index=False)
 
-    # Selected primers summary
+    # Selected primers summary. total_expr/strategy columns are only meaningful
+    # (and only written) when real expression data was detected — otherwise
+    # they'd either be all-zero or a duplicate of the coverage-only ranking.
     if selected:
-        top_summary = pd.DataFrame({
+        top_summary = {
             "primer": selected,
-            "coverage":   [kmer_df.loc[kmer_df["primer"] == p, "coverage"].values[0] for p in selected],
-            "total_expr": [kmer_df.loc[kmer_df["primer"] == p, "total_expr"].values[0] for p in selected],
+            "coverage": [kmer_df.loc[kmer_df["primer"] == p, "coverage"].values[0] for p in selected],
             "rows_covered": [_rows_str(kmer_df.loc[kmer_df["primer"] == p, "rows"].values[0]) for p in selected],
             "rows_coordinates": [_coords_str(kmer_df.loc[kmer_df["primer"] == p, "rows"].values[0]) for p in selected],
-            "strategy": [
+        }
+        if has_expr:
+            top_summary["total_expr"] = [kmer_df.loc[kmer_df["primer"] == p, "total_expr"].values[0] for p in selected]
+            top_summary["strategy"] = [
                 "cov_then_expr" if p in set(top_cov_expr["primer"]) else "expr_then_cov"
                 for p in selected
-            ],
-        })
-        top_summary.to_csv(out_dir / "selected_primers_summary.csv", index=False)
+            ]
+        else:
+            top_summary["strategy"] = ["coverage_only" for _ in selected]
+        pd.DataFrame(top_summary).to_csv(out_dir / "selected_primers_summary.csv", index=False)
         _pp(f"  Saved selected_primers_summary.csv ({len(selected)} primers)")
 
     # Cluster top primers
     cluster_rows = []
     for cl, dfp in cluster_top_primers.items():
         for _, r in dfp.iterrows():
-            cluster_rows.append({
+            row = {
                 "cluster": cl, "primer": r["primer"],
-                "coverage": r["coverage"], "total_expr": r["total_expr"],
+                "coverage": r["coverage"],
                 "rows_covered": _rows_str(r["rows"])
-            })
+            }
+            if has_expr:
+                row["total_expr"] = r["total_expr"]
+            cluster_rows.append(row)
     if cluster_rows:
         pd.DataFrame(cluster_rows).to_csv(out_dir / "cluster_top_primers.csv", index=False)
         _pp(f"  Saved cluster_top_primers.csv")

@@ -1343,12 +1343,12 @@ def ch_primers(d):
     if rows:
         tex += longtable(h, rows, 'Selected 18-mer primers: coverage and expression statistics.',
                          'tab:primers_selected',
-                         cols=[c for c in h if c in ['primer','coverage','total_expr','strategy']],
-                         note='coverage: number of TE copies matched; total\_expr: sum of expression values for matched copies.')
+                         cols=[c for c in h if c in ['primer','coverage','strategy']],
+                         note='coverage: number of TE copies matched.')
     h2, rows2 = read_csv(d / '06_primers' / 'cluster_top_primers.csv', max_rows=15)
     if rows2:
         tex += longtable(h2, rows2, 'Top primers per cluster.', 'tab:primers_cluster',
-                         cols=[c for c in h2 if c in ['cluster','primer','coverage','total_expr','strategy']])
+                         cols=[c for c in h2 if c in ['cluster','primer','coverage','strategy']])
     return tex
 
 def ch_fold(d, pdb_renders):

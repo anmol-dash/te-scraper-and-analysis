@@ -82,7 +82,7 @@ import requests
 # Pipeline modules
 from te_genome import GenomeCache, reverse_complement
 from te_clustering import clustering_analysis
-from te_primers import design_primers
+from te_primers import design_primers, _detect_expr_cols
 from te_alignment import run_alignment_pipeline
 from te_motif import run_motif_analysis
 from te_go import run_go_annotation
@@ -1108,9 +1108,7 @@ def compute_basic_stats(df, label="", output_file=None):
             lambda s: (s.count("G") + s.count("C")) / len(s) if len(s) > 0 else np.nan
         ).values
 
-    numeric = list(df.select_dtypes(include=[np.number]).columns)
-    exclude = {"start", "stop", "Unnamed: 0", "chr", "Cluster", "_total_expr"}
-    expr_cols = [c for c in numeric if c not in exclude]
+    expr_cols = _detect_expr_cols(df)
 
     lines = [
         f"{'='*60}", f"STATISTICS{label}", f"{'='*60}",
