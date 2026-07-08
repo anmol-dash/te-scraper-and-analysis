@@ -1667,7 +1667,6 @@ def generate_report(family_dir_str):
     body += ch_primers(d)
     body += ch_fold(d, pdb_renders)
     body += ch_grna(d)
-    body += ch_multiassembly_ortholog(d)
 
     # Guard every section heading so it (and its first lines) cannot land at the
     # very bottom of a page and spill over the footer. \FloatBarrier first
