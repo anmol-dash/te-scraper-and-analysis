@@ -50,7 +50,6 @@ RUN apt-get update \
         mafft \
         procps \
         tabix \
-        trimal \
         wget \
         zlib1g-dev \
     && rm -rf /var/lib/apt/lists/* \
@@ -59,6 +58,18 @@ RUN apt-get update \
            -O "/usr/local/bin/$_b" && chmod +x "/usr/local/bin/$_b" \
            || echo "WARNING: $_b download failed; stages that use it degrade gracefully"; \
        done
+
+# trimAl is no longer packaged in Debian bookworm's apt repos ("Unable to
+# locate package trimal"), which broke every image build since it was added
+# as the CIAlign fallback cleaner (see te_alignment.run_trimal()). Build the
+# small C++ binary from source instead — it has no external deps beyond g++.
+RUN curl -sL https://github.com/inab/trimal/archive/refs/tags/v1.5.0.tar.gz \
+      -o /tmp/trimal.tar.gz \
+    && tar xzf /tmp/trimal.tar.gz -C /tmp \
+    && make -C /tmp/trimal-1.5.0/source \
+    && install -m 755 /tmp/trimal-1.5.0/source/trimal /usr/local/bin/trimal \
+    && rm -rf /tmp/trimal.tar.gz /tmp/trimal-1.5.0 \
+    && trimal --version
 
 # Nextflow — GAMECA's orchestration layer (see nextflow/). Baked in so the image
 # can BOTH be the per-process container for an external `nextflow run` AND run the
