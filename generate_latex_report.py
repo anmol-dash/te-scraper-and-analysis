@@ -812,8 +812,8 @@ def ch_overview(d, stats, cl_rows, seq_figs=None):
         f'the distribution is right-skewed by a small number of full-length insertions, so the mean, '
         f'median and SD summarise the family better than the raw min--max span, which is dominated by outliers. '
         f'Mean GC content is {esc(stats.get("gc_mean","?"))}\\%. '
-        f'Per-copy expression across {esc(stats.get("expr_cols","?"))} samples is analysed in the '
-        f'Gene Expression chapter.\n\n'
+        f'Per-copy expression across {esc(stats.get("expr_cols","?"))} user-designated samples '
+        f'(named and ordered before this run) is analysed in the Gene Expression chapter.\n\n'
     )
 
     if seq_figs and seq_figs.get('seq_stats_panel'):
@@ -1096,10 +1096,11 @@ def ch_expression(d):
 
     tex += (
         'Per-copy expression values supplied with the input were summarised per cluster and per '
-        'sample/stage. Unlike a single family-wide mean, this exposes whether particular sequence '
-        'subtypes (clusters) drive the family\'s expression and in which sample or developmental '
-        'stage that expression peaks. All values below are computed directly from the supplied '
-        'expression columns; no values are imputed.\n\n'
+        'sample/stage, using the expression columns and figure order designated by the user '
+        'before this run (not auto-detected). Unlike a single family-wide mean, this exposes '
+        'whether particular sequence subtypes (clusters) drive the family\'s expression and in '
+        'which sample or developmental stage that expression peaks. All values below are computed '
+        'directly from the designated expression columns; no values are imputed.\n\n'
     )
     if box:
         tex += fig_latex(box, 'Per-cluster expression distribution across all samples '

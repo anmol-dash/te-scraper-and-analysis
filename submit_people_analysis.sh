@@ -33,6 +33,14 @@ MIN_COUNT="${MIN_COUNT:-10}"           # skip discovered subfamilies below this 
 RMSK_DIR="${RMSK_DIR:-}"               # optional pre-downloaded rmsk_<build>.txt.gz dir
 GENOME_MM10="${GENOME_MM10:-}"         # optional mm10 FASTA for primer search
 GENOME_HG38="${GENOME_HG38:-}"         # optional hg38 FASTA for primer search
+EXPRESSION_ASSEMBLY="${EXPRESSION_ASSEMBLY:-}"  # optional expression CSV/TSV/BED assembly
+EXPR_COLS="${EXPR_COLS:-}"             # space-separated expression column names, in figure
+                                        # order — required by query.py (per job) whenever the
+                                        # job's data has candidate expression columns, since
+                                        # these are non-interactive bsub/sbatch jobs
+EXPR_LABELS="${EXPR_LABELS:-}"         # optional space-separated display labels for EXPR_COLS
+                                        # (labels can't contain spaces themselves here; for
+                                        # multi-word labels use --extra-query-args instead)
 EXTRA_QUERY_ARGS="${EXTRA_QUERY_ARGS:-}"   # appended to every query.py call
 QUEUE="${QUEUE:-normal}"
 N_CORES="${N_CORES:-4}"
@@ -51,6 +59,9 @@ PYCMD=("$PYTHON" "$SCRIPT_DIR/run_people_analysis.py"
 [ -n "$RMSK_DIR" ]         && PYCMD+=(--rmsk-dir "$RMSK_DIR")
 [ -n "$GENOME_MM10" ]      && PYCMD+=(--genome-mm10 "$GENOME_MM10")
 [ -n "$GENOME_HG38" ]      && PYCMD+=(--genome-hg38 "$GENOME_HG38")
+[ -n "$EXPRESSION_ASSEMBLY" ] && PYCMD+=(--expression-assembly "$EXPRESSION_ASSEMBLY")
+[ -n "$EXPR_COLS" ]        && PYCMD+=(--expr-cols $EXPR_COLS)
+[ -n "$EXPR_LABELS" ]      && PYCMD+=(--expr-labels $EXPR_LABELS)
 [ -n "$EXTRA_QUERY_ARGS" ] && PYCMD+=(--extra-query-args "$EXTRA_QUERY_ARGS")
 # Pass through any extra flags (e.g. --dry-run, --scheduler slurm).
 PYCMD+=("$@")

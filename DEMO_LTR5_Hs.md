@@ -58,6 +58,17 @@ Show the `--dry-run` topological plan first, then the real run streaming
 
 **Orchestrator:** `run_stage11_all.py` mirrors `query.py`'s `_MODULES` registry exactly and runs all Stage 11 modules (phylo, grna, transduction, antisense, ctcf_tad, epigenetic, ortholog, multiassembly, fold, divergence, ltr_struct, subfamily, benchmark, motif_gain, expression) against any loci CSV outside the main pipeline. Each module is a sibling `run_*.py` script invoked as a subprocess; logs stream to `standout_analysis.log`. Pass `--only fold,phylo` or `--skip expression` to target specific modules.
 
+**Expression (#15):** `te_expression.py` no longer picks expression-column
+order on its own when run through `query.py` — the pipeline requires the user
+to designate expression column names and their exact figure order up front
+(`--expr-cols`/`--expr-labels` on `query.py`, resolved once at data-load time
+and persisted to `expr_cols.json`), then passes that resolved list to
+`te_expression.py` as `--stage-cols`/`--stage-labels`. This is also what
+enables the `stage_profile.png`/`primer_expression.png` figures, which are
+otherwise skipped without an explicit column order. Standalone invocations of
+`te_expression.py` (outside `query.py`) still fall back to auto-detection
+unless `--stage-cols` is passed directly.
+
 **Fold prediction (#11):** `--per-cluster` builds a position-wise majority consensus (`_majority_consensus()`) for each `Cluster` group, then `consensus_orfs()` finds the longest ORF ≥ `--min-aa` aa per consensus and deduplicates by protein sequence. Consensus ORFs fold first; the top `--source-seqs` loci (ranked by total expression or sequence length) are then scanned in all 6 frames (`find_orfs()`) and deduplicated unique locus ORFs top up the list to `--top-n`. ColabFold auto-installation: tries `pip install colabfold[alphafold]` first (≈500 MB), then falls back to the localColabFold bash installer (~20 GB). On HPC with an old host GCC, pass `--singularity-image /path/to/colabfold.sif`: this wraps every `colabfold_batch` call in `singularity exec [--nv] <sif>` and skips the host-side `alphafold`-module importability check entirely (the module lives inside the container). Add `--no-gpu` to drop `--nv` for CPU-only runs. `--use-mafft` pre-aligns ORF proteins with MAFFT and generates per-query `.a3m` files passed to ColabFold with `--msa-mode custom` instead of the default MMseqs2 online API.
 
 **Motif scanning (te_moods_scan.py — new):** the old pipeline downloaded a genome-wide JASPAR bigBed, subsetted it with bigBedToBed + tabix, then ran bedtools intersect. The new `te_moods_scan.py` replaces the download + intersect leg with a direct MOODS-based scan of the TE locus sequences against the JASPAR PFM bundle:

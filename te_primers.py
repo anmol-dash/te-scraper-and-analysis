@@ -220,7 +220,7 @@ def build_kmer_index(df, primer_k):
 
 def design_primers(df, primer_k=18, top_global=8, top_cluster=5,
                    genome_fa=None, genome_cache=None, primer_timeout=120,
-                   out_dir=None, family_name="FAMILY"):
+                   out_dir=None, family_name="FAMILY", expr_cols=None):
     """Design k-mer primers globally and per cluster.
 
     Args:
@@ -233,6 +233,10 @@ def design_primers(df, primer_k=18, top_global=8, top_cluster=5,
         primer_timeout: Seconds before fallback to random sampling.
         out_dir:       Output directory for CSVs.
         family_name:   Used in filenames.
+        expr_cols:     Explicit, ordered expression column names to sum for
+                       total_expr. When None, falls back to auto-detection
+                       (standalone/direct-invocation use only — the query.py
+                       pipeline always passes the user-designated list).
 
     Returns:
         dict with keys 'selected_primers', 'kmer_df', 'primer_hits',
@@ -241,10 +245,12 @@ def design_primers(df, primer_k=18, top_global=8, top_cluster=5,
     out_dir = Path(out_dir) if out_dir else Path(".")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Detect expression columns. If none are present, primers are ranked by
-    # coverage alone rather than fabricating a "total expression" figure from
-    # unrelated numeric columns (genomic coordinates, clustering embeddings, etc).
-    expr_cols = _detect_expr_cols(df)
+    # Use the caller-designated expression columns when given. If none are
+    # present, primers are ranked by coverage alone rather than fabricating a
+    # "total expression" figure from unrelated numeric columns (genomic
+    # coordinates, clustering embeddings, etc).
+    if expr_cols is None:
+        expr_cols = _detect_expr_cols(df)
     has_expr = bool(expr_cols)
 
     df = df.reset_index(drop=True).copy()

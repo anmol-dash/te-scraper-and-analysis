@@ -147,6 +147,14 @@ def parse_args(argv=None):
                    help="Optional CSV/TSV/BED-like expression assembly with chr/start/stop columns")
     p.add_argument("--expression-buffer", type=int, default=50,
                    help="Expand expression start/stop by this many bp when matching TE loci (default: 50)")
+    p.add_argument("--expr-cols", type=str, nargs="+", default=None,
+                   help="Expression column names, in the exact order they should appear in "
+                        "figures (e.g. --expr-cols pronuc twocell fourcell eightcell morulacell). "
+                        "Required whenever the data has candidate expression columns and the run "
+                        "is non-interactive (no TTY); prompted for interactively otherwise.")
+    p.add_argument("--expr-labels", type=str, nargs="+", default=None,
+                   help="Optional display labels for --expr-cols, same order/length "
+                        "(e.g. --expr-labels 'Pro-nucleus' '2-cell' '4-cell' '8-cell' 'Morula').")
     p.add_argument("--fetch-workers", type=int, default=3,
                    help="Parallel UCSC fetch workers (default: 3; concurrency capped at 3 regardless)")
     p.add_argument("--parallel-primers", action="store_true",
@@ -1092,7 +1100,7 @@ def _cluster_summary_sql(df):
 # STATISTICS
 # ═══════════════════════════════════════════════════════════════════════════
 
-def compute_basic_stats(df, label="", output_file=None):
+def compute_basic_stats(df, label="", output_file=None, expr_cols=None):
     seqs = df["Seq"].astype(str)
     seqs_list = seqs.tolist()
 
@@ -1108,7 +1116,8 @@ def compute_basic_stats(df, label="", output_file=None):
             lambda s: (s.count("G") + s.count("C")) / len(s) if len(s) > 0 else np.nan
         ).values
 
-    expr_cols = _detect_expr_cols(df)
+    if expr_cols is None:
+        expr_cols = _detect_expr_cols(df)
 
     lines = [
         f"{'='*60}", f"STATISTICS{label}", f"{'='*60}",
@@ -2378,6 +2387,7 @@ def _run_standout_analysis(args, out_dir, dirs, family_name, stage_times):
     _colabfold_cmd  = getattr(args, "colabfold_cmd", None)
     _min_ltr_identity = getattr(args, "min_ltr_identity", None)
     _cpg_omega      = getattr(args, "cpg_omega", None)
+    _expr_cols, _expr_labels = _load_expr_cols(dirs)
 
     _MODULES = [
         ("phylo",         "run_phylo_analysis.py",
@@ -2427,7 +2437,9 @@ def _run_standout_analysis(args, out_dir, dirs, family_name, stage_times):
          ["--assembly", _assembly_arg]
          + (["--consensus-fasta", str(cons_fa)] if cons_fa.exists() else [])),
         ("expression",    "te_expression.py",
-         ["--out-dir", str(out_dir)]),
+         ["--out-dir", str(out_dir)]
+         + _opt_list("--stage-cols", _expr_cols)
+         + (_opt_list("--stage-labels", _expr_labels) if _expr_labels != _expr_cols else [])),
     ]
 
     _diag(f"  STAGE 11: {len(_MODULES)} modules | script_dir={_sdir} | python={_py}")
@@ -2609,13 +2621,98 @@ def _load_clustered_csv(dirs, out_dir, family_name):
 
 
 def _load_expr_cols(dirs):
+    """Return (cols, labels) as previously resolved by _resolve_expr_cols().
+
+    Back-compat: older runs persisted a bare list (no labels) — treat that as
+    labels == cols.
+    """
     p = dirs["data"] / "expr_cols.json"
-    if p.exists():
-        try:
-            return json.loads(p.read_text())
-        except Exception:
-            return []
-    return []
+    if not p.exists():
+        return [], []
+    try:
+        data = json.loads(p.read_text())
+    except Exception:
+        return [], []
+    if isinstance(data, list):
+        return data, data
+    return data.get("cols", []), data.get("labels", data.get("cols", []))
+
+
+def _resolve_expr_cols(args, df_family, dirs):
+    """Require the user to name + order expression columns before proceeding.
+
+    Returns (cols, labels), both possibly empty when the data has no candidate
+    expression columns at all. Persists the resolution to
+    dirs["data"]/expr_cols.json so downstream stages (and --resume-from) reuse
+    it via _load_expr_cols() instead of re-detecting.
+
+    Idempotent: if a resolution was already persisted by an earlier stage/run
+    for this family and --expr-cols wasn't explicitly passed again, the
+    persisted choice is reused silently instead of re-prompting/re-requiring.
+    """
+    if not getattr(args, "expr_cols", None) and (dirs["data"] / "expr_cols.json").exists():
+        return _load_expr_cols(dirs)
+
+    candidates = _detect_expr_cols(df_family)
+
+    if getattr(args, "expr_cols", None):
+        cols = list(args.expr_cols)
+        missing = [c for c in cols if c not in df_family.columns]
+        if missing:
+            print(f"FATAL: --expr-cols names not found in data: {missing}")
+            print(f"  Available columns: {list(df_family.columns)}")
+            sys.exit(1)
+        labels = list(args.expr_labels) if getattr(args, "expr_labels", None) else list(cols)
+        if len(labels) != len(cols):
+            print(f"FATAL: --expr-labels has {len(labels)} entries but --expr-cols has {len(cols)}; "
+                  f"they must match 1:1 in the same order.")
+            sys.exit(1)
+
+    elif not candidates:
+        cols, labels = [], []
+
+    elif sys.stdin.isatty():
+        print("\n=== EXPRESSION COLUMNS ===")
+        print("  Candidate numeric expression columns detected (order shown is NOT final):")
+        for c in candidates:
+            print(f"    {c}")
+        cols = None
+        while not cols:
+            raw = _safe_input(
+                "  Enter the columns to use, IN THE ORDER they should appear in figures "
+                "(space-separated, or blank to abort): "
+            ).strip()
+            if not raw:
+                print("FATAL: expression columns were not designated; rerun interactively "
+                      "and provide an order, or pass --expr-cols/--expr-labels for a batch run.")
+                sys.exit(1)
+            picked = raw.split()
+            missing = [c for c in picked if c not in df_family.columns]
+            if missing:
+                print(f"  Not found in data: {missing} — try again.")
+                continue
+            cols = picked
+        raw_labels = _safe_input(
+            "  Optional display labels, same order (space-separated; blank = reuse column names): "
+        ).strip()
+        labels = raw_labels.split() if raw_labels else list(cols)
+        if len(labels) != len(cols):
+            print("  Label count doesn't match column count — reusing column names as labels.")
+            labels = list(cols)
+
+    else:
+        print("FATAL: this run has candidate expression columns but no --expr-cols was given "
+              "and stdin is not a TTY (non-interactive/batch run).")
+        print(f"  Candidates: {candidates}")
+        print("  Rerun with, e.g.:")
+        print(f"    --expr-cols {' '.join(candidates)}")
+        sys.exit(1)
+
+    (dirs["data"] / "expr_cols.json").write_text(json.dumps({"cols": cols, "labels": labels}))
+    _checkpoint(dirs["data"].parent, "expr_cols_resolved", f"cols={cols}  labels={labels}")
+    if cols:
+        progress_print(f"  Expression columns designated ({len(cols)}): {cols}")
+    return cols, labels
 
 
 def _stage1_genome(args, out_dir):
@@ -2782,17 +2879,18 @@ def _stage3_sequences(args, df_family, genome_cache, dirs, out_dir, family_name)
 def _stage4_statistics(df_family, dirs, out_dir, family_name):
     _diag("STAGE 4: Statistics")
     print("\n=== BASIC STATISTICS ===")
+    resolved_cols, _resolved_labels = _load_expr_cols(dirs)
     try:
         expr_cols = compute_basic_stats(
             df_family,
             label=f" — {family_name}",
-            output_file=dirs["stats"] / "overall_statistics.txt"
+            output_file=dirs["stats"] / "overall_statistics.txt",
+            expr_cols=resolved_cols,
         )
         _diag(f"  expr_cols={expr_cols}")
     except Exception as e:
         _diag(f"  Statistics FAILED (non-fatal): {type(e).__name__}: {e}\n{traceback.format_exc()}")
         expr_cols = []
-    (dirs["data"] / "expr_cols.json").write_text(json.dumps(expr_cols))
     _checkpoint(out_dir, "stage4_statistics", f"expr_cols={expr_cols}")
     return expr_cols
 
@@ -2961,6 +3059,7 @@ def _stage10_primers(args, df_family, out_dir, dirs, family_name, genome_cache=N
         use_genome = genome_cache is not None and not args.skip_genome
         if use_genome and getattr(args, "parallel_primers", False) and genome_cache.is_loaded:
             genome_cache._default_parallel = True
+        resolved_cols, _resolved_labels = _load_expr_cols(dirs)
         design_primers(
             df_family,
             primer_k=args.primer_kmer,
@@ -2971,6 +3070,7 @@ def _stage10_primers(args, df_family, out_dir, dirs, family_name, genome_cache=N
             primer_timeout=args.primer_timeout,
             out_dir=dirs["primers"],
             family_name=family_name,
+            expr_cols=resolved_cols or None,
         )
         _diag("  Primer design OK")
     except Exception as e:
@@ -2994,6 +3094,7 @@ def _run_single_stage(args):
 
     elif stage == "data":
         df_family, family_name = _stage2_load_data(args, family_name, out_dir)
+        _resolve_expr_cols(args, df_family, dirs)
         df_family.to_csv(dirs["data"] / f"{family_name.lower()}_raw.csv", index=False)
 
     elif stage == "sequences":
@@ -3003,16 +3104,18 @@ def _run_single_stage(args):
 
     elif stage == "stats":
         df_family = _load_with_sequences_csv(dirs, family_name)
+        _resolve_expr_cols(args, df_family, dirs)
         _stage4_statistics(df_family, dirs, out_dir, family_name)
 
     elif stage == "clustering":
         df_family = _load_with_sequences_csv(dirs, family_name)
+        _resolve_expr_cols(args, df_family, dirs)
         df_family, n_clusters = _stage5_clustering(args, df_family, dirs, out_dir, family_name)
         _stage5b_percluster_stats(df_family, dirs)
 
     elif stage == "dashboard":
         df_family, _ = _load_clustered_csv(dirs, out_dir, family_name)
-        expr_cols = _load_expr_cols(dirs)
+        expr_cols, _expr_labels = _load_expr_cols(dirs)
         _stage6_dashboard(df_family, expr_cols, dirs, out_dir, family_name)
 
     elif stage == "alignment":
@@ -3124,11 +3227,13 @@ def run_pipeline(args):
             df_family = _load_raw_csv(DIRS, FAMILY_NAME)
         elif resume == "stats":
             df_family = _load_with_sequences_csv(DIRS, FAMILY_NAME)
+            _resolve_expr_cols(args, df_family, DIRS)
         elif resume == "clustering":
             df_family = _load_with_sequences_csv(DIRS, FAMILY_NAME)
+            _resolve_expr_cols(args, df_family, DIRS)
         elif resume == "dashboard":
             df_family, _ = _load_clustered_csv(DIRS, OUT_DIR, FAMILY_NAME)
-            expr_cols = _load_expr_cols(DIRS)
+            expr_cols, _expr_labels = _load_expr_cols(DIRS)
             n_clusters = len([c for c in df_family["Cluster"].unique() if c >= 0])
         elif resume in ("alignment", "primers"):
             df_family, _ = _load_clustered_csv(DIRS, OUT_DIR, FAMILY_NAME)
@@ -3164,6 +3269,7 @@ def run_pipeline(args):
     if start_idx <= order.index("data"):
         t0 = time.time()
         df_family, FAMILY_NAME = _stage2_load_data(args, FAMILY_NAME, OUT_DIR)
+        _resolve_expr_cols(args, df_family, DIRS)
         df_family.to_csv(DIRS["data"] / f"{FAMILY_NAME.lower()}_raw.csv", index=False)
         stage_times["Load Data"] = time.time() - t0
 

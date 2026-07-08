@@ -149,6 +149,12 @@ def build_job_script(jobs_dir, script_dir, family, assembly, out_dir, do_fold,
         q += ["--rmsk-dir", args.rmsk_dir]
     if args.max_loci:
         q += ["--max-loci", str(args.max_loci)]
+    if args.expression_assembly:
+        q += ["--expression-assembly", args.expression_assembly]
+    if args.expr_cols:
+        q += ["--expr-cols"] + list(args.expr_cols)
+    if args.expr_labels:
+        q += ["--expr-labels"] + list(args.expr_labels)
     genome = args.genome_mm10 if assembly in ("mm10", "mm39") else args.genome_hg38
     if genome:
         q += ["--genome", genome]
@@ -232,6 +238,17 @@ def main():
                    help="hg38 genome FASTA for in-memory primer search (optional).")
     p.add_argument("--max-loci", type=int, default=None,
                    help="Cap loci per family (default: no cap = full family).")
+    p.add_argument("--expression-assembly", default=os.environ.get("EXPRESSION_ASSEMBLY", ""),
+                   help="Optional expression CSV/TSV/BED-like assembly, passed to every "
+                        "query.py job (see query.py --expression-assembly).")
+    p.add_argument("--expr-cols", nargs="+", default=None,
+                   help="Expression column names, in figure order, passed to every query.py "
+                        "job as --expr-cols. Required by query.py whenever a job's data has "
+                        "candidate expression columns — these are non-interactive bsub/sbatch "
+                        "jobs, so without this the job will fail fast with a FATAL error "
+                        "listing the detected candidates.")
+    p.add_argument("--expr-labels", nargs="+", default=None,
+                   help="Optional display labels for --expr-cols, same order/length.")
     p.add_argument("--min-count", type=int, default=10,
                    help="Skip discovered subfamilies with fewer than this many loci "
                         "(default: 10). Explicit families are never skipped.")

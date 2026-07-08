@@ -55,7 +55,9 @@ Enrichment
   Motif                 – JASPAR + Fisher + HOMER
   GO annotation         – family + species only; chains clustering → motif → GO automatically
                           if enrichment results are not yet present
-  Expression            – boxplots per cluster
+  Expression            – boxplots per cluster (column names + figure order
+                          must be designated — see "Designating expression
+                          columns" below)
   Full enrichment       – motif + GO + expression combined
 
 Primer design
@@ -69,6 +71,32 @@ Results
   Retrieve              – rsync results to local machine
   File browser          – remote filesystem with sort, CSV viewer, HTML plots
 ```
+
+### Designating expression columns
+
+If the input data has candidate expression columns (any numeric per-sample
+column not already used for coordinates/scores/clustering), `query.py`
+requires you to name them and set their figure order before the pipeline
+proceeds — it never silently guesses:
+
+```bash
+python query.py --input clustered.csv --family MT2_Mm --output results \
+    --expr-cols pronuc twocell fourcell eightcell morulacell \
+    --expr-labels "Pro-nucleus" "2-cell" "4-cell" "8-cell" "Morula"
+```
+
+- `--expr-cols` is required for non-interactive/batch runs (e.g. `bsub`/`sbatch`
+  jobs, which have no TTY) whenever candidate columns are present; the pipeline
+  exits early with the detected candidate list if it's missing.
+- Running interactively without `--expr-cols` prompts for the column order
+  instead of exiting.
+- `--expr-labels` is optional — omit it to reuse the column names as labels.
+- Families with no candidate expression columns are unaffected — no prompt or
+  flag is required.
+
+The resolved order is reused everywhere downstream: the dashboard expression
+heatmap, `te_expression.py`'s stage-profile/primer-expression figures, and the
+primer design summary tables.
 
 ### Design choice: CIAlign failure/timeout fallback
 

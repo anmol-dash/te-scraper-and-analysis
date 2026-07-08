@@ -10,6 +10,13 @@ metadata. Sample names are arbitrary — there is no developmental-stage
 whitelist, so "K562_rep2", "Liver_donorA", "siCTRL_0h", "2-cell", etc. are all
 treated identically. Columns can also be specified explicitly via --stage-cols.
 
+When run as part of the query.py pipeline, --stage-cols/--stage-labels are
+always supplied: query.py requires the user to designate expression column
+names and figure order up front (via --expr-cols/--expr-labels, or an
+interactive prompt) before the pipeline proceeds, and passes that resolved,
+ordered list to this module. The auto-detection above only kicks in for
+standalone/direct invocations of this script.
+
 Input:   clustered CSV produced by te_clustering.py
          (needs columns: Cluster, plus ≥1 numeric expression columns)
 
