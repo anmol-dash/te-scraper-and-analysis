@@ -64,8 +64,13 @@ workflow STANDOUT {
     ch_versions = Channel.empty()
 
     // One (meta, results, mod) per post-alignment analyses module → parallel fan-out.
+    // params.skip_modules (comma/space-separated names) mirrors query.py/
+    // run_stage11_all.py's --skip so both engines can exclude the same modules
+    // (e.g. ColabFold, which is heavy/GPU and off by default in test harnesses).
+    def skipMods = (params.skip_modules ?: '').split(/[,\s]+/).findAll { it } as Set
     ch_mods = ch_results.flatMap { meta, results ->
-        buildRegistry(meta).collect { mod -> tuple(meta, results, mod) }
+        buildRegistry(meta).findAll { !skipMods.contains(it.name) }
+                            .collect { mod -> tuple(meta, results, mod) }
     }
 
     GAMECA_STANDOUT( ch_mods )

@@ -4,9 +4,10 @@ run_gameca_cluster_test.py — comprehensive multi-family / multi-assembly GAMEC
 integration test, designed to run on the HPC cluster.
 
 What it exercises (end to end, for every (family, assembly) in the matrix):
-  1. UCSC pull        — te_prep.py downloads the rmsk track and fetches per-locus
-                        sequences straight from the UCSC browser
+  1. UCSC pull (retrieval) — te_prep.py downloads the rmsk track and fetches
+                        per-locus sequences straight from the UCSC browser
                         (api.genome.ucsc.edu), so the live fetch path is tested.
+                        Timed separately from everything below.
   2. Clustering       — te_clustering.py assigns real clusters; if that yields
                         <2 clusters (small families) we fall back to deterministic
                         synthetic clusters so cluster-aware modules still run.
@@ -17,8 +18,27 @@ What it exercises (end to end, for every (family, assembly) in the matrix):
                         — NOT just "two cell / four cell" style stage names.
                         These numbers are fabricated test fixtures ONLY; they are
                         never reported as real measurements.
-  4. Stage 11         — run_stage11_all.py runs every standout-analysis module on
-                        the prepared CSV.
+  4. Stage 11         — every standout-analysis module runs on the prepared CSV,
+                        via one of two engines (--stage11-engine):
+                          loop      — run_stage11_all.py's in-process subprocess
+                                      loop (default; matches query.py's fallback
+                                      path when Nextflow isn't available).
+                          nextflow  — nextflow/post_alignment_analyses.nf, which
+                                      scatters the same module registry across
+                                      real Nextflow processes (matches query.py
+                                      --post-alignment-analyses-nextflow).
+                        Either engine can additionally run inside the GAMECA
+                        Singularity container via --container-sif (loop: wraps
+                        the subprocess in `singularity exec`; nextflow: adds
+                        `-profile singularity --container_sif <path>`, or pulls
+                        docker://ghcr.io/anmol-dash/gameca:latest if no local
+                        .sif is given).
+
+Timing: retrieval (UCSC pull), clustering, synthetic-expression injection, and
+Stage 11 (broken into per-module seconds, with a "Stage 11 excl. fold" total)
+are all captured separately per family and written to the master log + JSON
+summary — not just the retrieval step. ColabFold (--include-fold) is excluded
+from the "excl. fold" total since it is heavy/GPU and off by default.
 
 A master log + JSON summary capture, per family and per module, OK/FAIL/SKIP and
 timing, so a single output file tells you whether the whole program is healthy
@@ -32,6 +52,10 @@ Usage (cluster):
     # custom matrix / caps:
     python run_gameca_cluster_test.py --out-dir OUT \
         --matrix "L1HS:hg38,MT2_Mm:mm10" --max-loci 200 --include-fold
+
+    # exercise the Nextflow orchestration engine inside the Singularity image:
+    python run_gameca_cluster_test.py --out-dir OUT \
+        --stage11-engine nextflow --container-sif ~/gameca/gameca.sif
 """
 
 import argparse
@@ -67,6 +91,26 @@ def _run(cmd, log, cwd=None, env=None):
     dt = time.time() - t0
     log.write(f"[exit {rc}  {dt:.0f}s]\n"); log.flush()
     return rc, dt
+
+
+def _singularity_wrap(cmd, container_sif):
+    """Prefix *cmd* with `singularity exec <binds> <sif>` when a .sif is set.
+
+    Binds the paths any argument in cmd points at (so relative-to-host paths
+    resolve identically inside the container) plus the repo dir itself.
+    """
+    if not container_sif:
+        return cmd
+    runtime = shutil.which("singularity") or shutil.which("apptainer") or "singularity"
+    binds = {str(Path(__file__).resolve().parent)}
+    for c in cmd:
+        p = Path(str(c))
+        if p.is_absolute() and (p.exists() or p.parent.exists()):
+            binds.add(str(p.parent if not p.exists() or p.is_file() else p))
+    bind_args = []
+    for b in sorted(binds):
+        bind_args += ["-B", f"{b}:{b}"]
+    return [runtime, "exec"] + bind_args + [container_sif] + cmd
 
 
 def _synthetic_clusters(df, k=3):
@@ -120,14 +164,21 @@ def _inject_synthetic_expression(df, seed):
 
 
 def prepare_family(family, assembly, work_root, sdir, py, args, mlog):
-    """Pull from UCSC, cluster, inject synthetic expression. Returns prepared CSV
-    path or None on failure."""
+    """Pull from UCSC, cluster, inject synthetic expression.
+
+    Returns (prepared_csv_path, timings) on success, or (None, {}) on failure.
+    timings is {"retrieval_s": ..., "clustering_s": ..., "synexpr_s": ...} —
+    kept separate from Stage 11 timing so the "only sequence fetching is
+    timed" gap is closed: every stage that runs after retrieval gets its own
+    measured wall-clock number too.
+    """
     tag = f"{family}_{assembly}"
     work = work_root / tag
     work.mkdir(parents=True, exist_ok=True)
     fam_log = work / "prep.log"
     print(f"  [{tag}] preparing (UCSC pull → cluster → synthetic expr)...",
           flush=True)
+    timings = {}
 
     with open(fam_log, "w", buffering=1) as lf:
         # 1. UCSC pull via te_prep.py (absolute base-dir → predictable output).
@@ -137,24 +188,27 @@ def prepare_family(family, assembly, work_root, sdir, py, args, mlog):
             prep_cmd += ["--rmsk-dir", args.rmsk_dir]
         if args.fetch_workers:
             prep_cmd += ["--fetch-workers", str(args.fetch_workers)]
-        rc, _ = _run(prep_cmd, lf)
+        rc, dt = _run(prep_cmd, lf)
+        timings["retrieval_s"] = round(dt, 1)
         clustered = work / "clustered_data.csv"
         if rc != 0 or not clustered.exists():
-            mlog.write(f"  [{tag}] PREP FAILED (te_prep rc={rc})\n")
+            mlog.write(f"  [{tag}] PREP FAILED (te_prep rc={rc}, "
+                       f"retrieval={dt:.0f}s)\n")
             print(f"  [{tag}] PREP FAILED — see {fam_log}")
-            return None
+            return None, timings
 
         df = pd.read_csv(clustered)
         if "Seq" not in df.columns or df.empty:
             mlog.write(f"  [{tag}] PREP FAILED (no Seq / empty)\n")
-            return None
+            return None, timings
         n_loci = len(df)
 
         # 2. Cluster via te_clustering.py; fall back to synthetic clusters.
         clu_out = work / "clustered_with_labels.csv"
         clu_cmd = [py, str(sdir / "te_clustering.py"), "--input", str(clustered),
                    "--output", str(clu_out)]
-        rc, _ = _run(clu_cmd, lf)
+        rc, dt = _run(clu_cmd, lf)
+        timings["clustering_s"] = round(dt, 1)
         if rc == 0 and clu_out.exists():
             df = pd.read_csv(clu_out)
         n_real = (df["Cluster"].nunique() if "Cluster" in df.columns else 0)
@@ -164,28 +218,109 @@ def prepare_family(family, assembly, work_root, sdir, py, args, mlog):
                      f"(real n_clusters={n_real})\n")
 
         # 3. Inject synthetic expression with varied sample names.
+        _t0 = time.time()
         df, expr_cols = _inject_synthetic_expression(
             df, seed=abs(hash(tag)) % (2**32))
         prepared = work / f"{tag}_prepared.csv"
         df.to_csv(prepared, index=False)
+        timings["synexpr_s"] = round(time.time() - _t0, 1)
         lf.write(f"[prepared] {prepared}  rows={len(df)} "
                  f"clusters={df['Cluster'].nunique()} expr_cols={expr_cols}\n")
 
+        # Also stage the clustered CSV as <family_lower>_clustered.csv under
+        # 01_data/ so --stage11-engine nextflow can point --results straight at
+        # `work` (post_alignment_analyses.nf reads that exact path).
+        data_dir = work / "01_data"
+        data_dir.mkdir(exist_ok=True)
+        df.to_csv(data_dir / f"{family.lower()}_clustered.csv", index=False)
+
     print(f"  [{tag}] prepared: {n_loci} loci, "
-          f"{df['Cluster'].nunique()} clusters, {len(expr_cols)} synthetic samples")
+          f"{df['Cluster'].nunique()} clusters, {len(expr_cols)} synthetic samples  "
+          f"(retrieval={timings['retrieval_s']:.0f}s  "
+          f"clustering={timings['clustering_s']:.0f}s  "
+          f"synexpr={timings['synexpr_s']:.1f}s)")
     mlog.write(f"  [{tag}] prepared OK: loci={n_loci} "
-               f"clusters={df['Cluster'].nunique()} expr_cols={len(expr_cols)}\n")
+               f"clusters={df['Cluster'].nunique()} expr_cols={len(expr_cols)}  "
+               f"retrieval={timings['retrieval_s']:.0f}s "
+               f"clustering={timings['clustering_s']:.0f}s "
+               f"synexpr={timings['synexpr_s']:.1f}s\n")
     mlog.flush()
-    return prepared
+    return prepared, timings
 
 
-def run_family_stage11(family, assembly, prepared, out_root, sdir, py, args, mlog):
-    """Run run_stage11_all.py for one prepared family. Returns result dict."""
+def run_family_stage11(family, assembly, prepared, work, out_root, sdir, py,
+                       args, mlog):
+    """Run every Stage 11 module for one prepared family. Returns result dict.
+
+    engine="loop" (default) invokes run_stage11_all.py's in-process subprocess
+    loop directly; engine="nextflow" hands the same module registry to
+    nextflow/post_alignment_analyses.nf so it's exercised for real (not just
+    the fallback path). Either engine runs inside gameca.sif when
+    --container-sif is set. Per-module elapsed seconds are always captured
+    (not just the retrieval step) — from run_stage11_all.py's own summary
+    lines in loop mode, or from Nextflow's trace file in nextflow mode.
+    """
     tag = f"{family}_{assembly}"
     reports = out_root / tag / "reports"
     reports.mkdir(parents=True, exist_ok=True)
     log = out_root / tag / "stage11.log"
+    skip_fold = not args.include_fold
 
+    if args.stage11_engine == "nextflow":
+        rc, dt, modules = _run_stage11_nextflow(
+            family, assembly, work, reports, log, sdir, skip_fold, args, mlog)
+    else:
+        rc, dt, modules = _run_stage11_loop(
+            family, assembly, prepared, reports, log, sdir, py, skip_fold, args)
+
+    n_ok = sum(1 for _, s in modules.values() if s == "OK")
+    n_fail = sum(1 for _, s in modules.values() if s.startswith("FAILED"))
+    n_skip = sum(1 for _, s in modules.values() if s == "SKIP")
+    # Fallback/cross-check for loop mode: the 'Done: N ok / N failed / N
+    # skipped' line is authoritative. If the per-module table couldn't be
+    # scraped (e.g. format drift), trust the Done line so the master summary
+    # never reports a false zero for a run that actually executed modules.
+    if args.stage11_engine != "nextflow":
+        done = _parse_stage11_done(log)
+        if done and (n_ok, n_fail, n_skip) != done:
+            if not modules:
+                n_ok, n_fail, n_skip = done
+            else:
+                mlog.write(f"  [{tag}] WARNING: module table "
+                           f"({n_ok}/{n_fail}/{n_skip}) disagrees with Done line "
+                           f"({done[0]}/{done[1]}/{done[2]})\n")
+
+    # Stage 11 total, excluding fold (the default; fold is skipped unless
+    # --include-fold), so this stays comparable across --include-fold runs.
+    excl_fold_s = round(sum(el for name, (el, _) in modules.items()
+                            if name != "fold" and el is not None), 1)
+    fold_s = next((el for name, (el, _) in modules.items() if name == "fold"
+                   and el is not None), None)
+
+    print(f"  [{tag}] Stage 11 ({args.stage11_engine}) done rc={rc} "
+          f"({dt:.0f}s total, {excl_fold_s:.0f}s excl. fold) — "
+          f"ok={n_ok} failed={n_fail} skipped={n_skip}")
+    mlog.write(f"  [{tag}] STAGE11[{args.stage11_engine}] rc={rc} "
+               f"total={dt:.0f}s excl_fold={excl_fold_s:.0f}s "
+               f"ok={n_ok} failed={n_fail} skipped={n_skip}\n")
+    for m, (el, st) in modules.items():
+        mlog.write(f"        {m:<20} {st:<18} "
+                   f"{'' if el is None else f'{el:.0f}s'}\n")
+    mlog.flush()
+    return {"tag": tag, "family": family, "assembly": assembly, "rc": rc,
+            "engine": args.stage11_engine,
+            "elapsed_s": round(dt, 1), "elapsed_excl_fold_s": excl_fold_s,
+            "fold_s": fold_s,
+            "modules": {m: st for m, (el, st) in modules.items()},
+            "module_seconds": {m: el for m, (el, st) in modules.items()},
+            "n_ok": n_ok, "n_fail": n_fail, "n_skip": n_skip,
+            "log": str(log), "reports": str(reports)}
+
+
+def _run_stage11_loop(family, assembly, prepared, reports, log, sdir, py,
+                      skip_fold, args):
+    """engine="loop": run_stage11_all.py's in-process subprocess loop."""
+    tag = f"{family}_{assembly}"
     cmd = [py, str(sdir / "run_stage11_all.py"),
            "--input", str(prepared),
            "--family", family,
@@ -193,53 +328,65 @@ def run_family_stage11(family, assembly, prepared, out_root, sdir, py, args, mlo
            "--reports-dir", str(reports),
            "--expr-stage-cols", "K562_rep1", "K562_rep2", "Liver_donorA",
            "siCTRL_24h", "patient_07_tumor", "GM12878.scRNA"]
-    if not args.include_fold:
+    if skip_fold:
         cmd += ["--skip", "fold"]
-    print(f"  [{tag}] running Stage 11"
-          f"{' (skipping fold)' if not args.include_fold else ''}...", flush=True)
+    cmd = _singularity_wrap(cmd, args.container_sif)
+    print(f"  [{tag}] running Stage 11 (loop{', singularity' if args.container_sif else ''}"
+          f"{', skipping fold' if skip_fold else ''})...", flush=True)
 
     t0 = time.time()
     with open(log, "w", buffering=1) as lf:
         rc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT).returncode
     dt = time.time() - t0
+    return rc, dt, _parse_stage11_summary(log)
 
-    # Parse the per-module summary that run_stage11_all wrote into the log.
-    modules = _parse_stage11_summary(log)
-    n_ok = sum(1 for s in modules.values() if s == "OK")
-    n_fail = sum(1 for s in modules.values() if s.startswith("FAILED"))
-    n_skip = sum(1 for s in modules.values() if s == "SKIP")
-    # Fallback/cross-check: the 'Done: N ok / N failed / N skipped' line is the
-    # authoritative count. If the per-module table couldn't be scraped (e.g.
-    # format drift), trust the Done line so the master summary never reports a
-    # false zero for a run that actually executed modules.
-    done = _parse_stage11_done(log)
-    if done and (n_ok, n_fail, n_skip) != done:
-        if not modules:
-            n_ok, n_fail, n_skip = done
-        else:
-            mlog.write(f"  [{tag}] WARNING: module table "
-                       f"({n_ok}/{n_fail}/{n_skip}) disagrees with Done line "
-                       f"({done[0]}/{done[1]}/{done[2]})\n")
-    print(f"  [{tag}] Stage 11 done rc={rc} ({dt:.0f}s) — "
-          f"ok={n_ok} failed={n_fail} skipped={n_skip}")
-    mlog.write(f"  [{tag}] STAGE11 rc={rc} {dt:.0f}s ok={n_ok} "
-               f"failed={n_fail} skipped={n_skip}\n")
-    for m, s in modules.items():
-        mlog.write(f"        {m:<20} {s}\n")
-    mlog.flush()
-    return {"tag": tag, "family": family, "assembly": assembly, "rc": rc,
-            "elapsed_s": round(dt, 1), "modules": modules,
-            "n_ok": n_ok, "n_fail": n_fail, "n_skip": n_skip,
-            "log": str(log), "reports": str(reports)}
+
+def _run_stage11_nextflow(family, assembly, work, reports, log, sdir,
+                          skip_fold, args, mlog):
+    """engine="nextflow": nextflow/post_alignment_analyses.nf, scattering the
+    same module registry across real Nextflow processes. `work` must contain
+    01_data/<family_lower>_clustered.csv (staged by prepare_family)."""
+    tag = f"{family}_{assembly}"
+    nf = shutil.which("nextflow")
+    if not nf:
+        mlog.write(f"  [{tag}] STAGE11 FAILED: nextflow not on PATH\n")
+        print(f"  [{tag}] Stage 11 (nextflow) FAILED: nextflow not on PATH")
+        return -1, 0.0, {}
+
+    trace = reports / "nextflow_trace.txt"
+    cmd = [nf, "run", str(sdir / "nextflow" / "post_alignment_analyses.nf"),
+           "--results", str(work), "--family", family, "--assembly", assembly,
+           "--gameca_home", str(sdir), "-with-trace", str(trace), "-resume"]
+    if skip_fold:
+        cmd += ["--skip_modules", "fold"]
+    profiles = (["singularity"] if args.container_sif else []) + \
+               ([p for p in (args.nextflow_profile or "").split(",") if p])
+    if profiles:
+        cmd += ["-profile", ",".join(dict.fromkeys(profiles))]
+    if args.container_sif:
+        cmd += ["--container_sif", args.container_sif]
+    print(f"  [{tag}] running Stage 11 (nextflow"
+          f"{', singularity' if args.container_sif else ''}"
+          f"{', skipping fold' if skip_fold else ''})...", flush=True)
+
+    t0 = time.time()
+    with open(log, "w", buffering=1) as lf:
+        rc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT,
+                            cwd=str(sdir)).returncode
+    dt = time.time() - t0
+    return rc, dt, _parse_nextflow_trace(trace, log)
 
 
 def _parse_stage11_summary(log_path):
-    """Pull the module-status table written by run_stage11_all.py.
+    """Pull the module-status + per-module elapsed-seconds table written by
+    run_stage11_all.py.
 
     run_stage11_all prints the table to stdout under a bare ``SUMMARY`` header
     (the ``STAGE 11 SUMMARY`` header only appears in the file it writes to its
     own --reports-dir log, which we don't read). Match either so the harness
     counts modules regardless of which sink it scrapes.
+
+    Returns {name: (elapsed_seconds_or_None, status_str)}.
     """
     out = {}
     try:
@@ -258,10 +405,80 @@ def _parse_stage11_summary(log_path):
                     break
                 continue
             parts = s.split()
-            if len(parts) >= 2:
-                out[parts[0]] = parts[1] if parts[1] in ("OK", "SKIP") \
-                    else " ".join(parts[1:3])
+            if len(parts) < 2:
+                continue
+            name = parts[0]
+            elapsed = None
+            if parts[-1].endswith("s") and parts[-1][:-1].replace(".", "", 1).isdigit():
+                elapsed = float(parts[-1][:-1])
+                status_tokens = parts[1:-1]
+            else:
+                status_tokens = parts[1:]
+            status = status_tokens[0] if status_tokens[0] in ("OK", "SKIP") \
+                else " ".join(status_tokens)
+            out[name] = (elapsed, status)
     return out
+
+
+def _parse_nextflow_trace(trace_path, log_path):
+    """Parse a Nextflow -with-trace TSV into {module_name: (seconds, status)}.
+
+    The default trace has no separate `tag` column — the GAMECA_STANDOUT tag
+    directive (`"${meta.id}:${mod.name}"`) is embedded in `name`, e.g.
+    "STANDOUT:GAMECA_STANDOUT (MT2_Mm:phylo)". `realtime` is a human string
+    like "1.2s"/"3m 20s"/"1h 5m 10s". Falls back to an empty dict (elapsed
+    stays None) if the trace is missing or Nextflow changes its column
+    layout — the caller still has rc/dt for the aggregate total either way.
+    """
+    import re
+    out = {}
+    try:
+        lines = Path(trace_path).read_text(errors="replace").splitlines()
+    except Exception:
+        return out
+    if not lines:
+        return out
+    header = lines[0].split("\t")
+    try:
+        i_name = header.index("name")
+        i_status = header.index("status")
+        i_realtime = header.index("realtime")
+    except ValueError:
+        return out
+    for ln in lines[1:]:
+        cols = ln.split("\t")
+        if len(cols) <= max(i_name, i_status, i_realtime):
+            continue
+        name = cols[i_name]
+        m = re.search(r"\(([^:()]+):([^:()]+)\)\s*$", name)
+        mod_name = m.group(2) if m else name
+        raw_status = cols[i_status]
+        status = "OK" if raw_status == "COMPLETED" else \
+                 "SKIP" if raw_status == "CACHED" else \
+                 (raw_status if raw_status.startswith("FAILED") else f"FAILED {raw_status}")
+        secs = _realtime_to_seconds(cols[i_realtime])
+        out[mod_name] = (secs, status)
+    return out
+
+
+def _realtime_to_seconds(s):
+    """Convert Nextflow's 'realtime' string ("1h 5m 10s", "3m 20s", "450ms")
+    to float seconds, or None if unparseable."""
+    import re
+    s = s.strip()
+    if not s or s in ("-", "n/a"):
+        return None
+    if s.endswith("ms"):
+        try:
+            return float(s[:-2]) / 1000.0
+        except ValueError:
+            return None
+    total = 0.0
+    matched = False
+    for value, unit in re.findall(r"([\d.]+)\s*([hms])", s):
+        matched = True
+        total += float(value) * {"h": 3600, "m": 60, "s": 1}[unit]
+    return total if matched else None
 
 
 def _parse_stage11_done(log_path):
@@ -296,6 +513,19 @@ def main():
     p.add_argument("--stop-on-fail", action="store_true",
                    help="Abort the whole test on the first family failure "
                         "(default: keep going through the rest of the matrix).")
+    p.add_argument("--stage11-engine", choices=["loop", "nextflow"], default="loop",
+                   help="How to run the Stage 11 modules: 'loop' (run_stage11_all.py's "
+                        "in-process subprocess loop, default) or 'nextflow' "
+                        "(nextflow/post_alignment_analyses.nf, real per-module parallelism).")
+    p.add_argument("--container-sif", default=None,
+                   help="Path to a prebuilt gameca.sif. loop engine: wraps the Stage 11 "
+                        "subprocess in `singularity exec`. nextflow engine: adds "
+                        "-profile singularity --container_sif <path> (pulls "
+                        "docker://ghcr.io/anmol-dash/gameca:latest instead if omitted "
+                        "but -profile singularity is still desired via --nextflow-profile).")
+    p.add_argument("--nextflow-profile", default=None,
+                   help="Extra comma-separated Nextflow profiles to combine with "
+                        "'singularity' when --container-sif is set (e.g. 'lsf').")
     p.add_argument("--notify-email", default="",
                    help="Email address for a completion summary (Resend API).")
     args = p.parse_args()
@@ -328,6 +558,8 @@ def main():
     print(f"  Output:   {out_root}")
     print(f"  Matrix:   {', '.join(f'{f}:{a}' for f, a in matrix)}")
     print(f"  Max loci: {args.max_loci}   Fold: {args.include_fold}")
+    print(f"  Stage 11: {args.stage11_engine}"
+          f"{'  (container: ' + args.container_sif + ')' if args.container_sif else ''}")
     print(f"  Master log: {master_log}")
     print("=" * 64)
 
@@ -338,26 +570,31 @@ def main():
         mlog.write(f"Output:   {out_root}\n")
         mlog.write(f"Matrix:   {', '.join(f'{f}:{a}' for f, a in matrix)}\n")
         mlog.write(f"Max loci: {args.max_loci}  Fold: {args.include_fold}\n")
+        mlog.write(f"Stage 11 engine: {args.stage11_engine}  "
+                   f"Container: {args.container_sif or '(none)'}\n")
         mlog.write(f"Python:   {py}\n")
         mlog.write("NOTE: expression numbers are SYNTHETIC test fixtures.\n")
         mlog.write("=" * 64 + "\n")
 
         for family, assembly in matrix:
             tag = f"{family}_{assembly}"
+            work = work_root / tag
             mlog.write(f"\n{'='*64}\n[{tag}]\n{'='*64}\n"); mlog.flush()
             try:
-                prepared = prepare_family(family, assembly, work_root, sdir,
-                                          py, args, mlog)
+                prepared, timings = prepare_family(family, assembly, work_root,
+                                                   sdir, py, args, mlog)
                 if prepared is None:
                     results.append({"tag": tag, "family": family,
                                     "assembly": assembly, "rc": -1,
                                     "error": "prep_failed", "modules": {},
-                                    "n_ok": 0, "n_fail": 0, "n_skip": 0})
+                                    "n_ok": 0, "n_fail": 0, "n_skip": 0,
+                                    **timings})
                     if args.stop_on_fail:
                         break
                     continue
-                res = run_family_stage11(family, assembly, prepared, out_root,
-                                         sdir, py, args, mlog)
+                res = run_family_stage11(family, assembly, prepared, work,
+                                         out_root, sdir, py, args, mlog)
+                res.update(timings)
                 results.append(res)
             except Exception as e:
                 mlog.write(f"  [{tag}] EXCEPTION: {e}\n")
@@ -385,7 +622,26 @@ def main():
         mlog.write(f"\nFamilies: {fam_ok} ok / {fam_bad} problem (of {len(results)})\n")
         mlog.write(f"Modules:  {total_ok} ok / {total_fail} failed / "
                    f"{total_skip} skipped (across all families)\n")
-        mlog.write(f"Finished: {datetime.datetime.now():%Y-%m-%d %H:%M:%S}\n")
+
+        # ── Timing breakdown ────────────────────────────────────────────────
+        # Retrieval (UCSC pull) was previously the only step with visible
+        # timing; every stage after it is now measured too (per family, plus
+        # a per-module Stage 11 breakdown, always excluding fold from the
+        # "excl. fold" total since it's off by default).
+        mlog.write(f"\n{'-'*64}\nTIMING (seconds)\n{'-'*64}\n")
+        mlog.write(f"  {'family':<22} {'retrieval':>10} {'cluster':>9} "
+                   f"{'synexpr':>8} {'stage11':>9} {'excl_fold':>10} {'fold':>8}\n")
+        for r in results:
+            mlog.write(
+                f"  {r['tag']:<22} "
+                f"{r.get('retrieval_s', float('nan')):>10.1f} "
+                f"{r.get('clustering_s', float('nan')):>9.1f} "
+                f"{r.get('synexpr_s', float('nan')):>8.1f} "
+                f"{r.get('elapsed_s', float('nan')):>9.1f} "
+                f"{r.get('elapsed_excl_fold_s', float('nan')):>10.1f} "
+                f"{r.get('fold_s') if r.get('fold_s') is not None else '-':>8}\n"
+            )
+        mlog.write("Finished: {:%Y-%m-%d %H:%M:%S}\n".format(datetime.datetime.now()))
 
     summary = {
         "started": started.isoformat(),
@@ -394,6 +650,8 @@ def main():
         "matrix": [f"{f}:{a}" for f, a in matrix],
         "max_loci": args.max_loci,
         "include_fold": args.include_fold,
+        "stage11_engine": args.stage11_engine,
+        "container_sif": args.container_sif,
         "families_ok": fam_ok,
         "families_problem": fam_bad,
         "modules_ok": total_ok,
@@ -413,6 +671,15 @@ def main():
               f"{'  ['+r['error']+']' if r.get('error') else ''}")
     print(f"\n  Families: {fam_ok} ok / {fam_bad} problem (of {len(results)})")
     print(f"  Modules:  {total_ok} ok / {total_fail} failed / {total_skip} skipped")
+    print(f"\n  Timing (s):  {'family':<22} {'retrieval':>9} {'cluster':>8} "
+          f"{'synexpr':>8} {'stage11':>8} {'excl_fold':>10}")
+    for r in results:
+        print(f"               {r['tag']:<22} "
+              f"{r.get('retrieval_s', float('nan')):>9.1f} "
+              f"{r.get('clustering_s', float('nan')):>8.1f} "
+              f"{r.get('synexpr_s', float('nan')):>8.1f} "
+              f"{r.get('elapsed_s', float('nan')):>8.1f} "
+              f"{r.get('elapsed_excl_fold_s', float('nan')):>10.1f}")
     print(f"  Master log:  {master_log}")
     print(f"  JSON summary: {summary_json}")
 
