@@ -469,6 +469,26 @@ def _run_stage11_loop(family, assembly, prepared, reports, log, sdir, py,
     return rc, dt, _parse_stage11_summary(log)
 
 
+def _surface_failure_tail(tag, log, mlog, n=25):
+    """Echo the last *n* non-empty lines of a failed Stage 11 log to stdout and
+    the master log, so a launch-time nextflow failure (which dispatches no
+    process and thus leaves the summary counts all-zero) is diagnosable from
+    the job output alone instead of requiring a manual `cat` of the per-family
+    stage11.log."""
+    try:
+        lines = [ln for ln in Path(log).read_text(errors="replace").splitlines()
+                 if ln.strip()]
+    except Exception:
+        return
+    tail = lines[-n:]
+    banner = f"  [{tag}] Stage 11 FAILED — last {len(tail)} lines of {log}:"
+    print(banner, flush=True)
+    mlog.write(banner + "\n")
+    for ln in tail:
+        print(f"    | {ln}", flush=True)
+        mlog.write(f"    | {ln}\n")
+
+
 def _run_stage11_nextflow(family, assembly, work, reports, log, sdir,
                           skip_fold, args, mlog):
     """engine="nextflow": nextflow/post_alignment_analyses.nf, scattering the
@@ -502,7 +522,14 @@ def _run_stage11_nextflow(family, assembly, work, reports, log, sdir,
         rc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT,
                             cwd=str(sdir)).returncode
     dt = time.time() - t0
-    return rc, dt, _parse_nextflow_trace(trace, log)
+    modules = _parse_nextflow_trace(trace, log)
+    # Surface WHY nextflow failed instead of only reporting rc/counts. A launch
+    # failure (bad Java, config/profile error) exits before dispatching any
+    # process, so `modules` is empty and the master summary alone can't explain
+    # it — echo the tail of the captured nextflow log to stdout + master log.
+    if rc != 0 and not any(s.startswith("FAILED") for _, s in modules.values()):
+        _surface_failure_tail(tag, log, mlog)
+    return rc, dt, modules
 
 
 def _parse_stage11_summary(log_path):
