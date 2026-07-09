@@ -211,7 +211,12 @@ def _ensure_nextflow():
     if not java_home:
         print("  [nextflow] WARNING: no usable Java (>=17) found or installable")
         return None
+    # Nextflow's launcher honours JAVA_CMD *above* JAVA_HOME/PATH. HPC nodes
+    # (conda base, module files) routinely export JAVA_CMD pointing at a Java 11
+    # JVM, so setting only JAVA_HOME leaves nextflow running under Java 11 and
+    # dying with "Cannot find Java or it's a wrong version". Pin JAVA_CMD too.
     os.environ["JAVA_HOME"] = java_home
+    os.environ["JAVA_CMD"] = f"{java_home}/bin/java"
     os.environ["PATH"] = f"{java_home}/bin:{os.environ.get('PATH', '')}"
     return nf
 
