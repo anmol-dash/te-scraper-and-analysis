@@ -16,7 +16,7 @@
 \usepackage{caption}
 \usepackage[colorlinks=true,allcolors=blue!55!black]{hyperref}
 
-\graphicspath{{./}{figures/}{reports8/}{reports8/stage11_l1mdt/}{reports8/stage11_b1mus2/}{reports8/stage11_iapltr1mm/}}
+\graphicspath{{./}{report_figs/}{figures/}{reports8/}{reports8/stage11_l1mdt/}{reports8/stage11_b1mus2/}{reports8/stage11_iapltr1mm/}}
 
 % ---------------------------------------------------------------------------
 % Figure-slot macro: check current dir (.pdf), then figures/ (.pdf), then .png,
@@ -357,7 +357,22 @@ Nextflow layer is a thin wrapper that calls them.
 
 The pipeline is a directed sequence of stages (Table~\ref{tab:stages}); each stage reads the
 tabular output of the previous one and writes a checkpoint, so a run can be resumed or a
-single stage re-executed without repeating the rest.
+single stage re-executed without repeating the rest. Figure~\ref{fig:flowchart} gives the
+end-to-end view: a family/assembly input flows through the seven core \texttt{query.py}
+stages into the Stage-11 standout modules, all wrapped by the Nextflow/Singularity execution
+environment, and gathered into a single per-family report.
+
+\begin{figure}[h]
+  \centering
+  \resizebox{1.0\textwidth}{!}{\figorbox{report_figs/fig_pipeline_flowchart}}
+  \caption{GAMECA pipeline flowchart. A family/assembly request flows through the seven core
+    \texttt{query.py} stages (Prep, Clustering, Alignment, Motif, GO, Expression, Primers)
+    and into the Stage-11 standout-analysis modules (Figure~\ref{fig:stage11overview}), which
+    run in parallel; outputs are gathered into a per-family folder and LaTeX report. The whole
+    run executes inside the Nextflow DSL2 / Singularity environment on an LSF or SLURM
+    scheduler.}
+  \label{fig:flowchart}
+\end{figure}
 
 \begin{table}[h]
   \centering
@@ -690,8 +705,20 @@ copy-resolved analyses that TE biologists otherwise assemble by hand. Each modul
 is a standalone \texttt{run\_*.py} script with a matching HPC submitter
 (\texttt{submit\_*.py}), writes its own measured-values macros and figures, and
 is registered as an independent Nextflow task so the full set runs in parallel under a
-scheduler (Section~\ref{sec:orchestration}). All numbers below are emitted by the scripts at
-run time; unrun modules render as ``(pending run)''.
+scheduler (Section~\ref{sec:orchestration}). Figure~\ref{fig:stage11overview} groups the full
+set of modules by biological theme; the paragraphs below describe each in turn. All numbers
+below are emitted by the scripts at run time; unrun modules render as ``(pending run)''.
+
+\begin{figure}[h]
+  \centering
+  \resizebox{1.0\textwidth}{!}{\figorbox{report_figs/fig_stage11_analyses}}
+  \caption{The Stage-11 standout-analysis modules, grouped by biological theme: evolution and
+    age, regulation, structure and engineering, comparative genomics and mobilization, and
+    expression and benchmarking. Each card names the standalone \texttt{run\_*.py} script;
+    every module consumes the clustered loci and consensus from the core pipeline and runs as
+    an independent Nextflow task.}
+  \label{fig:stage11overview}
+\end{figure}
 
 \paragraph{Subfamily phylogenetics, divergence age, and master elements
 (\texttt{run\_phylo\_analysis.py}).}
