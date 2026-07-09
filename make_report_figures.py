@@ -1,27 +1,53 @@
 #!/usr/bin/env python3
-"""make_report_figures.py — render every schematic figure used by gameca_report.tex.
+"""make_report_figures.py — build EVERY figure used by gameca_report.tex.
 
-This produces the *diagram* figures for the manuscript (pipeline flowchart, the
-Stage-11 standout-analysis overview, the software architecture diagram, and the
-Nextflow DSL2 DAG) and writes them all — .png and .pdf — into ./report_figs/.
+Single entry point for the manuscript's figures. It has two phases:
 
-These are structural diagrams of the pipeline itself, not plots of run data;
-the data-driven figures (mt2_results, kimura_divergence, phylo trees, DE
-heatmaps, gRNA Pareto, ...) are emitted by the individual run_*.py modules on
-real cluster output and are deliberately NOT regenerated here.
+  1. Schematics (always run, need no data): the pipeline flowchart, the Stage-11
+     standout-analysis overview, the software-architecture diagram, and the
+     Nextflow DSL2 DAG. Rendered directly here into --out-dir (report_figs/).
+
+  2. Data figures (run with --data, given real inputs): the phylogenetic trees,
+     Kimura/repeat-landscape plots, gRNA Pareto fronts, DE heatmaps, LTR/subfamily
+     figures, per-stage benchmarks, and the cross-family LINE/SINE/LTR plots. These
+     are NOT drawn here — they are produced by invoking the real analysis scripts
+     (run_line_sine_ltr_analysis.py, which itself drives every Stage-11 module per
+     family, and optionally run_stage11_all.py for a single worked example) on
+     genuine cluster inputs, writing into the paths the report reads (reports8/…).
+
+No figure is ever fabricated. Data figures require real loci/expression/genome
+inputs; when an input or a real generator is missing, the figure is reported as
+SKIPPED with the reason — never invented. A manifest at the end lists every report
+figure and whether it was produced.
 
 Usage:
-    python make_report_figures.py                 # -> ./report_figs/
-    python make_report_figures.py --out-dir DIR
+    # schematics only (no cluster data needed):
+    python make_report_figures.py
+
+    # everything — schematics + all data figures (typical cluster run):
+    python make_report_figures.py --data \
+        --reports-dir reports8 --build mm10 --genome-fa ~/te_analysis/mm10.fa \
+        --l1mdt-expr L1Md_T_ultracombo.csv --b1mus2-expr B1_Mus2_ultracombo.csv \
+        --iapltr1-expr IAPLTR1_Mm_ultracombo.csv
+
+    # plus a single-family worked example (Stage-11 on one loci CSV):
+    python make_report_figures.py --data --family MT2_Mm --assembly mm10 \
+        --input mt2_mm_ultracombo.csv
 """
 import argparse
 import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
 from matplotlib.lines import Line2D
+
+HERE = Path(__file__).resolve().parent
 
 # --------------------------------------------------------------------------- #
 # Palette (shared with make_nextflow_dag_fig.py so the manuscript reads as one)
@@ -336,19 +362,181 @@ def make_nextflow_dag(out_dir):
     _save(fig, out_dir, "fig_nextflow_dag")
 
 
+# --------------------------------------------------------------------------- #
+# Data-figure orchestration (invokes the real analysis scripts; no fabrication)
+# --------------------------------------------------------------------------- #
+
+# Every figure the report references, with how it is produced. `source` is either
+# "schematic" (drawn here) or the script that emits it. `path` is relative to the
+# report .tex directory and matches the \figorbox argument in gameca_report.tex.
+REPORT_FIGURES = [
+    # schematics (this script) — written to --out-dir
+    ("report_figs/fig_pipeline_flowchart", "schematic"),
+    ("report_figs/fig_stage11_analyses",   "schematic"),
+    ("report_figs/fig_architecture",       "schematic"),
+    ("report_figs/fig_nextflow_dag",       "schematic"),
+    # cross-family LINE/SINE/LTR (run_line_sine_ltr_analysis.py -> --reports-dir)
+    ("reports8/fig_line_sine_ltr_clustering", "run_line_sine_ltr_analysis.py"),
+    ("reports8/fig_line_results",             "run_line_sine_ltr_analysis.py"),
+    ("reports8/fig_sine_results",             "run_line_sine_ltr_analysis.py"),
+    ("reports8/fig_ltr_results",              "run_line_sine_ltr_analysis.py"),
+    ("reports8/fig_kimura_divergence",        "run_line_sine_ltr_analysis.py"),
+    ("reports8/fig_de_l1mdt",                 "run_line_sine_ltr_analysis.py"),
+    ("reports8/fig_de_b1mus2",                "run_line_sine_ltr_analysis.py"),
+    # per-family Stage-11 (driven per family into stage11_<fam>/ subdirs)
+    ("reports8/stage11_l1mdt/fig_phylo_tree",            "run_line_sine_ltr_analysis.py"),
+    ("reports8/stage11_l1mdt/fig_phylo_divergence",      "run_line_sine_ltr_analysis.py"),
+    ("reports8/stage11_l1mdt/fig_phylo_master",          "run_line_sine_ltr_analysis.py"),
+    ("reports8/stage11_l1mdt/fig_grna_offtarget_pareto", "run_line_sine_ltr_analysis.py"),
+    ("reports8/stage11_l1mdt/fig_transduction_groups",   "run_line_sine_ltr_analysis.py"),
+    ("reports8/stage11_l1mdt/fig_antisense_motifs",      "run_line_sine_ltr_analysis.py"),
+    ("reports8/stage11_l1mdt/fig_benchmark_steps",       "run_line_sine_ltr_analysis.py"),
+    # single-family figures the report reads from the root (from a Stage-11 run)
+    ("fig_ctcf_overlap",     "run_stage11_all.py"),
+    ("fig_repeat_landscape", "run_stage11_all.py"),
+    ("fig_ltr_struct",       "run_stage11_all.py"),
+    ("fig_subfamily_tree",   "run_stage11_all.py"),
+    ("fig_benchmark",        "run_stage11_all.py"),
+    # no automated generator in the repo — manual/conceptual figures
+    ("fig_mt2_results",       "manual"),
+    ("fig_bench_genomecache", "manual"),
+    ("fig_bench_cython",      "manual"),
+]
+
+# figures with source == "manual" that genuinely have no generator
+NO_GENERATOR = {"fig_mt2_results", "fig_bench_genomecache", "fig_bench_cython"}
+
+
+def _python():
+    return shutil.which("python3") or shutil.which("python") or sys.executable
+
+
+def run_cross_family(args):
+    """Drive run_line_sine_ltr_analysis.py — the master data-figure generator.
+
+    It clusters each LINE/SINE/LTR family and runs every Stage-11 module per
+    family into <reports-dir>/stage11_<family>/, plus the cross-family plots.
+    Passes inputs straight through; the script itself skips any figure whose
+    data (expression, genome) is absent rather than inventing it.
+    """
+    script = HERE / "run_line_sine_ltr_analysis.py"
+    if not script.exists():
+        print(f"  SKIP cross-family: {script} not found")
+        return False
+    cmd = [_python(), str(script), "--reports-dir", args.reports_dir,
+           "--build", args.build, "--source", args.source]
+    for flag, val in [("--genome-fa", args.genome_fa),
+                      ("--rmsk-dir", args.rmsk_dir),
+                      ("--l1mdt-expr", args.l1mdt_expr),
+                      ("--b1mus2-expr", args.b1mus2_expr),
+                      ("--iapltr1-expr", args.iapltr1_expr)]:
+        if val:
+            cmd += [flag, val]
+    if args.max_loci:
+        cmd += ["--max-loci", str(args.max_loci)]
+    print("  RUN:", " ".join(cmd))
+    return subprocess.run(cmd).returncode == 0
+
+
+def run_single_family(args):
+    """Optional worked example: run all Stage-11 modules on one loci CSV via
+    run_stage11_all.py. Figures land in --reports-dir (default the repo root so
+    the report's root-relative figorbox references resolve)."""
+    script = HERE / "run_stage11_all.py"
+    if not script.exists():
+        print(f"  SKIP single-family: {script} not found")
+        return False
+    if not args.input or not Path(args.input).exists():
+        print(f"  SKIP single-family: --input not provided or missing "
+              f"({args.input!r})")
+        return False
+    out = args.single_reports_dir or "."
+    cmd = [_python(), str(script), "--input", args.input,
+           "--family", args.family, "--assembly", args.assembly,
+           "--reports-dir", out]
+    if args.consensus_fasta:
+        cmd += ["--consensus-fasta", args.consensus_fasta]
+    print("  RUN:", " ".join(cmd))
+    return subprocess.run(cmd).returncode == 0
+
+
+def print_manifest():
+    """Report the status of every figure the manuscript references."""
+    print("\n" + "=" * 68)
+    print("FIGURE MANIFEST  (relative to the report .tex directory)")
+    print("=" * 68)
+    made = missing = skipped = 0
+    for rel, source in REPORT_FIGURES:
+        base = os.path.basename(rel)
+        if source == "manual" and base not in NO_GENERATOR:
+            continue  # internal bookkeeping entry
+        pdf = HERE / (rel + ".pdf")
+        png = HERE / (rel + ".png")
+        exists = pdf.exists() or png.exists()
+        if base in NO_GENERATOR:
+            status = "MANUAL   (no automated generator — provide the figure by hand)"
+            skipped += 1
+        elif exists:
+            status = "MADE     [%s]" % source
+            made += 1
+        else:
+            status = "MISSING  [%s — needs real inputs; not fabricated]" % source
+            missing += 1
+        print(f"  {rel:<48} {status}")
+    print("-" * 68)
+    print(f"  made={made}  missing={missing}  manual={skipped}")
+    print("=" * 68)
+
+
 def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out-dir", default="report_figs",
-                    help="Output directory for figures (default: report_figs).")
+                    help="Output directory for schematic figures (default: report_figs).")
+    ap.add_argument("--data", action="store_true",
+                    help="Also produce the data figures by running the real analysis "
+                         "scripts (needs genuine cluster inputs).")
+    # cross-family (run_line_sine_ltr_analysis.py) pass-through
+    ap.add_argument("--reports-dir", default="reports8",
+                    help="Where the data figures are written; must match the report's "
+                         "graphicspath (default: reports8).")
+    ap.add_argument("--build", default="mm10", help="Genome build (default: mm10).")
+    ap.add_argument("--source", choices=["rmsk", "dfam"], default="rmsk")
+    ap.add_argument("--genome-fa", default="", help="Path to genome FASTA (optional).")
+    ap.add_argument("--rmsk-dir", default=os.path.expanduser("~/te_analysis/rmsk"))
+    ap.add_argument("--l1mdt-expr", default="")
+    ap.add_argument("--b1mus2-expr", default="")
+    ap.add_argument("--iapltr1-expr", default="")
+    ap.add_argument("--max-loci", type=int, default=None)
+    # optional single-family worked example (run_stage11_all.py)
+    ap.add_argument("--input", default="",
+                    help="Loci CSV for a single-family Stage-11 worked example.")
+    ap.add_argument("--family", default="FAMILY")
+    ap.add_argument("--assembly", default="mm10")
+    ap.add_argument("--consensus-fasta", default="")
+    ap.add_argument("--single-reports-dir", default="",
+                    help="Output dir for the single-family run (default: repo root).")
     args = ap.parse_args()
 
+    # Phase 1 — schematics (always).
     os.makedirs(args.out_dir, exist_ok=True)
+    print("Phase 1: schematic figures ->", os.path.abspath(args.out_dir))
     make_pipeline_flowchart(args.out_dir)
     make_stage11_overview(args.out_dir)
     make_architecture(args.out_dir)
     make_nextflow_dag(args.out_dir)
-    print("\nAll schematic figures written to", os.path.abspath(args.out_dir))
+
+    # Phase 2 — data figures (opt-in; invokes the real generators).
+    if args.data:
+        print("\nPhase 2: data figures (real analysis scripts)")
+        run_cross_family(args)
+        if args.input:
+            run_single_family(args)
+    else:
+        print("\nPhase 2 skipped (pass --data with real inputs to generate the "
+              "data figures).")
+
+    print_manifest()
 
 
 if __name__ == "__main__":

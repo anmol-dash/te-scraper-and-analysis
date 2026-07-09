@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026) (preloaded format=pdflatex 2026.3.1)  9 JUL 2026 05:22
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026) (preloaded format=pdflatex 2026.3.1)  9 JUL 2026 05:32
 entering extended mode
  restricted \write18 enabled.
  %&-line parsing enabled.
@@ -547,15 +547,21 @@ LaTeX Font Info:    Trying to load font information for T1+lmtt on input line 3
 (/usr/local/texlive/2026basic/texmf-dist/tex/latex/lm/t1lmtt.fd
 File: t1lmtt.fd 2015/05/01 v1.6.1 Font defs for Latin Modern
 ) [2]
-LaTeX Font Info:    External font `lmex10' loaded for size
-(Font)              <10.95> on input line 346.
-<report_figs/fig_pipeline_flowchart.pdf, id=111, 909.79903pt x 556.77211pt>
+<report_figs/fig_architecture.pdf, id=109, 801.39403pt x 440.04399pt>
+File: report_figs/fig_architecture.pdf Graphic file (type pdf)
+<use report_figs/fig_architecture.pdf>
+Package pdftex.def Info: report_figs/fig_architecture.pdf  used on input line 3
+46.
+(pdftex.def)             Requested size: 236.91055pt x 130.08714pt.
+ [3{/usr/local/texlive/2026basic/texmf-dist/fonts/enc/dvips/lm/lm-mathsy.enc} <
+./report_figs/fig_architecture.pdf>]
+<report_figs/fig_pipeline_flowchart.pdf, id=218, 909.79903pt x 556.77211pt>
 File: report_figs/fig_pipeline_flowchart.pdf Graphic file (type pdf)
 <use report_figs/fig_pipeline_flowchart.pdf>
 Package pdftex.def Info: report_figs/fig_pipeline_flowchart.pdf  used on input 
 line 367.
 (pdftex.def)             Requested size: 212.55339pt x 130.07684pt.
- [3{/usr/local/texlive/2026basic/texmf-dist/fonts/enc/dvips/lm/lm-mathsy.enc}]
+
 Overfull \hbox (84.61147pt too wide) in paragraph at lines 380--394
  [][] 
  []
@@ -563,6 +569,8 @@ Overfull \hbox (84.61147pt too wide) in paragraph at lines 380--394
 
 LaTeX Warning: `h' float specifier changed to `ht'.
 
+LaTeX Font Info:    External font `lmex10' loaded for size
+(Font)              <10.95> on input line 399.
 [4{/usr/local/texlive/2026basic/texmf-dist/fonts/enc/dvips/lm/lm-mathit.enc}{/u
 sr/local/texlive/2026basic/texmf-dist/fonts/enc/dvips/lm/lm-rm.enc} <./report_f
 igs/fig_pipeline_flowchart.pdf>]
@@ -582,10 +590,11 @@ Overfull \hbox (38.85732pt too wide) in paragraph at lines 558--571
 mory/--max_time\T1/lmr/m/n/10.95 ,
  []
 
-<fig_nextflow_dag.pdf, id=330, 801.39403pt x 396.43628pt>
-File: fig_nextflow_dag.pdf Graphic file (type pdf)
-<use fig_nextflow_dag.pdf>
-Package pdftex.def Info: fig_nextflow_dag.pdf  used on input line 574.
+<report_figs/fig_nextflow_dag.pdf, id=425, 801.39403pt x 396.43628pt>
+File: report_figs/fig_nextflow_dag.pdf Graphic file (type pdf)
+<use report_figs/fig_nextflow_dag.pdf>
+Package pdftex.def Info: report_figs/fig_nextflow_dag.pdf  used on input line 5
+74.
 (pdftex.def)             Requested size: 262.969pt x 130.08638pt.
 
 LaTeX Warning: `h' float specifier changed to `ht'.
@@ -595,7 +604,10 @@ Overfull \hbox (46.97836pt too wide) in paragraph at lines 610--616
  [][] 
  []
 
-[8 <./fig_nextflow_dag.pdf>]
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[8 <./report_figs/fig_nextflow_dag.pdf>]
 
 LaTeX Warning: `h' float specifier changed to `ht'.
 
@@ -608,12 +620,14 @@ LaTeX Warning: `h' float specifier changed to `ht'.
 
 LaTeX Warning: `h' float specifier changed to `ht'.
 
-<report_figs/fig_stage11_analyses.pdf, id=493, 1126.60902pt x 526.76799pt>
+[9]
+<report_figs/fig_stage11_analyses.pdf, id=596, 1126.60902pt x 526.76799pt>
 File: report_figs/fig_stage11_analyses.pdf Graphic file (type pdf)
 <use report_figs/fig_stage11_analyses.pdf>
 Package pdftex.def Info: report_figs/fig_stage11_analyses.pdf  used on input li
 ne 714.
 (pdftex.def)             Requested size: 278.21342pt x 130.0841pt.
+
 
 LaTeX Warning: `h' float specifier changed to `ht'.
 
@@ -625,19 +639,22 @@ Overfull \hbox (2.10672pt too wide) in paragraph at lines 725--734
 r el-e-ments (\T1/lmtt/b/n/10.95 run_phylo_analysis.py\T1/lmr/bx/n/10.95 ).[]
  []
 
-[9] [10]
+[10] [11]
 Underfull \hbox (badness 2384) in paragraph at lines 789--795
  []\T1/lmr/bx/n/10.95 Repeat land-scape and CpG-corrected di-ver-gence (\T1/lmt
 t/b/n/10.95 run_divergence.py\T1/lmr/bx/n/10.95 ).[] \T1/lmr/m/n/10.95 Per-locu
 s
  []
 
-[11] [12 <./report_figs/fig_stage11_analyses.pdf>]
+[12 <./report_figs/fig_stage11_analyses.pdf>]
 Underfull \hbox (badness 2662) in paragraph at lines 825--829
  []\T1/lmr/bx/n/10.95 Reproducibility (\T1/lmtt/b/n/10.95 te_provenance.py\T1/l
 mr/bx/n/10.95 ).[] \T1/lmr/m/n/10.95 Ev-ery run emits a machine-readable prove-
 nance
  []
+
+
+LaTeX Warning: `h' float specifier changed to `ht'.
 
 
 LaTeX Warning: `h' float specifier changed to `ht'.
@@ -709,13 +726,13 @@ n/10.95 hgdownload.soe.ucsc.edu/goldenPath/hs1/database/rmsk.txt.gz\T1/lmr/m/n/
 10.95 ,
  []
 
-[16] [17] (./gameca_report.bbl [18]
+[16] [17] (./gameca_report.bbl [18] [19]
 Underfull \hbox (badness 10000) in paragraph at lines 109--117
 []\T1/lmr/m/n/10.95 Jaime A. Castro-Mondragon, Rafael Riudavets-Puig, Ieva Raul
 u-se-vi-ciute, Roza
  []
 
-[19] [20]) [21] (./gameca_report.aux)
+[20]) [21] (./gameca_report.aux)
  ***********
 LaTeX2e <2025-11-01>
 L3 programming layer <2026-01-19>
@@ -724,13 +741,13 @@ Package rerunfilecheck Info: File `gameca_report.out' has not changed.
 (rerunfilecheck)             Checksum: 536A7694014BBCF51664083EBAB4B95B;1982.
  ) 
 Here is how much of TeX's memory you used:
- 13450 strings out of 469006
- 215425 string characters out of 5454814
- 633460 words of memory out of 5000000
- 41804 multiletter control sequences out of 15000+600000
+ 13451 strings out of 469006
+ 215633 string characters out of 5454814
+ 635461 words of memory out of 5000000
+ 41805 multiletter control sequences out of 15000+600000
  715834 words of font info for 104 fonts, out of 8000000 for 9000
  319 hyphenation exceptions out of 8191
- 75i,12n,79p,758b,602s stack positions out of 10000i,1000n,20000p,200000b,200000s
+ 75i,12n,79p,758b,596s stack positions out of 10000i,1000n,20000p,200000b,200000s
 </usr/local/texlive/2026basic/texmf-dist/fonts/type1/public/lm/lmbx10.pfb></u
 sr/local/texlive/2026basic/texmf-dist/fonts/type1/public/lm/lmbx12.pfb></usr/lo
 cal/texlive/2026basic/texmf-dist/fonts/type1/public/lm/lmbx9.pfb></usr/local/te
@@ -748,10 +765,10 @@ lmsy10.pfb></usr/local/texlive/2026basic/texmf-dist/fonts/type1/public/lm/lmsy8
 local/texlive/2026basic/texmf-dist/fonts/type1/public/lm/lmtt10.pfb></usr/local
 /texlive/2026basic/texmf-dist/fonts/type1/public/lm/lmtti10.pfb></usr/local/tex
 live/2026basic/texmf-dist/fonts/type1/public/amsfonts/symbols/msam10.pfb>
-Output written on gameca_report.pdf (21 pages, 561209 bytes).
+Output written on gameca_report.pdf (21 pages, 585868 bytes).
 PDF statistics:
- 873 PDF objects out of 1000 (max. 8388607)
- 453 compressed objects within 5 object streams
+ 966 PDF objects out of 1000 (max. 8388607)
+ 462 compressed objects within 5 object streams
  127 named destinations out of 1000 (max. 500000)
- 96 words of extra memory for PDF output out of 10000 (max. 10000000)
+ 101 words of extra memory for PDF output out of 10000 (max. 10000000)
 

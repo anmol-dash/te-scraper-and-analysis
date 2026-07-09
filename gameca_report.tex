@@ -343,7 +343,7 @@ Nextflow layer is a thin wrapper that calls them.
 
 \begin{figure}[h]
   \centering
-  \resizebox{0.65\textwidth}{!}{\figorbox{fig_architecture}}
+  \resizebox{0.65\textwidth}{!}{\figorbox{report_figs/fig_architecture}}
   \caption{GAMECA's three-layer architecture. A Tauri/React desktop shell drives a Python
     analysis sidecar over a streaming NDJSON protocol; the backend runs locally or stages and
     submits jobs to an LSF/Slurm cluster. Coordinate, sequence, motif and annotation data are
@@ -571,7 +571,7 @@ access nor the scientific dependencies.
 
 \begin{figure}[h]
   \centering
-  \resizebox{0.85\textwidth}{!}{\figorbox{fig_nextflow_dag}}
+  \resizebox{0.85\textwidth}{!}{\figorbox{report_figs/fig_nextflow_dag}}
   \caption{Nextflow DSL2 orchestration. \texttt{GAMECA\_CORE} runs \texttt{query.py} Stages
     1--10; the \texttt{STANDOUT} subworkflow scatters the copy-resolved analysis modules into
     independent, individually-resourced \texttt{GAMECA\_STANDOUT} tasks that run in parallel and
