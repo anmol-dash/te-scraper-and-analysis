@@ -980,32 +980,43 @@ fi
         interactively over SSH, the batch job sees "not on PATH" (this is what
         broke the 2026-07-09 gameca_cluster_test run). Rather than requiring
         cluster admins to install nextflow globally, fetch the self-contained
-        launcher (needs only java, which HPC nodes almost always have via
-        module or system package) and cache it under remote_work_dir so
-        subsequent jobs reuse it instantly.
+        launcher and cache it under remote_work_dir so subsequent jobs reuse
+        it instantly.
+
+        This block only fetches the `nextflow` binary — it deliberately does
+        NOT run `nextflow -version` here to sanity-check it, and does NOT try
+        to fix up JAVA_HOME. HPC nodes commonly pin JAVA_HOME to an old
+        conda-bundled JVM (Java 11) that modern Nextflow refuses to run under
+        ("Cannot find Java or it's a wrong version"), even when a newer JVM
+        exists elsewhere — running `nextflow -version` against a stale
+        JAVA_HOME here would just print that error into every job's log
+        before query.py even starts. The actual Java >= 17 search (and,
+        failing that, a portable Temurin JRE download) happens in Python via
+        query.py's own _ensure_java()/_ensure_nextflow(), which override
+        JAVA_HOME in os.environ immediately before invoking `nextflow run` as
+        a subprocess — see query.py for the logic this mirrors.
         """
         nf_dir = f"{self.remote_work_dir}/bin"
         return f'''# Install nextflow (self-contained launcher) if not already on PATH
+# (JAVA_HOME is fixed up later, by query.py itself, right before it invokes
+# nextflow — see hpc_client._nextflow_setup_block's docstring for why.)
 NEXTFLOW_DIR="{nf_dir}"
 mkdir -p "$NEXTFLOW_DIR"
 export PATH="$NEXTFLOW_DIR:$PATH"
-if ! command -v nextflow >/dev/null 2>&1; then
-    if ! command -v java >/dev/null 2>&1; then
-        echo "[GAMECA] WARNING: java not found — nextflow cannot run even after install"
-    fi
-    if [ -x "$NEXTFLOW_DIR/nextflow" ]; then
-        echo "[GAMECA] Found cached nextflow at $NEXTFLOW_DIR/nextflow (but not resolving via PATH?)"
-    else
-        echo "[GAMECA] Installing nextflow into $NEXTFLOW_DIR ..."
-        ( cd "$NEXTFLOW_DIR" && curl -s https://get.nextflow.io | bash ) 2>&1 | tail -10 || \\
-            echo "[GAMECA] WARNING: nextflow self-install failed — --stage11-engine nextflow will not work"
-        chmod +x "$NEXTFLOW_DIR/nextflow" 2>/dev/null || true
-    fi
-fi
-if command -v nextflow >/dev/null 2>&1; then
-    echo "[GAMECA] nextflow: $(nextflow -version 2>&1 | grep -i version | head -1)"
+if [ -x "$NEXTFLOW_DIR/nextflow" ]; then
+    echo "[GAMECA] nextflow: cached at $NEXTFLOW_DIR/nextflow"
+elif command -v nextflow >/dev/null 2>&1; then
+    echo "[GAMECA] nextflow: $(command -v nextflow)"
 else
-    echo "[GAMECA] nextflow still not available after install attempt"
+    echo "[GAMECA] Installing nextflow into $NEXTFLOW_DIR ..."
+    ( cd "$NEXTFLOW_DIR" && curl -s https://get.nextflow.io | bash ) 2>&1 | tail -10 || \\
+        echo "[GAMECA] WARNING: nextflow self-install failed — --stage11-engine nextflow will not work"
+    chmod +x "$NEXTFLOW_DIR/nextflow" 2>/dev/null || true
+    if [ -x "$NEXTFLOW_DIR/nextflow" ]; then
+        echo "[GAMECA] nextflow: installed at $NEXTFLOW_DIR/nextflow"
+    else
+        echo "[GAMECA] nextflow still not available after install attempt"
+    fi
 fi
 '''
 

@@ -62,8 +62,10 @@ Usage (cluster):
 
 import argparse
 import datetime
+import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -109,39 +111,109 @@ def _default_container_sif():
     return None
 
 
-def _ensure_nextflow():
-    """Self-install nextflow into ~/gameca/bin if it isn't already on PATH.
+def _java_major_version(java_bin):
+    """Return the major version number of *java_bin*, or None if unusable."""
+    try:
+        out = subprocess.run([java_bin, "-version"], capture_output=True,
+                             text=True, timeout=10).stderr
+    except Exception:
+        return None
+    m = re.search(r'version "(\d+)(?:\.(\d+))?', out)
+    if not m:
+        return None
+    major = int(m.group(1))
+    return int(m.group(2)) if major == 1 and m.group(2) else major
 
-    Mirrors hpc_client._nextflow_setup_block() so a plain `nextflow not on
-    PATH` failure here doesn't mean this test exercises a different
-    environment than the regular query.py --post-alignment-analyses-nextflow
-    jobs hpc_client submits — both self-install into the same kind of cache
-    dir and both fall back gracefully (nextflow: to the loop engine here;
-    query.py: to its in-process pipeline) if java itself is unavailable.
-    Returns the resolved nextflow path, or None if unavailable.
+
+def _ensure_java(min_major=17):
+    """Find (or install) a Java >= min_major and return its JAVA_HOME.
+
+    Mirrors query.py's _ensure_java(): HPC nodes commonly pin JAVA_HOME to an
+    old conda-bundled JVM (Java 11) that modern Nextflow refuses to run
+    under, even when a newer JVM exists elsewhere. Search common JVM
+    locations first; fall back to a portable Eclipse Temurin JRE download
+    into ~/gameca/jdk. Returns a JAVA_HOME path, or None if unavailable.
     """
-    nf = shutil.which("nextflow")
-    if nf:
-        return nf
+    cached_jdk = Path.home() / "gameca" / "jdk"
+    candidates = []
+    java_home_env = os.environ.get("JAVA_HOME", "").strip()
+    if java_home_env:
+        candidates.append(str(Path(java_home_env) / "bin" / "java"))
+    which_java = shutil.which("java")
+    if which_java:
+        candidates.append(which_java)
+    for pattern in ("/usr/lib/jvm/*/bin/java", "/usr/local/lib/jvm/*/bin/java",
+                    "/opt/*/bin/java", "/opt/*/*/bin/java",
+                    str(cached_jdk / "*" / "bin" / "java")):
+        candidates += glob.glob(pattern)
+
+    for cand in dict.fromkeys(candidates):
+        if not Path(cand).is_file():
+            continue
+        v = _java_major_version(cand)
+        if v is not None and v >= min_major:
+            return str(Path(cand).resolve().parent.parent)
+
+    print(f"  [nextflow] no Java >= {min_major} found — installing a portable "
+          "Temurin JRE ...")
+    cached_jdk.mkdir(parents=True, exist_ok=True)
+    tarball = cached_jdk / "jre.tar.gz"
+    url = ("https://api.adoptium.net/v3/binary/latest/21/ga/linux/x64/jre/"
+           "hotspot/normal/eclipse?project=jdk")
+    rc = subprocess.run(["curl", "-sL", "-o", str(tarball), url]).returncode
+    if rc != 0 or not tarball.exists() or tarball.stat().st_size == 0:
+        print("  [nextflow] WARNING: portable JRE download failed")
+        return None
+    subprocess.run(["tar", "xzf", str(tarball), "-C", str(cached_jdk)])
+    tarball.unlink(missing_ok=True)
+    extracted = next((p for p in cached_jdk.iterdir()
+                      if p.is_dir() and (p / "bin" / "java").is_file()), None)
+    if extracted:
+        return str(extracted)
+    print("  [nextflow] WARNING: portable JRE extraction failed")
+    return None
+
+
+def _ensure_nextflow():
+    """Self-install nextflow into ~/gameca/bin if it isn't already on PATH,
+    and make sure a Java >= 17 is what nextflow will actually pick up.
+
+    Mirrors hpc_client._nextflow_setup_block()/query.py's _ensure_nextflow()
+    so a plain `nextflow not on PATH` (or wrong-Java) failure here doesn't
+    mean this test exercises a different environment than the regular
+    query.py --post-alignment-analyses-nextflow jobs hpc_client submits.
+    JAVA_HOME/PATH are overridden even when nextflow was already found,
+    since a stale conda-pinned JAVA_HOME is the actual failure mode this
+    guards against. Returns the resolved nextflow path, or None if
+    unavailable.
+    """
     nf_dir = Path.home() / "gameca" / "bin"
     cached = nf_dir / "nextflow"
-    if cached.is_file():
+    nf = shutil.which("nextflow")
+    if not nf and cached.is_file():
         os.environ["PATH"] = f"{nf_dir}:{os.environ.get('PATH', '')}"
-        return str(cached)
-    if not shutil.which("java"):
-        print("  [nextflow] WARNING: java not found — cannot install/run nextflow")
+        nf = str(cached)
+    if not nf:
+        nf_dir.mkdir(parents=True, exist_ok=True)
+        print(f"  [nextflow] not on PATH — installing self-contained launcher into {nf_dir} ...")
+        rc = subprocess.run("curl -s https://get.nextflow.io | bash", shell=True,
+                            cwd=str(nf_dir)).returncode
+        if rc == 0 and cached.is_file():
+            cached.chmod(0o755)
+            os.environ["PATH"] = f"{nf_dir}:{os.environ.get('PATH', '')}"
+            print(f"  [nextflow] installed at {cached}")
+            nf = str(cached)
+        else:
+            print("  [nextflow] WARNING: self-install failed — nextflow engine unavailable")
+            return None
+
+    java_home = _ensure_java()
+    if not java_home:
+        print("  [nextflow] WARNING: no usable Java (>=17) found or installable")
         return None
-    nf_dir.mkdir(parents=True, exist_ok=True)
-    print(f"  [nextflow] not on PATH — installing self-contained launcher into {nf_dir} ...")
-    rc = subprocess.run("curl -s https://get.nextflow.io | bash", shell=True,
-                        cwd=str(nf_dir)).returncode
-    if rc == 0 and cached.is_file():
-        cached.chmod(0o755)
-        os.environ["PATH"] = f"{nf_dir}:{os.environ.get('PATH', '')}"
-        print(f"  [nextflow] installed at {cached}")
-        return str(cached)
-    print("  [nextflow] WARNING: self-install failed — nextflow engine unavailable")
-    return None
+    os.environ["JAVA_HOME"] = java_home
+    os.environ["PATH"] = f"{java_home}/bin:{os.environ.get('PATH', '')}"
+    return nf
 
 
 def _singularity_wrap(cmd, container_sif):
