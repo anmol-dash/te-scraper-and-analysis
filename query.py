@@ -229,19 +229,29 @@ def parse_args(argv=None):
     p.add_argument("--skip-standout", action="store_true",
                    help="Skip Stage 11 standout analysis modules "
                         "(phylo, gRNA, fold, overlays)")
-    p.add_argument("--post-alignment-analyses-nextflow", action="store_true",
+    p.add_argument("--post-alignment-analyses-nextflow", dest="post_alignment_analyses_nextflow",
+                   action="store_true", default=True,
                    help="Run the post-alignment analyses modules concurrently via "
                         "Nextflow (nextflow/post_alignment_analyses.nf) instead of the "
                         "sequential in-process loop; falls back to the loop if "
-                        "nextflow is unavailable")
+                        "nextflow is unavailable. On by default — nextflow+singularity "
+                        "are the baseline execution path (self-installed on demand).")
+    p.add_argument("--stage11-loop", dest="post_alignment_analyses_nextflow",
+                   action="store_false",
+                   help="Force the sequential in-process Stage 11 loop instead of "
+                        "Nextflow (opts out of the default nextflow+singularity path).")
     p.add_argument("--nextflow-profile", type=str, default=None,
                    help="Nextflow -profile to use when --post-alignment-analyses-nextflow "
                         "or --nextflow is set (e.g. 'lsf,singularity')")
-    p.add_argument("--nextflow", action="store_true",
+    p.add_argument("--nextflow", dest="nextflow", action="store_true", default=True,
                    help="Delegate the entire pipeline (Stages 1-11) to Nextflow "
                         "(nextflow/main.nf) as per-stage parallel processes, instead "
                         "of running in-process; falls back to the in-process pipeline "
-                        "if nextflow is unavailable or the run fails")
+                        "if nextflow is unavailable or the run fails. On by default — "
+                        "nextflow+singularity are the baseline execution path.")
+    p.add_argument("--no-nextflow", dest="nextflow", action="store_false",
+                   help="Force the in-process pipeline instead of delegating to "
+                        "Nextflow (opts out of the default nextflow+singularity path).")
     p.add_argument("--run-stage",
                    choices=["genome", "data", "sequences", "stats", "clustering",
                             "dashboard", "alignment", "motif", "primers", "standout"],
@@ -2263,6 +2273,81 @@ def run_motif_tfbs_go(args, out_dir, dirs, family_name, run_motif=True, run_tfbs
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# NEXTFLOW / SINGULARITY ENVIRONMENT
+#
+# Nextflow (Stage 11 parallelism) + Singularity are the baseline execution
+# path for every job — whether launched through hpc_client's generated job
+# scripts (which already self-install nextflow and export CONTAINER_SIF/
+# GAMECA_SIF, see hpc_client._nextflow_setup_block / _ensure_container_sif)
+# or by running `python query.py ...` directly on a cluster shell. This
+# section makes query.py itself self-sufficient for both, so it behaves
+# identically either way instead of only working when hpc_client set the
+# environment up first.
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _default_container_sif():
+    """Auto-detect gameca.sif: $GAMECA_SIF (exported by hpc_client's container
+    setup block when running inside an hpc_client-submitted job), then a local
+    ./gameca.sif, then the conventional ~/gameca/gameca.sif cache path (the
+    same locations hpc_client._ensure_container_sif and
+    run_gameca_cluster_test.py._default_container_sif check)."""
+    env = os.environ.get("GAMECA_SIF", "").strip()
+    if env and Path(env).is_file():
+        return env
+    for candidate in (Path("gameca.sif"), Path.home() / "gameca" / "gameca.sif"):
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def _ensure_nextflow():
+    """Self-install nextflow into ~/gameca/bin if it isn't already on PATH.
+
+    Mirrors hpc_client._nextflow_setup_block() / run_gameca_cluster_test.py's
+    _ensure_nextflow() so a bare `python query.py --post-alignment-analyses-
+    nextflow` (or --nextflow) run on the cluster works even when nextflow
+    was never installed system-wide. Returns the resolved nextflow path, or
+    None if unavailable (caller falls back to the in-process pipeline).
+    """
+    nf = shutil.which("nextflow")
+    if nf:
+        return nf
+    nf_dir = Path.home() / "gameca" / "bin"
+    cached = nf_dir / "nextflow"
+    if cached.is_file():
+        os.environ["PATH"] = f"{nf_dir}:{os.environ.get('PATH', '')}"
+        return str(cached)
+    if not shutil.which("java"):
+        _diag("  NEXTFLOW: java not found — cannot install/run nextflow")
+        return None
+    nf_dir.mkdir(parents=True, exist_ok=True)
+    _diag(f"  NEXTFLOW: not on PATH — installing self-contained launcher into {nf_dir}")
+    rc = subprocess.run("curl -s https://get.nextflow.io | bash", shell=True,
+                        cwd=str(nf_dir)).returncode
+    if rc == 0 and cached.is_file():
+        cached.chmod(0o755)
+        os.environ["PATH"] = f"{nf_dir}:{os.environ.get('PATH', '')}"
+        return str(cached)
+    _diag("  NEXTFLOW: self-install failed")
+    return None
+
+
+def _nextflow_profile_and_sif(args):
+    """Resolve (profile, container_sif) for a `nextflow run` invocation.
+
+    Respects an explicit --nextflow-profile if the user set one; otherwise
+    auto-enables the 'singularity' profile whenever a gameca.sif is
+    discoverable, so container mode is the default rather than something
+    that has to be requested by hand.
+    """
+    sif = _default_container_sif()
+    profile = getattr(args, "nextflow_profile", None)
+    if not profile and sif:
+        profile = "singularity"
+    return profile, sif
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # STAGE 11 HELPER (also called standalone via --resume-from standout)
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -2275,9 +2360,9 @@ def _run_standout_analysis_nextflow(args, out_dir, family_name):
     family folder. Returns True on success, False if Nextflow is unavailable or
     the run failed (caller then falls back to the in-process loop).
     """
-    nf = shutil.which("nextflow")
+    nf = _ensure_nextflow()
     if not nf:
-        _diag("  STAGE 11: nextflow not on PATH")
+        _diag("  STAGE 11: nextflow not on PATH and self-install failed")
         return False
 
     if hasattr(sys, "_MEIPASS"):
@@ -2290,7 +2375,7 @@ def _run_standout_analysis_nextflow(args, out_dir, family_name):
         return False
 
     assembly = getattr(args, "assembly", "hg38") or "hg38"
-    profile  = getattr(args, "nextflow_profile", None)
+    profile, sif = _nextflow_profile_and_sif(args)
     cmd = [nf, "run", str(paa_nf),
            "--results",  str(out_dir),
            "--family",   family_name,
@@ -2299,6 +2384,8 @@ def _run_standout_analysis_nextflow(args, out_dir, family_name):
            "-resume"]
     if profile:
         cmd += ["-profile", profile]
+    if sif:
+        cmd += ["--container_sif", sif]
 
     _diag(f"  STAGE 11 (nextflow): {' '.join(cmd)}")
     print(f"  Handing post-alignment analyses to Nextflow: {paa_nf.name}")
@@ -2517,9 +2604,9 @@ def _run_full_pipeline_nextflow(args, out_dir, family_name):
     failed — callers should fall back to running run_pipeline()'s normal
     in-process body when this returns False.
     """
-    nf = shutil.which("nextflow")
+    nf = _ensure_nextflow()
     if not nf:
-        _diag("  NEXTFLOW: nextflow not on PATH")
+        _diag("  NEXTFLOW: nextflow not on PATH and self-install failed")
         return False
 
     if hasattr(sys, "_MEIPASS"):
@@ -2532,7 +2619,7 @@ def _run_full_pipeline_nextflow(args, out_dir, family_name):
         return False
 
     assembly = getattr(args, "assembly", "hg38") or "hg38"
-    profile  = getattr(args, "nextflow_profile", None)
+    profile, sif = _nextflow_profile_and_sif(args)
     cmd = [nf, "run", str(main_nf),
            "--family",      family_name,
            "--assembly",    assembly,
@@ -2543,6 +2630,8 @@ def _run_full_pipeline_nextflow(args, out_dir, family_name):
         cmd += ["--genome_fasta", args.genome]
     if profile:
         cmd += ["-profile", profile]
+    if sif:
+        cmd += ["--container_sif", sif]
 
     _diag(f"  NEXTFLOW (full pipeline): {' '.join(cmd)}")
     print(f"  Handing full pipeline to Nextflow: {main_nf.name}")
@@ -3161,7 +3250,13 @@ def run_pipeline(args):
     if args.validate_existing:
         validate_existing_outputs(OUT_DIR, FAMILY_NAME)
 
-    if getattr(args, "nextflow", False):
+    # Only delegate a *fresh* run to Nextflow. --resume-from invocations
+    # (motif/tfbs/go/standout) are themselves individual stage jobs submitted
+    # by hpc_client's per-stage parallel job path (_submit_stage_job) or by
+    # Nextflow's own per-stage processes calling back into query.py
+    # --run-stage; letting --nextflow's default-on hijack those would re-run
+    # the entire pipeline from scratch instead of just the requested stage.
+    if getattr(args, "nextflow", False) and not args.resume_from:
         if _run_full_pipeline_nextflow(args, OUT_DIR, FAMILY_NAME):
             return None
         print("  Falling back to in-process pipeline.")

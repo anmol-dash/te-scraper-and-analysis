@@ -962,6 +962,53 @@ if ! command -v mafft >/dev/null 2>&1; then
 fi
 '''
 
+    def _nextflow_setup_block(self):
+        """Self-install nextflow into remote_work_dir/bin if it isn't on PATH.
+
+        Nextflow + Singularity are the baseline execution path for every
+        GAMECA job, not an opt-in extra — _pipeline_cli_args() always passes
+        --post-alignment-analyses-nextflow, and CONTAINER_SIF is auto-set at
+        connect() whenever a runtime is available (see _ensure_container_sif).
+        So this block runs unconditionally in every job script, exactly like
+        _venv_setup_block/_mafft_setup_block, rather than being gated behind
+        a "does this particular command need nextflow" check.
+
+        query.py's --nextflow / --post-alignment-analyses-nextflow flags shell
+        out to `nextflow run ...` from *inside* the submitted job. That job
+        runs as a fresh non-interactive shell on a compute node, which usually
+        doesn't share the login node's PATH — so even when `nextflow` works
+        interactively over SSH, the batch job sees "not on PATH" (this is what
+        broke the 2026-07-09 gameca_cluster_test run). Rather than requiring
+        cluster admins to install nextflow globally, fetch the self-contained
+        launcher (needs only java, which HPC nodes almost always have via
+        module or system package) and cache it under remote_work_dir so
+        subsequent jobs reuse it instantly.
+        """
+        nf_dir = f"{self.remote_work_dir}/bin"
+        return f'''# Install nextflow (self-contained launcher) if not already on PATH
+NEXTFLOW_DIR="{nf_dir}"
+mkdir -p "$NEXTFLOW_DIR"
+export PATH="$NEXTFLOW_DIR:$PATH"
+if ! command -v nextflow >/dev/null 2>&1; then
+    if ! command -v java >/dev/null 2>&1; then
+        echo "[GAMECA] WARNING: java not found — nextflow cannot run even after install"
+    fi
+    if [ -x "$NEXTFLOW_DIR/nextflow" ]; then
+        echo "[GAMECA] Found cached nextflow at $NEXTFLOW_DIR/nextflow (but not resolving via PATH?)"
+    else
+        echo "[GAMECA] Installing nextflow into $NEXTFLOW_DIR ..."
+        ( cd "$NEXTFLOW_DIR" && curl -s https://get.nextflow.io | bash ) 2>&1 | tail -10 || \\
+            echo "[GAMECA] WARNING: nextflow self-install failed — --stage11-engine nextflow will not work"
+        chmod +x "$NEXTFLOW_DIR/nextflow" 2>/dev/null || true
+    fi
+fi
+if command -v nextflow >/dev/null 2>&1; then
+    echo "[GAMECA] nextflow: $(nextflow -version 2>&1 | grep -i version | head -1)"
+else
+    echo "[GAMECA] nextflow still not available after install attempt"
+fi
+'''
+
     def _submit_job_cmd(self, job_script):
         """Return the scheduler command to submit a job script."""
         if self.scheduler == "slurm":
@@ -1575,6 +1622,16 @@ fi
 
         args += ["--force"]  # always re-run cached stages in batch mode
 
+        # Nextflow (Stage 11 parallelism) + Singularity are the baseline
+        # execution path for every job, not an opt-in extra — this keeps
+        # UI-submitted query.py runs on the exact same code path as
+        # run_gameca_cluster_test.py instead of the two diverging. query.py
+        # itself falls back to the in-process loop if nextflow turns out to
+        # be unavailable/fails, so this is always safe to pass.
+        args.append("--post-alignment-analyses-nextflow")
+        if self._container_sif():
+            args += ["--nextflow-profile", "singularity"]
+
         cli = " ".join(shlex.quote(str(arg)) for arg in args)
         _log(f"Pipeline CLI args: {cli}")
         return cli
@@ -1778,6 +1835,7 @@ echo "  Input data: OK ({quoted})"'''
         module_block = self._module_load_block()
         venv_block = self._venv_setup_block()
         mafft_block = self._mafft_setup_block()
+        nextflow_block = self._nextflow_setup_block()
         input_preflight = self._input_preflight_block(error_log=job_done)
         pipeline_args = self._pipeline_cli_args()
         _log(f"Creating batch job script at {job_script}")
@@ -1818,6 +1876,7 @@ JOB_START_TIME=$(date +%s)
 
 {venv_block}
 {mafft_block}
+{nextflow_block}
 
 echo "=========================================================="
 echo " TE Analysis Pipeline — Batch Mode"
@@ -2098,6 +2157,7 @@ exit $EXIT_CODE
         module_block   = self._module_load_block()
         venv_block     = self._venv_setup_block()
         mafft_block    = self._mafft_setup_block()
+        nextflow_block = self._nextflow_setup_block()
         base_args      = self._pipeline_cli_args()
         full_args      = base_args + " " + " ".join(shlex.quote(a) for a in extra_pipeline_args)
 
@@ -2106,6 +2166,7 @@ exit $EXIT_CODE
 {module_block}
 {venv_block}
 {mafft_block}
+{nextflow_block}
 
 echo "Stage: {stage_label}"
 echo "Date: $(date)"
@@ -2275,6 +2336,7 @@ exit $EXIT_CODE
         module_block = self._module_load_block()
         venv_block = self._venv_setup_block()
         mafft_block = self._mafft_setup_block()
+        nextflow_block = self._nextflow_setup_block()
         input_preflight = self._input_preflight_block()
         pipeline_args = self._pipeline_cli_args()
         _log(f"Creating interactive runner script at {runner_script}")
@@ -2287,6 +2349,7 @@ JOB_START_TIME=$(date +%s)
 
 {venv_block}
 {mafft_block}
+{nextflow_block}
 
 echo "=========================================================="
 echo " TE Analysis Pipeline — Interactive Mode"
@@ -3209,6 +3272,7 @@ exit $EXIT_CODE
         )
         venv_block   = self._venv_setup_block()
         module_block = self._module_load_block()
+        nextflow_block = self._nextflow_setup_block()
 
         script = (
             "#!/bin/bash\n"
@@ -3217,6 +3281,7 @@ exit $EXIT_CODE
             "set -uo pipefail\n"
             f"{module_block}\n"
             f"{venv_block}\n"
+            f"{nextflow_block}\n"
             "# command phase — hard exit on any failure from here on\n"
             "set -euo pipefail\n"
             f'echo "[$(date +%H:%M:%S)] Starting {label} ..."\n'

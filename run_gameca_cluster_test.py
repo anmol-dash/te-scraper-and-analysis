@@ -18,21 +18,23 @@ What it exercises (end to end, for every (family, assembly) in the matrix):
                         — NOT just "two cell / four cell" style stage names.
                         These numbers are fabricated test fixtures ONLY; they are
                         never reported as real measurements.
-  4. Stage 11         — every standout-analysis module runs on the prepared CSV,
-                        via one of two engines (--stage11-engine):
-                          loop      — run_stage11_all.py's in-process subprocess
-                                      loop (default; matches query.py's fallback
-                                      path when Nextflow isn't available).
-                          nextflow  — nextflow/post_alignment_analyses.nf, which
-                                      scatters the same module registry across
-                                      real Nextflow processes (matches query.py
-                                      --post-alignment-analyses-nextflow).
-                        Either engine can additionally run inside the GAMECA
-                        Singularity container via --container-sif (loop: wraps
-                        the subprocess in `singularity exec`; nextflow: adds
-                        `-profile singularity --container_sif <path>`, or pulls
-                        docker://ghcr.io/anmol-dash/gameca:latest if no local
-                        .sif is given).
+  4. Stage 11         — every standout-analysis module runs on the prepared CSV.
+                        Nextflow + Singularity are the baseline for this test,
+                        same as every regular query.py job hpc_client submits
+                        (hpc_client._pipeline_cli_args() always passes
+                        --post-alignment-analyses-nextflow, and CONTAINER_SIF
+                        is auto-provisioned at connect time). --stage11-engine
+                        defaults to 'nextflow' (nextflow/post_alignment_analyses.nf,
+                        real per-module parallelism) and --container-sif
+                        auto-detects gameca.sif from $GAMECA_SIF / ./gameca.sif /
+                        ~/gameca/gameca.sif — the same cache path hpc_client
+                        uses — so this test doesn't run against a different
+                        environment than the regular pipeline. nextflow itself
+                        is self-installed into ~/gameca/bin if not already on
+                        PATH (mirrors hpc_client._nextflow_setup_block).
+                        Pass --stage11-engine loop to use the in-process
+                        subprocess loop instead (query.py's own fallback path
+                        when nextflow is unavailable).
 
 Timing: retrieval (UCSC pull), clustering, synthetic-expression injection, and
 Stage 11 (broken into per-module seconds, with a "Stage 11 excl. fold" total)
@@ -48,14 +50,14 @@ Usage (cluster):
     python run_gameca_cluster_test.py \
         --out-dir ~/gameca_cluster_test \
         --notify-email you@example.com
+    # (nextflow + singularity are on by default; nothing extra to pass)
 
     # custom matrix / caps:
     python run_gameca_cluster_test.py --out-dir OUT \
         --matrix "L1HS:hg38,MT2_Mm:mm10" --max-loci 200 --include-fold
 
-    # exercise the Nextflow orchestration engine inside the Singularity image:
-    python run_gameca_cluster_test.py --out-dir OUT \
-        --stage11-engine nextflow --container-sif ~/gameca/gameca.sif
+    # fall back to the in-process loop engine / no container, for comparison:
+    python run_gameca_cluster_test.py --out-dir OUT --stage11-engine loop
 """
 
 import argparse
@@ -91,6 +93,55 @@ def _run(cmd, log, cwd=None, env=None):
     dt = time.time() - t0
     log.write(f"[exit {rc}  {dt:.0f}s]\n"); log.flush()
     return rc, dt
+
+
+def _default_container_sif():
+    """Auto-detect gameca.sif the same way hpc_client._ensure_container_sif does
+    on a normal query.py run, so this test doesn't diverge from the regular
+    pipeline's container path. Checked in order: $GAMECA_SIF env var, a local
+    ./gameca.sif, then the conventional ~/gameca/gameca.sif cache location."""
+    env = os.environ.get("GAMECA_SIF", "").strip()
+    if env and Path(env).is_file():
+        return env
+    for candidate in (Path("gameca.sif"), Path.home() / "gameca" / "gameca.sif"):
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def _ensure_nextflow():
+    """Self-install nextflow into ~/gameca/bin if it isn't already on PATH.
+
+    Mirrors hpc_client._nextflow_setup_block() so a plain `nextflow not on
+    PATH` failure here doesn't mean this test exercises a different
+    environment than the regular query.py --post-alignment-analyses-nextflow
+    jobs hpc_client submits — both self-install into the same kind of cache
+    dir and both fall back gracefully (nextflow: to the loop engine here;
+    query.py: to its in-process pipeline) if java itself is unavailable.
+    Returns the resolved nextflow path, or None if unavailable.
+    """
+    nf = shutil.which("nextflow")
+    if nf:
+        return nf
+    nf_dir = Path.home() / "gameca" / "bin"
+    cached = nf_dir / "nextflow"
+    if cached.is_file():
+        os.environ["PATH"] = f"{nf_dir}:{os.environ.get('PATH', '')}"
+        return str(cached)
+    if not shutil.which("java"):
+        print("  [nextflow] WARNING: java not found — cannot install/run nextflow")
+        return None
+    nf_dir.mkdir(parents=True, exist_ok=True)
+    print(f"  [nextflow] not on PATH — installing self-contained launcher into {nf_dir} ...")
+    rc = subprocess.run("curl -s https://get.nextflow.io | bash", shell=True,
+                        cwd=str(nf_dir)).returncode
+    if rc == 0 and cached.is_file():
+        cached.chmod(0o755)
+        os.environ["PATH"] = f"{nf_dir}:{os.environ.get('PATH', '')}"
+        print(f"  [nextflow] installed at {cached}")
+        return str(cached)
+    print("  [nextflow] WARNING: self-install failed — nextflow engine unavailable")
+    return None
 
 
 def _singularity_wrap(cmd, container_sif):
@@ -347,10 +398,10 @@ def _run_stage11_nextflow(family, assembly, work, reports, log, sdir,
     same module registry across real Nextflow processes. `work` must contain
     01_data/<family_lower>_clustered.csv (staged by prepare_family)."""
     tag = f"{family}_{assembly}"
-    nf = shutil.which("nextflow")
+    nf = _ensure_nextflow()
     if not nf:
-        mlog.write(f"  [{tag}] STAGE11 FAILED: nextflow not on PATH\n")
-        print(f"  [{tag}] Stage 11 (nextflow) FAILED: nextflow not on PATH")
+        mlog.write(f"  [{tag}] STAGE11 FAILED: nextflow not on PATH and self-install failed\n")
+        print(f"  [{tag}] Stage 11 (nextflow) FAILED: nextflow not on PATH and self-install failed")
         return -1, 0.0, {}
 
     trace = reports / "nextflow_trace.txt"
@@ -513,22 +564,29 @@ def main():
     p.add_argument("--stop-on-fail", action="store_true",
                    help="Abort the whole test on the first family failure "
                         "(default: keep going through the rest of the matrix).")
-    p.add_argument("--stage11-engine", choices=["loop", "nextflow"], default="loop",
-                   help="How to run the Stage 11 modules: 'loop' (run_stage11_all.py's "
-                        "in-process subprocess loop, default) or 'nextflow' "
-                        "(nextflow/post_alignment_analyses.nf, real per-module parallelism).")
+    p.add_argument("--stage11-engine", choices=["loop", "nextflow"], default="nextflow",
+                   help="How to run the Stage 11 modules: 'nextflow' (default — "
+                        "nextflow/post_alignment_analyses.nf, real per-module parallelism, "
+                        "matching query.py --post-alignment-analyses-nextflow which "
+                        "hpc_client now enables on every job) or 'loop' (run_stage11_all.py's "
+                        "in-process subprocess loop, the same fallback query.py uses if "
+                        "nextflow is unavailable).")
     p.add_argument("--container-sif", default=None,
-                   help="Path to a prebuilt gameca.sif. loop engine: wraps the Stage 11 "
-                        "subprocess in `singularity exec`. nextflow engine: adds "
-                        "-profile singularity --container_sif <path> (pulls "
-                        "docker://ghcr.io/anmol-dash/gameca:latest instead if omitted "
-                        "but -profile singularity is still desired via --nextflow-profile).")
+                   help="Path to a prebuilt gameca.sif. Auto-detected by default from "
+                        "$GAMECA_SIF, ./gameca.sif, or ~/gameca/gameca.sif (the same cache "
+                        "path hpc_client._ensure_container_sif uses) so this test runs "
+                        "against the same container every regular pipeline job uses. "
+                        "loop engine: wraps the Stage 11 subprocess in `singularity exec`. "
+                        "nextflow engine: adds -profile singularity --container_sif <path>.")
     p.add_argument("--nextflow-profile", default=None,
                    help="Extra comma-separated Nextflow profiles to combine with "
                         "'singularity' when --container-sif is set (e.g. 'lsf').")
     p.add_argument("--notify-email", default="",
                    help="Email address for a completion summary (Resend API).")
     args = p.parse_args()
+
+    if not args.container_sif:
+        args.container_sif = _default_container_sif()
 
     if args.matrix:
         matrix = []
