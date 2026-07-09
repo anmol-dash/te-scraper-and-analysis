@@ -40,7 +40,13 @@ From: python:3.11-slim-bookworm
     rm -rf /var/lib/apt/lists/*
 
     python -m pip install --no-cache-dir --upgrade pip setuptools wheel
-    python -m pip install --no-cache-dir -r /opt/gameca/code/requirements.txt
+    # Strip colabfold before install (mirrors the Dockerfile): colabfold[alphafold]
+    # pins numpy/pandas versions that make resolution impossible against the rest
+    # of requirements.txt, and fold prediction runs from the separate CUDA
+    # colabfold.sif anyway (see the %post comment above / run_fold_prediction.py
+    # --colabfold-cmd). requirements.txt stays the single source of truth.
+    grep -viE '^[[:space:]]*colabfold' /opt/gameca/code/requirements.txt > /tmp/requirements.sif.txt
+    python -m pip install --no-cache-dir -r /tmp/requirements.sif.txt
 
     # Build te_fast for Linux (the committed .so is a macOS build; without this
     # the pipeline falls back to slow pure-Python).
