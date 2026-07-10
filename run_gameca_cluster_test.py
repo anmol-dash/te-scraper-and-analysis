@@ -241,6 +241,33 @@ def _singularity_wrap(cmd, container_sif):
     return [runtime, "exec"] + bind_args + [container_sif] + cmd
 
 
+def _containerized_nextflow_cmd(nf_args, container_sif, extra_binds):
+    """Build `singularity exec --cleanenv ... gameca.sif nextflow <nf_args>` so
+    the Nextflow *driver* runs from inside the image.
+
+    gameca.sif bakes in Java 17 + Nextflow (see Dockerfile), so launching the
+    driver in-container sidesteps the compute node's Java 11 / broken conda base
+    entirely — the exact failure of the 2026-07-09 cluster test, where the
+    host-launched driver died with "Cannot find Java or it's a wrong version"
+    (JAVA_CMD pinned at /usr/lib/jvm/java-11). Stage 11 processes then run with
+    the *local* executor in this same container, so there is no `-profile
+    singularity` (which would nest singularity) and no host-side Java/Nextflow
+    provisioning at all. `--cleanenv` keeps the host's stale JAVA_CMD/JAVA_HOME
+    and broken conda out of the container.
+    """
+    runtime = shutil.which("singularity") or shutil.which("apptainer") or "singularity"
+    binds = {str(Path(b).resolve()) for b in extra_binds}
+    for a in nf_args:
+        p = Path(str(a))
+        if p.is_absolute() and (p.exists() or p.parent.exists()):
+            binds.add(str(p if p.is_dir() else p.parent))
+    bind_args = []
+    for b in sorted(binds):
+        bind_args += ["-B", f"{b}:{b}"]
+    return ([runtime, "exec", "--cleanenv"] + bind_args +
+            [container_sif, "nextflow"] + list(nf_args))
+
+
 def _synthetic_clusters(df, k=3):
     """Deterministic clusters from GC tertiles (falls back to row modulo).
 
@@ -495,24 +522,45 @@ def _run_stage11_nextflow(family, assembly, work, reports, log, sdir,
     same module registry across real Nextflow processes. `work` must contain
     01_data/<family_lower>_clustered.csv (staged by prepare_family)."""
     tag = f"{family}_{assembly}"
-    nf = _ensure_nextflow()
-    if not nf:
-        mlog.write(f"  [{tag}] STAGE11 FAILED: nextflow not on PATH and self-install failed\n")
-        print(f"  [{tag}] Stage 11 (nextflow) FAILED: nextflow not on PATH and self-install failed")
-        return -1, 0.0, {}
-
     trace = reports / "nextflow_trace.txt"
-    cmd = [nf, "run", str(sdir / "nextflow" / "post_alignment_analyses.nf"),
-           "--results", str(work), "--family", family, "--assembly", assembly,
-           "--gameca_home", str(sdir), "-with-trace", str(trace), "-resume"]
+    nf_work = reports / "nf_work"
+    nf_args = ["run", str(sdir / "nextflow" / "post_alignment_analyses.nf"),
+               "--results", str(work), "--family", family, "--assembly", assembly,
+               "--gameca_home", str(sdir), "-with-trace", str(trace),
+               "-work-dir", str(nf_work), "-resume"]
     if skip_fold:
-        cmd += ["--skip_modules", "fold"]
-    profiles = (["singularity"] if args.container_sif else []) + \
-               ([p for p in (args.nextflow_profile or "").split(",") if p])
-    if profiles:
-        cmd += ["-profile", ",".join(dict.fromkeys(profiles))]
-    if args.container_sif:
-        cmd += ["--container_sif", args.container_sif]
+        nf_args += ["--skip_modules", "fold"]
+
+    # Only fall back to the host launcher when the user explicitly asked for a
+    # scheduler (lsf/slurm) fan-out — otherwise drive Nextflow from inside
+    # gameca.sif, which has a working Java 17 + Nextflow (see
+    # _containerized_nextflow_cmd for why the host path kept failing).
+    user_profiles = [p for p in (args.nextflow_profile or "").split(",") if p]
+    scheduler_profiles = [p for p in user_profiles if p in ("lsf", "slurm")]
+    use_container_driver = bool(args.container_sif) and not scheduler_profiles
+
+    env = os.environ.copy()
+    if use_container_driver:
+        nf_work.mkdir(parents=True, exist_ok=True)
+        cmd = _containerized_nextflow_cmd(
+            nf_args, args.container_sif, extra_binds=[sdir, work, reports])
+        # The image's baked-in NXF_HOME (/opt/gameca/.nextflow) is read-only;
+        # redirect it to the writable, bound work dir. SINGULARITYENV_/
+        # APPTAINERENV_ vars are honoured even under --cleanenv.
+        for pfx in ("SINGULARITYENV_", "APPTAINERENV_"):
+            env[f"{pfx}NXF_HOME"] = f"{nf_work}/.nextflow"
+    else:
+        nf = _ensure_nextflow()
+        if not nf:
+            mlog.write(f"  [{tag}] STAGE11 FAILED: nextflow not on PATH and self-install failed\n")
+            print(f"  [{tag}] Stage 11 (nextflow) FAILED: nextflow not on PATH and self-install failed")
+            return -1, 0.0, {}
+        cmd = [nf] + nf_args
+        profiles = (["singularity"] if args.container_sif else []) + user_profiles
+        if profiles:
+            cmd += ["-profile", ",".join(dict.fromkeys(profiles))]
+        if args.container_sif:
+            cmd += ["--container_sif", args.container_sif]
     print(f"  [{tag}] running Stage 11 (nextflow"
           f"{', singularity' if args.container_sif else ''}"
           f"{', skipping fold' if skip_fold else ''})...", flush=True)
@@ -520,7 +568,7 @@ def _run_stage11_nextflow(family, assembly, work, reports, log, sdir,
     t0 = time.time()
     with open(log, "w", buffering=1) as lf:
         rc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT,
-                            cwd=str(sdir)).returncode
+                            cwd=str(reports), env=env).returncode
     dt = time.time() - t0
     modules = _parse_nextflow_trace(trace, log)
     # Surface WHY nextflow failed instead of only reporting rc/counts. A launch

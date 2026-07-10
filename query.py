@@ -2429,6 +2429,32 @@ def _nextflow_profile_and_sif(args):
     return profile, sif
 
 
+def _containerized_nextflow_cmd(nf_args, container_sif, extra_binds):
+    """Build `singularity exec --cleanenv ... gameca.sif nextflow <nf_args>` so
+    the Nextflow *driver* runs from inside the image.
+
+    gameca.sif bakes in Java 17 + Nextflow (see Dockerfile), so launching the
+    driver in-container sidesteps the compute node's Java 11 / broken conda base
+    entirely — the failure mode where the host-launched driver dies with
+    "Cannot find Java or it's a wrong version" (JAVA_CMD pinned at a conda/
+    module Java 11). Stage 11 processes then run with the *local* executor in
+    this same container, so there is no `-profile singularity` (which would nest
+    singularity) and no host-side Java/Nextflow provisioning. `--cleanenv` keeps
+    the host's stale JAVA_CMD/JAVA_HOME and broken conda out of the container.
+    """
+    runtime = shutil.which("singularity") or shutil.which("apptainer") or "singularity"
+    binds = {str(Path(b).resolve()) for b in extra_binds}
+    for a in nf_args:
+        p = Path(str(a))
+        if p.is_absolute() and (p.exists() or p.parent.exists()):
+            binds.add(str(p if p.is_dir() else p.parent))
+    bind_args = []
+    for b in sorted(binds):
+        bind_args += ["-B", f"{b}:{b}"]
+    return ([runtime, "exec", "--cleanenv"] + bind_args +
+            [container_sif, "nextflow"] + list(nf_args))
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # STAGE 11 HELPER (also called standalone via --resume-from standout)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2442,11 +2468,6 @@ def _run_standout_analysis_nextflow(args, out_dir, family_name):
     family folder. Returns True on success, False if Nextflow is unavailable or
     the run failed (caller then falls back to the in-process loop).
     """
-    nf = _ensure_nextflow()
-    if not nf:
-        _diag("  STAGE 11: nextflow not on PATH and self-install failed")
-        return False
-
     if hasattr(sys, "_MEIPASS"):
         script_dir = Path(sys._MEIPASS)
     else:
@@ -2458,20 +2479,49 @@ def _run_standout_analysis_nextflow(args, out_dir, family_name):
 
     assembly = getattr(args, "assembly", "hg38") or "hg38"
     profile, sif = _nextflow_profile_and_sif(args)
-    cmd = [nf, "run", str(paa_nf),
-           "--results",  str(out_dir),
-           "--family",   family_name,
-           "--assembly", assembly,
-           "--gameca_home", str(script_dir),
-           "-resume"]
-    if profile:
-        cmd += ["-profile", profile]
-    if sif:
-        cmd += ["--container_sif", sif]
+    nf_work = Path(out_dir) / "nf_work"
+    nf_args = ["run", str(paa_nf),
+               "--results",  str(out_dir),
+               "--family",   family_name,
+               "--assembly", assembly,
+               "--gameca_home", str(script_dir),
+               "-work-dir", str(nf_work),
+               "-resume"]
+
+    # Drive Nextflow from inside gameca.sif (working Java 17 + Nextflow) unless
+    # the user explicitly asked for a scheduler (lsf/slurm) fan-out — see
+    # _containerized_nextflow_cmd for why the host launcher kept failing on
+    # compute nodes with only Java 11.
+    user_profiles = [p for p in (profile or "").split(",") if p]
+    scheduler_profiles = [p for p in user_profiles if p in ("lsf", "slurm")]
+    use_container_driver = bool(sif) and not scheduler_profiles
+
+    env = os.environ.copy()
+    if use_container_driver:
+        nf_work.mkdir(parents=True, exist_ok=True)
+        cmd = _containerized_nextflow_cmd(
+            nf_args, sif, extra_binds=[script_dir, out_dir])
+        # The image's baked-in NXF_HOME (/opt/gameca/.nextflow) is read-only;
+        # redirect it to the writable, bound work dir. SINGULARITYENV_/
+        # APPTAINERENV_ vars are honoured even under --cleanenv.
+        for pfx in ("SINGULARITYENV_", "APPTAINERENV_"):
+            env[f"{pfx}NXF_HOME"] = f"{nf_work}/.nextflow"
+        launch_dir = out_dir
+    else:
+        nf = _ensure_nextflow()
+        if not nf:
+            _diag("  STAGE 11: nextflow not on PATH and self-install failed")
+            return False
+        cmd = [nf] + nf_args
+        if profile:
+            cmd += ["-profile", profile]
+        if sif:
+            cmd += ["--container_sif", sif]
+        launch_dir = script_dir
 
     _diag(f"  STAGE 11 (nextflow): {' '.join(cmd)}")
     print(f"  Handing post-alignment analyses to Nextflow: {paa_nf.name}")
-    rc = subprocess.run(cmd, cwd=str(script_dir)).returncode
+    rc = subprocess.run(cmd, cwd=str(launch_dir), env=env).returncode
     if rc == 0:
         print("  Post-alignment analyses (Nextflow) complete.")
         return True
