@@ -74,9 +74,12 @@ def has_coords(df: pd.DataFrame) -> bool:
 
 
 def write_bed(df: pd.DataFrame, path: Path):
+    # BED6: chr start stop name score strand. Insert score at index 4 (AFTER
+    # name) — inserting at 3 would push name into the score slot, so liftover()/
+    # bedtools_*() which key loci by column 3 (name) would see "0" for every
+    # row and collapse all loci to a single name.
     cols = df[["chr", "start", "stop", "name", "strand"]].copy()
-    cols.insert(3, "score", 0)
-    cols.columns = ["chr", "start", "stop", "name", "score", "strand"]
+    cols.insert(4, "score", 0)
     cols.to_csv(path, sep="\t", header=False, index=False)
 
 

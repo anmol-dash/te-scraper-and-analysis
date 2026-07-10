@@ -69,6 +69,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -84,6 +85,20 @@ DEFAULT_MATRIX = [
     ("MT2_Mm",  "mm10"),   # LTR (ERVL-MaLR), mouse — canonical family
     ("B2_Mm2",  "mm10"),   # SINE/B2, mouse
 ]
+
+# ── liftOver test targets: source assembly -> (multiassembly target, ortholog ──
+# species). Both have UCSC chains hosted at
+# goldenPath/<src>/liftOver/<src>To<Target>.over.chain.gz, auto-downloaded by
+# te_overlay.fetch_chain (needs network). Picked to be close relatives so the
+# real mapping rate is high (a healthy liftOver maps ~nearly all copies), which
+# is what lets us assert "liftOver actually ran and mapped >0" vs the degraded
+# no-chain path Stage 11 exercises by default.
+LIFTOVER_TARGETS = {
+    "hg38": ("hg19", "panTro6"),   # human: GRCh37 assembly + chimpanzee ortholog
+    "hg19": ("hg38", "panTro6"),
+    "mm10": ("mm39", "rn7"),       # mouse: mm39 assembly + rat ortholog
+    "mm39": ("mm10", "rn7"),
+}
 
 
 def _run(cmd, log, cwd=None, env=None):
@@ -476,6 +491,147 @@ def run_family_stage11(family, assembly, prepared, work, out_root, sdir, py,
             "log": str(log), "reports": str(reports)}
 
 
+def _selftest_overlay_helpers():
+    """Fast, no-network / no-liftOver sanity check of the shared te_overlay
+    helpers every liftOver script is built on (parse_named_paths, load_loci,
+    has_coords, write_bed). Catches an import break or helper regression even on
+    a node with no network and no liftOver binary, where the full liftOver test
+    can only SKIP. Returns (ok: bool, detail: str)."""
+    try:
+        import te_overlay as ov
+        assert ov.parse_named_paths(["hg19=/tmp/x.chain"]) == {"hg19": "/tmp/x.chain"}
+        assert ov.parse_named_paths(["/a/b/foo.over.chain"]) == \
+            {"foo.over": "/a/b/foo.over.chain"}
+        with tempfile.TemporaryDirectory() as td:
+            csv = Path(td) / "loci.csv"
+            pd.DataFrame({"genoName": ["chr1", "chr2"], "genoStart": [100, 500],
+                          "genoEnd": [200, 600], "repName": ["L1", "L2"]}
+                         ).to_csv(csv, index=False)
+            df = ov.load_loci(str(csv))
+            assert ov.has_coords(df), "has_coords False on a coord-bearing frame"
+            bed = Path(td) / "loci.bed"
+            ov.write_bed(df, bed)
+            first = bed.read_text().splitlines()[0].split("\t")
+            assert first[:4] == ["chr1", "100", "200", "L1"], first
+        return True, "parse_named_paths/load_loci/has_coords/write_bed OK"
+    except Exception as e:                                       # noqa: BLE001
+        return False, f"{type(e).__name__}: {e}"
+
+
+def _liftover_ran_and_mapped(csv_path, col_prefix):
+    """Inspect a per-copy CSV emitted by a liftOver script. Returns
+    (ran: bool, mapped: int): a `maps_<asm>` / `present_<sp>` column exists only
+    when liftOver actually ran against a chain, and its True count is how many
+    copies lifted. Absent column => the script took its degraded no-chain path."""
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception:
+        return False, 0
+    cols = [c for c in df.columns if c.startswith(col_prefix)]
+    if not cols:
+        return False, 0
+    return True, int(df[cols[0]].fillna(False).astype(bool).sum())
+
+
+def _liftover_skip_reason(log_path):
+    """Classify WHY a liftOver script degraded (rc==0 but nothing lifted) by
+    scanning its log for the honest-degradation messages te_overlay prints, so a
+    SKIP says *why* (no binary vs no network vs no coords) instead of being a
+    silent zero."""
+    try:
+        text = Path(log_path).read_text(errors="replace")
+    except Exception:
+        return "no log output"
+    if "not found" in text and "liftOver" in text:
+        return "liftOver binary not found (run with --container-sif or install liftOver)"
+    if "download failed" in text.lower():
+        return "chain download failed (no network to hgdownload.soe.ucsc.edu?)"
+    if "No chains available" in text:
+        return "no chains resolved"
+    if "lacks chr/start/stop" in text:
+        return "input CSV lacks coordinates"
+    return "liftOver did not run (see log)"
+
+
+def run_family_liftover(family, assembly, prepared, out_root, sdir, py, args, mlog):
+    """Exercise the liftOver scripts (run_multiassembly_liftover.py +
+    run_ortholog_insertion.py) against REAL UCSC chains — the path Stage 11 never
+    reaches because it passes no --target-assemblies/--species and so only runs
+    the degraded no-chain branch.
+
+    Requirements: the UCSC `liftOver` binary (ships in gameca.sif, so pass
+    --container-sif; otherwise it must be on PATH) and network access to
+    hgdownload.soe.ucsc.edu for the chain download (cached under
+    ~/.gameca_cache/chains). Missing either degrades to SKIP with the reason
+    logged — a network-isolated node is not a test failure. A hard FAIL (with the
+    log tail surfaced) is reserved for a real defect: the script exiting rc!=0,
+    or liftOver running against a chain yet mapping 0 copies.
+
+    Returns {"status": OK|FAILED|SKIP, "scripts": {name: {...}}}.
+    """
+    tag = f"{family}_{assembly}"
+    targets = LIFTOVER_TARGETS.get(assembly)
+    ldir = out_root / tag / "liftover"
+    ldir.mkdir(parents=True, exist_ok=True)
+    if not targets:
+        msg = f"  [{tag}] LIFTOVER SKIP — no chain targets defined for assembly {assembly}"
+        print(msg, flush=True); mlog.write(msg + "\n"); mlog.flush()
+        return {"status": "SKIP", "reason": f"no targets for {assembly}", "scripts": {}}
+    target_asm, species = targets
+
+    # (name, script, extra-args, per-copy CSV, column prefix proving liftOver ran)
+    jobs = [
+        ("multiassembly", "run_multiassembly_liftover.py",
+         ["--source-assembly", assembly, "--target-assemblies", target_asm],
+         "multiassembly_per_copy.csv", "maps_"),
+        ("ortholog", "run_ortholog_insertion.py",
+         ["--species", species],
+         "ortholog_per_copy.csv", "present_"),
+    ]
+    print(f"  [{tag}] running liftOver tests "
+          f"(multiassembly→{target_asm}, ortholog→{species}"
+          f"{', singularity' if args.container_sif else ''})...", flush=True)
+
+    scripts = {}
+    for name, script, extra, csv_name, prefix in jobs:
+        reports = ldir / name
+        reports.mkdir(parents=True, exist_ok=True)
+        log = ldir / f"{name}.log"
+        cmd = [py, str(sdir / script), "--input", str(prepared),
+               "--reports-dir", str(reports), "--family", family,
+               "--liftover-cmd", "liftOver"] + extra
+        cmd = _singularity_wrap(cmd, args.container_sif)
+        t0 = time.time()
+        with open(log, "w", buffering=1) as lf:
+            rc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT).returncode
+        dt = round(time.time() - t0, 1)
+
+        ran, mapped = _liftover_ran_and_mapped(reports / csv_name, prefix)
+        if rc != 0:
+            status, reason = "FAILED", f"exited rc={rc}"
+        elif ran and mapped > 0:
+            status, reason = "OK", f"{mapped} copies lifted"
+        elif ran and mapped == 0:
+            status, reason = "FAILED", "liftOver ran against a chain but mapped 0 copies"
+        else:
+            status, reason = "SKIP", _liftover_skip_reason(log)
+
+        scripts[name] = {"rc": rc, "status": status, "reason": reason,
+                         "mapped": mapped, "target": target_asm if name == "multiassembly"
+                         else species, "seconds": dt, "log": str(log)}
+        if status == "FAILED":
+            _surface_failure_tail(f"{tag}:{name}", log, mlog)
+        line = (f"  [{tag}] LIFTOVER {name:<13} {status:<7} "
+                f"— {reason} ({dt:.0f}s)")
+        print(line, flush=True); mlog.write(line + "\n")
+    mlog.flush()
+
+    statuses = {s["status"] for s in scripts.values()}
+    overall = "FAILED" if "FAILED" in statuses else \
+              ("OK" if statuses == {"OK"} else "SKIP")
+    return {"status": overall, "scripts": scripts}
+
+
 def _run_stage11_loop(family, assembly, prepared, reports, log, sdir, py,
                       skip_fold, args):
     """engine="loop": run_stage11_all.py's in-process subprocess loop."""
@@ -720,6 +876,14 @@ def main():
     p.add_argument("--stop-on-fail", action="store_true",
                    help="Abort the whole test on the first family failure "
                         "(default: keep going through the rest of the matrix).")
+    p.add_argument("--skip-liftover", action="store_true",
+                   help="Skip the dedicated liftOver tests (run_multiassembly_liftover.py "
+                        "+ run_ortholog_insertion.py against real UCSC chains). They need "
+                        "the UCSC liftOver binary (ships in gameca.sif — pass "
+                        "--container-sif) + network to hgdownload.soe.ucsc.edu; missing "
+                        "either is reported as SKIP, not a failure. On by default so the "
+                        "real liftOver path (not just Stage 11's degraded no-chain branch) "
+                        "is actually exercised.")
     p.add_argument("--stage11-engine", choices=["loop", "nextflow"], default="nextflow",
                    help="How to run the Stage 11 modules: 'nextflow' (default — "
                         "nextflow/post_alignment_analyses.nf, real per-module parallelism, "
@@ -790,6 +954,15 @@ def main():
         mlog.write("NOTE: expression numbers are SYNTHETIC test fixtures.\n")
         mlog.write("=" * 64 + "\n")
 
+        # Fast, always-on unit check of the shared te_overlay liftOver helpers
+        # (runs even when liftOver/network are absent and the full liftOver test
+        # can only SKIP). A failure here is a real code regression.
+        overlay_ok, overlay_detail = (True, "skipped") if args.skip_liftover \
+            else _selftest_overlay_helpers()
+        if not args.skip_liftover:
+            line = f"  [selftest] te_overlay helpers: {'OK' if overlay_ok else 'FAILED'} — {overlay_detail}"
+            print(line, flush=True); mlog.write(line + "\n"); mlog.flush()
+
         for family, assembly in matrix:
             tag = f"{family}_{assembly}"
             work = work_root / tag
@@ -809,6 +982,9 @@ def main():
                 res = run_family_stage11(family, assembly, prepared, work,
                                          out_root, sdir, py, args, mlog)
                 res.update(timings)
+                if not args.skip_liftover:
+                    res["liftover"] = run_family_liftover(
+                        family, assembly, prepared, out_root, sdir, py, args, mlog)
                 results.append(res)
             except Exception as e:
                 mlog.write(f"  [{tag}] EXCEPTION: {e}\n")
@@ -826,6 +1002,9 @@ def main():
         total_ok = sum(r.get("n_ok", 0) for r in results)
         total_fail = sum(r.get("n_fail", 0) for r in results)
         total_skip = sum(r.get("n_skip", 0) for r in results)
+        lo_ok = sum(1 for r in results if r.get("liftover", {}).get("status") == "OK")
+        lo_fail = sum(1 for r in results if r.get("liftover", {}).get("status") == "FAILED")
+        lo_skip = sum(1 for r in results if r.get("liftover", {}).get("status") == "SKIP")
 
         mlog.write(f"\n{'='*64}\nMASTER SUMMARY\n{'='*64}\n")
         for r in results:
@@ -836,6 +1015,18 @@ def main():
         mlog.write(f"\nFamilies: {fam_ok} ok / {fam_bad} problem (of {len(results)})\n")
         mlog.write(f"Modules:  {total_ok} ok / {total_fail} failed / "
                    f"{total_skip} skipped (across all families)\n")
+        if not args.skip_liftover:
+            mlog.write(f"liftOver: {lo_ok} ok / {lo_fail} failed / {lo_skip} skipped "
+                       f"(selftest {'OK' if overlay_ok else 'FAILED'})\n")
+            mlog.write(f"\n{'-'*64}\nLIFTOVER TESTS (real UCSC chains)\n{'-'*64}\n")
+            for r in results:
+                lo = r.get("liftover")
+                if not lo:
+                    continue
+                cells = "  ".join(
+                    f"{n}={s['status']}({s['mapped']}→{s['target']})"
+                    for n, s in lo.get("scripts", {}).items()) or lo.get("reason", "")
+                mlog.write(f"  {r['tag']:<22} {lo['status']:<7} {cells}\n")
 
         # ── Timing breakdown ────────────────────────────────────────────────
         # Retrieval (UCSC pull) was previously the only step with visible
@@ -871,6 +1062,11 @@ def main():
         "modules_ok": total_ok,
         "modules_failed": total_fail,
         "modules_skipped": total_skip,
+        "liftover_enabled": not args.skip_liftover,
+        "liftover_selftest_ok": overlay_ok,
+        "liftover_ok": lo_ok,
+        "liftover_failed": lo_fail,
+        "liftover_skipped": lo_skip,
         "results": results,
         "note": "expression values are synthetic test fixtures, not measurements",
     }
@@ -885,6 +1081,16 @@ def main():
               f"{'  ['+r['error']+']' if r.get('error') else ''}")
     print(f"\n  Families: {fam_ok} ok / {fam_bad} problem (of {len(results)})")
     print(f"  Modules:  {total_ok} ok / {total_fail} failed / {total_skip} skipped")
+    if not args.skip_liftover:
+        print(f"  liftOver: {lo_ok} ok / {lo_fail} failed / {lo_skip} skipped "
+              f"(helper selftest {'OK' if overlay_ok else 'FAILED'})")
+        for r in results:
+            lo = r.get("liftover")
+            if not lo:
+                continue
+            cells = "  ".join(f"{n}={s['status']}({s['mapped']})"
+                              for n, s in lo.get("scripts", {}).items()) or lo.get("reason", "")
+            print(f"               {r['tag']:<22} {lo['status']:<7} {cells}")
     print(f"\n  Timing (s):  {'family':<22} {'retrieval':>9} {'cluster':>8} "
           f"{'synexpr':>8} {'stage11':>8} {'excl_fold':>10}")
     for r in results:
@@ -916,7 +1122,10 @@ def main():
         except Exception as e:
             print(f"  WARNING: email notification failed: {e}")
 
-    sys.exit(1 if fam_bad else 0)
+    # A liftOver script erroring (rc!=0 or mapped-0) or the te_overlay helper
+    # selftest failing is a real regression → non-zero exit, same as a family
+    # failure. A SKIP (no liftOver binary / no network) is not counted.
+    sys.exit(1 if (fam_bad or lo_fail or not overlay_ok) else 0)
 
 
 if __name__ == "__main__":
