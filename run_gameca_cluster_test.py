@@ -256,6 +256,10 @@ def _containerized_nextflow_cmd(nf_args, container_sif, extra_binds):
     and broken conda out of the container.
     """
     runtime = shutil.which("singularity") or shutil.which("apptainer") or "singularity"
+    # Resolve the .sif to an absolute path: the launcher runs with cwd set to a
+    # writable output dir, so a relative "gameca.sif" would resolve there and not
+    # against the repo. (This process's cwd is still the repo dir here.)
+    container_sif = str(Path(container_sif).resolve())
     binds = {str(Path(b).resolve()) for b in extra_binds}
     for a in nf_args:
         p = Path(str(a))
