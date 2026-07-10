@@ -39,10 +39,21 @@ import numpy as np
 import te_overlay as ov
 
 
+# Known UCSC target assemblies for --target-assemblies (allow-list guarding
+# against typos before a chain download is attempted). Values are human-readable
+# labels only; fetch_chain builds the actual mm10ToMm39-style chain name. Covers
+# both human and mouse/rat so cross-species TE families (mm10/mm39) resolve
+# chains instead of skipping — the chains exist at
+# goldenPath/<src>/liftOver/<src>To<Target>.over.chain.gz.
 _ASSEMBLY_PRESETS = {
+    "hg38": "GRCh38",
     "hg19": "GRCh37",
     "t2t":  "T2T-CHM13 (hs1)",
     "hs1":  "T2T-CHM13 (hs1)",
+    "mm39": "GRCm39",
+    "mm10": "GRCm38",
+    "rn7":  "mRatBN7.2",
+    "rn6":  "RGSC 6.0",
 }
 
 
