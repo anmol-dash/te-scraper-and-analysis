@@ -675,6 +675,21 @@ def _python():
     return shutil.which("python3") or shutil.which("python") or sys.executable
 
 
+def _subenv():
+    """Environment for the spawned analysis generators.
+
+    On FIPS-enforcing clusters (e.g. pennhpc), the container's OpenSSL 3.x tries to
+    load a FIPS provider whose self-test fails, so *any* TLS call — the UCSC/RMSK
+    sequence/loci fetch — aborts the process with
+    `crypto/fips/fips.c: FATAL FIPS SELFTEST FAILURE`. Pointing OPENSSL_CONF at an
+    empty config stops the broken FIPS provider from loading (falls back to the
+    default provider), so HTTPS works. Respect a user-set OPENSSL_CONF if present.
+    """
+    env = os.environ.copy()
+    env.setdefault("OPENSSL_CONF", os.devnull)
+    return env
+
+
 def run_cross_family(args):
     """Drive run_line_sine_ltr_analysis.py — the master data-figure generator.
 
@@ -699,7 +714,7 @@ def run_cross_family(args):
     if args.max_loci:
         cmd += ["--max-loci", str(args.max_loci)]
     print("  RUN:", " ".join(cmd))
-    return subprocess.run(cmd).returncode == 0
+    return subprocess.run(cmd, env=_subenv()).returncode == 0
 
 
 def _csv_has_column(path, col):
@@ -758,7 +773,7 @@ def run_single_family(args):
     if cons and Path(cons).exists():
         cmd += ["--consensus-fasta", cons]
     print("  RUN:", " ".join(cmd))
-    return subprocess.run(cmd).returncode == 0
+    return subprocess.run(cmd, env=_subenv()).returncode == 0
 
 
 def print_manifest():
@@ -954,9 +969,12 @@ inputs — not fabricated), or `MANUAL` (no automated generator).
 - `ERROR: CSV must have a 'Seq' column` / `No Cluster column` — Stage 11 was handed
   the raw ultracombo. Ensure the cross-family run produced
   `reports8/stage11_iapltr1mm/iapltr1_mm_clustered.csv` first (needs genome/UCSC).
-- `FATAL FIPS SELFTEST FAILURE` + `conda-libmamba-solver (libicui18n.so.75)` — host
-  environment leaked into the container. Add `--cleanenv` to `singularity exec`
-  (and prefer `--genome-fa`/local `--rmsk-dir` to avoid the network altogether).
+- `FATAL FIPS SELFTEST FAILURE` on a TLS/HTTPS call — the container's OpenSSL loads
+  a broken FIPS provider. This script now sets `OPENSSL_CONF=/dev/null` for the
+  spawned generators (see `_subenv()`), which disables the FIPS provider so UCSC/RMSK
+  fetches work; `--cleanenv` alone does NOT fix it (it is not an env-var leak).
+  Providing `--genome-fa` + a local `--rmsk-dir` avoids the network altogether.
+  The `conda-libmamba-solver (libicui18n.so.75)` line is harmless container noise.
 
 ## No-fabrication policy
 

@@ -112,20 +112,59 @@ not silently assumed:
 - **Primers** are a CSV table (`06_primers/selected_primers_summary.csv`); the primer
   *figure* is `expression_plots/primer_expression` (primers × expression).
 
-## Regenerate
+## Inputs: which CSV goes where (important)
+
+The raw `*_ultracombo.csv` is loci coordinates + per-stage expression only — it has
+**no `Seq` and no `Cluster` column**. Two different consumers:
+
+- `--iapltr1-expr IAPLTR1_Mm_ultracombo.csv` — correct: the cross-family
+  generator fetches loci (RMSK) and sequences (genome/UCSC), clusters them, and
+  merges this expression. It writes a clustered CSV
+  `reports8/stage11_iapltr1mm/iapltr1_mm_clustered.csv`.
+- The Stage-11 worked example (`run_stage11_all.py`) then consumes **that clustered
+  CSV** (it needs `Seq`/`Cluster`). Passing the raw ultracombo straight to Stage 11
+  makes every sequence module fail with *"no Seq column"* — this script now detects
+  that and uses the clustered CSV instead (or skips cleanly).
+
+So a genome FASTA (or working UCSC access) is required to produce sequences; the raw
+expression CSV alone cannot drive the sequence/cluster modules.
+
+## Regenerate (cluster)
+
+Run inside the container with `--cleanenv` so the host conda/OpenSSL environment does
+not leak in (a host-env leak triggers `FATAL FIPS SELFTEST FAILURE` on the first
+HTTPS call and kills the cross-family run):
 
 ```bash
-# schematics + README only (no cluster data needed)
-python make_report_figures.py
-
-# everything, prototype-first (real inputs; nothing fabricated)
-python make_report_figures.py --data \
-    --input IAPLTR1_Mm_loci.csv --iapltr1-expr IAPLTR1_Mm_ultracombo.csv \
-    --genome-fa ~/te_analysis/mm10.fa --build mm10
+bsub -J gameca_figs -M 12000 -n 4 -o gameca_figs.%J.log \
+  "cd ~/anmol/te-scraper-and-analysis && singularity exec --cleanenv \
+   -B /home/amodz/anmol:/home/amodz/anmol gameca.sif \
+   python make_report_figures.py --data \
+     --iapltr1-expr /home/amodz/anmol/IAPLTR1_Mm_ultracombo.csv \
+     --l1mdt-expr /home/amodz/anmol/L1Md_T_ultracombo.csv \
+     --b1mus2-expr /home/amodz/anmol/B1_Mus2_ultracombo.csv \
+     --genome-fa /home/amodz/anmol/mm10_genome/mm10.fa \
+     --rmsk-dir /home/amodz/te_analysis/rmsk --build mm10"
 ```
+
+`--genome-fa` + a populated `--rmsk-dir` keep the whole run offline (no UCSC/RMSK
+HTTPS), which also sidesteps the FIPS issue entirely. Drop `--genome-fa` only if
+UCSC access works from the node.
 
 The run prints a **manifest** marking each figure `MADE`, `MISSING` (needs real
 inputs — not fabricated), or `MANUAL` (no automated generator).
+
+## Troubleshooting
+
+- `ERROR: CSV must have a 'Seq' column` / `No Cluster column` — Stage 11 was handed
+  the raw ultracombo. Ensure the cross-family run produced
+  `reports8/stage11_iapltr1mm/iapltr1_mm_clustered.csv` first (needs genome/UCSC).
+- `FATAL FIPS SELFTEST FAILURE` on a TLS/HTTPS call — the container's OpenSSL loads
+  a broken FIPS provider. This script now sets `OPENSSL_CONF=/dev/null` for the
+  spawned generators (see `_subenv()`), which disables the FIPS provider so UCSC/RMSK
+  fetches work; `--cleanenv` alone does NOT fix it (it is not an env-var leak).
+  Providing `--genome-fa` + a local `--rmsk-dir` avoids the network altogether.
+  The `conda-libmamba-solver (libicui18n.so.75)` line is harmless container noise.
 
 ## No-fabrication policy
 
