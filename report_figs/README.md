@@ -159,12 +159,18 @@ inputs — not fabricated), or `MANUAL` (no automated generator).
 - `ERROR: CSV must have a 'Seq' column` / `No Cluster column` — Stage 11 was handed
   the raw ultracombo. Ensure the cross-family run produced
   `reports8/stage11_iapltr1mm/iapltr1_mm_clustered.csv` first (needs genome/UCSC).
-- `FATAL FIPS SELFTEST FAILURE` on a TLS/HTTPS call — the container's OpenSSL loads
-  a broken FIPS provider. This script now sets `OPENSSL_CONF=/dev/null` for the
-  spawned generators (see `_subenv()`), which disables the FIPS provider so UCSC/RMSK
-  fetches work; `--cleanenv` alone does NOT fix it (it is not an env-var leak).
-  Providing `--genome-fa` + a local `--rmsk-dir` avoids the network altogether.
-  The `conda-libmamba-solver (libicui18n.so.75)` line is harmless container noise.
+- `FATAL FIPS SELFTEST FAILURE` on a TLS/HTTPS call — the container's crypto enters
+  a broken FIPS mode and aborts on *any* network call (the UCSC/RMSK fetch). On
+  pennhpc this is enforced below the Python layer: neither `--cleanenv` nor the
+  `OPENSSL_CONF=/dev/null` that `_subenv()` sets is enough. **The reliable fix is to
+  make zero network calls** — run fully offline with a local genome and local RMSK:
+    1. Once, on the login node, put the RMSK table where the generator looks:
+       `mkdir -p ~/te_analysis/rmsk && wget -O ~/te_analysis/rmsk/rmsk_mm10.txt.gz`
+       `https://hgdownload.soe.ucsc.edu/goldenPath/mm10/database/rmsk.txt.gz`
+    2. Submit with `--genome-fa <local mm10.fa> --rmsk-dir ~/te_analysis/rmsk`.
+  With both present, loci come from `rmsk_mm10.txt.gz` and sequences from the FASTA,
+  so no TLS is ever opened. The `conda-libmamba-solver (libicui18n.so.75)` line is
+  harmless container noise.
 
 ## No-fabrication policy
 
