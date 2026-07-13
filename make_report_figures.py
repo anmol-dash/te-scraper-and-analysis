@@ -702,24 +702,61 @@ def run_cross_family(args):
     return subprocess.run(cmd).returncode == 0
 
 
+def _csv_has_column(path, col):
+    """True if CSV at `path` has column `col`. Reads only the header line."""
+    try:
+        with open(path) as fh:
+            return col in fh.readline().rstrip("\n").split(",")
+    except OSError:
+        return False
+
+
+def _clustered_csv_for(args):
+    """The clustered, sequence-bearing CSV the cross-family generator writes for
+    the prototype family — e.g. reports8/stage11_iapltr1mm/iapltr1_mm_clustered.csv
+    (dir uses family.lower() without underscores; file keeps underscores)."""
+    fam = args.family
+    sub = f"stage11_{fam.lower().replace('_', '')}"
+    name = f"{fam.lower().replace('-', '_')}_clustered.csv"
+    return Path(args.reports_dir) / sub / name
+
+
 def run_single_family(args):
-    """Optional worked example: run all Stage-11 modules on one loci CSV via
-    run_stage11_all.py. Figures land in --reports-dir (default the repo root so
-    the report's root-relative figorbox references resolve)."""
+    """Worked example: run the full Stage-11 module set on the prototype family.
+
+    IMPORTANT: run_stage11_all.py needs a CLUSTERED, sequence-bearing CSV (with a
+    'Seq' column, and 'Cluster' for the per-cluster modules) — NOT a raw
+    *_ultracombo.csv, which holds only loci coordinates + per-stage expression and
+    has neither column. The core clustering + sequence fetch is done by
+    run_cross_family() first; it writes <reports-dir>/stage11_<fam>/<fam>_clustered.csv.
+    Prefer that. If no sequence-bearing CSV is available, skip with a clear message
+    instead of letting every sequence/cluster module fail with 'no Seq column'."""
     script = HERE / "run_stage11_all.py"
     if not script.exists():
         print(f"  SKIP single-family: {script} not found")
         return False
-    if not args.input or not Path(args.input).exists():
-        print(f"  SKIP single-family: --input not provided or missing "
-              f"({args.input!r})")
+
+    clustered = _clustered_csv_for(args)
+    if _csv_has_column(clustered, "Seq"):
+        input_csv = str(clustered)
+        print(f"  single-family: using clustered CSV from the core run ({clustered})")
+    elif args.input and _csv_has_column(args.input, "Seq"):
+        input_csv = args.input
+    else:
+        print("  SKIP single-family: no sequence-bearing CSV available. "
+              "run_stage11_all.py needs a clustered CSV with a 'Seq' column "
+              "(produced by the core/cross-family run); the raw *_ultracombo.csv "
+              "(loci + expression only) cannot drive the sequence modules.")
         return False
+
     out = args.single_reports_dir or "."
-    cmd = [_python(), str(script), "--input", args.input,
+    cmd = [_python(), str(script), "--input", input_csv,
            "--family", args.family, "--assembly", args.assembly,
            "--reports-dir", out]
-    if args.consensus_fasta:
-        cmd += ["--consensus-fasta", args.consensus_fasta]
+    # reuse the consensus FASTA the cross-family run emitted, if present
+    cons = args.consensus_fasta or str(clustered.parent / "all_cluster_consensuses.fa")
+    if cons and Path(cons).exists():
+        cmd += ["--consensus-fasta", cons]
     print("  RUN:", " ".join(cmd))
     return subprocess.run(cmd).returncode == 0
 
@@ -870,20 +907,56 @@ not silently assumed:
 - **Primers** are a CSV table (`06_primers/selected_primers_summary.csv`); the primer
   *figure* is `expression_plots/primer_expression` (primers × expression).
 
-## Regenerate
+## Inputs: which CSV goes where (important)
+
+The raw `*_ultracombo.csv` is loci coordinates + per-stage expression only — it has
+**no `Seq` and no `Cluster` column**. Two different consumers:
+
+- `--iapltr1-expr {PROTOTYPE_FAMILY}_ultracombo.csv` — correct: the cross-family
+  generator fetches loci (RMSK) and sequences (genome/UCSC), clusters them, and
+  merges this expression. It writes a clustered CSV
+  `reports8/stage11_iapltr1mm/iapltr1_mm_clustered.csv`.
+- The Stage-11 worked example (`run_stage11_all.py`) then consumes **that clustered
+  CSV** (it needs `Seq`/`Cluster`). Passing the raw ultracombo straight to Stage 11
+  makes every sequence module fail with *"no Seq column"* — this script now detects
+  that and uses the clustered CSV instead (or skips cleanly).
+
+So a genome FASTA (or working UCSC access) is required to produce sequences; the raw
+expression CSV alone cannot drive the sequence/cluster modules.
+
+## Regenerate (cluster)
+
+Run inside the container with `--cleanenv` so the host conda/OpenSSL environment does
+not leak in (a host-env leak triggers `FATAL FIPS SELFTEST FAILURE` on the first
+HTTPS call and kills the cross-family run):
 
 ```bash
-# schematics + README only (no cluster data needed)
-python make_report_figures.py
-
-# everything, prototype-first (real inputs; nothing fabricated)
-python make_report_figures.py --data \\
-    --input {PROTOTYPE_FAMILY}_loci.csv --iapltr1-expr IAPLTR1_Mm_ultracombo.csv \\
-    --genome-fa ~/te_analysis/mm10.fa --build {PROTOTYPE_ASSEMBLY}
+bsub -J gameca_figs -M 12000 -n 4 -o gameca_figs.%J.log \\
+  "cd ~/anmol/te-scraper-and-analysis && singularity exec --cleanenv \\
+   -B /home/amodz/anmol:/home/amodz/anmol gameca.sif \\
+   python make_report_figures.py --data \\
+     --iapltr1-expr /home/amodz/anmol/IAPLTR1_Mm_ultracombo.csv \\
+     --l1mdt-expr /home/amodz/anmol/L1Md_T_ultracombo.csv \\
+     --b1mus2-expr /home/amodz/anmol/B1_Mus2_ultracombo.csv \\
+     --genome-fa /home/amodz/anmol/mm10_genome/mm10.fa \\
+     --rmsk-dir /home/amodz/te_analysis/rmsk --build {PROTOTYPE_ASSEMBLY}"
 ```
+
+`--genome-fa` + a populated `--rmsk-dir` keep the whole run offline (no UCSC/RMSK
+HTTPS), which also sidesteps the FIPS issue entirely. Drop `--genome-fa` only if
+UCSC access works from the node.
 
 The run prints a **manifest** marking each figure `MADE`, `MISSING` (needs real
 inputs — not fabricated), or `MANUAL` (no automated generator).
+
+## Troubleshooting
+
+- `ERROR: CSV must have a 'Seq' column` / `No Cluster column` — Stage 11 was handed
+  the raw ultracombo. Ensure the cross-family run produced
+  `reports8/stage11_iapltr1mm/iapltr1_mm_clustered.csv` first (needs genome/UCSC).
+- `FATAL FIPS SELFTEST FAILURE` + `conda-libmamba-solver (libicui18n.so.75)` — host
+  environment leaked into the container. Add `--cleanenv` to `singularity exec`
+  (and prefer `--genome-fa`/local `--rmsk-dir` to avoid the network altogether).
 
 ## No-fabrication policy
 
@@ -946,8 +1019,10 @@ def main():
     if args.data:
         print("\nPhase 2: data figures (real analysis scripts)")
         run_cross_family(args)
-        if args.input:
-            run_single_family(args)
+        # The worked example consumes the clustered CSV the cross-family run just
+        # wrote (not --input), so attempt it whenever --data is set; it self-skips
+        # cleanly if no sequence-bearing CSV exists.
+        run_single_family(args)
     else:
         print("\nPhase 2 skipped (pass --data with real inputs to generate the "
               "data figures).")
