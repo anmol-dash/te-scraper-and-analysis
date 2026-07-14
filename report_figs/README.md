@@ -159,18 +159,16 @@ inputs — not fabricated), or `MANUAL` (no automated generator).
 - `ERROR: CSV must have a 'Seq' column` / `No Cluster column` — Stage 11 was handed
   the raw ultracombo. Ensure the cross-family run produced
   `reports8/stage11_iapltr1mm/iapltr1_mm_clustered.csv` first (needs genome/UCSC).
-- `FATAL FIPS SELFTEST FAILURE` on a TLS/HTTPS call — the container's crypto enters
-  a broken FIPS mode and aborts on *any* network call (the UCSC/RMSK fetch). On
-  pennhpc this is enforced below the Python layer: neither `--cleanenv` nor the
-  `OPENSSL_CONF=/dev/null` that `_subenv()` sets is enough. **The reliable fix is to
-  make zero network calls** — run fully offline with a local genome and local RMSK:
-    1. Once, on the login node, put the RMSK table where the generator looks:
-       `mkdir -p ~/te_analysis/rmsk && wget -O ~/te_analysis/rmsk/rmsk_mm10.txt.gz`
-       `https://hgdownload.soe.ucsc.edu/goldenPath/mm10/database/rmsk.txt.gz`
-    2. Submit with `--genome-fa <local mm10.fa> --rmsk-dir ~/te_analysis/rmsk`.
-  With both present, loci come from `rmsk_mm10.txt.gz` and sequences from the FASTA,
-  so no TLS is ever opened. The `conda-libmamba-solver (libicui18n.so.75)` line is
-  harmless container noise.
+- `FATAL FIPS SELFTEST FAILURE` (exit 134 / SIGABRT) — the root cause is
+  **`import pysam`**: on FIPS-enforcing hosts (pennhpc) the libcrypto bundled in the
+  pysam/htslib wheel fails its FIPS self-test and calls `abort()` at import, which
+  `try/except ImportError` cannot catch, so the generator dies before it fetches
+  anything. It is NOT a TLS/env-leak issue — `curl` and Python `ssl` work fine in the
+  container; `--cleanenv` and `OPENSSL_CONF` do not help because pysam's crypto
+  ignores them. **Fix:** `TE_NO_PYSAM=1`, which `_subenv()` sets for the spawned
+  generators — te_prep then skips pysam and uses its pure-Python FASTA extraction
+  (`extract_sequences_fasta`). Loci/sequence fetches still use `curl`, which works.
+  The `conda-libmamba-solver (libicui18n.so.75)` line is harmless container noise.
 
 ## No-fabrication policy
 

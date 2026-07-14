@@ -53,12 +53,20 @@ except ImportError:
 # requests, threading, and ThreadPoolExecutor are imported lazily inside
 # fetch_sequences_ucsc() so the HPC can run te_prep.py without them.
 
-# Optional pysam for fast indexed FASTA access
-try:
-    import pysam
-    _PYSAM = True
-except ImportError:
+# Optional pysam for fast indexed FASTA access.
+# On FIPS-enforcing hosts (e.g. pennhpc) the libcrypto bundled inside the
+# pysam/htslib wheel fails its FIPS self-test and calls abort() *at import* —
+# a SIGABRT that `try/except ImportError` cannot catch, killing the whole
+# process before any analysis runs. Setting TE_NO_PYSAM=1 skips the import
+# entirely; extract_sequences() then uses the pure-Python fallback.
+if os.environ.get("TE_NO_PYSAM"):
     _PYSAM = False
+else:
+    try:
+        import pysam
+        _PYSAM = True
+    except ImportError:
+        _PYSAM = False
 
 # ═══════════════════════════════════════════════════════════════════════════
 # PATHS (all overridable via CLI args or environment variables)
