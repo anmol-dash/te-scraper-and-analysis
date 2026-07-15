@@ -33,6 +33,7 @@ Usage:
       --family L1Md_T --reports-dir reports8/stage11_l1mdt
 """
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -71,6 +72,37 @@ def _score(ref, lab):
     return ari_all, ami_all, ari_core
 
 
+def _resolve_reference(args):
+    """Reference (n_neighbors, divisor) the pipeline's search actually accepted.
+
+    Explicit flags win; otherwise read cache_<family>_meta.json from the core run.
+    The search is adaptive over divisors 5..15 and n_neighbors [15, 30], so any
+    hardcoded default is wrong for some family: scoring ARI against a partition
+    the pipeline never chose measures nothing. Fail loudly instead of guessing.
+    """
+    if args.ref_neighbors is not None and args.divisor is not None:
+        return args.ref_neighbors, args.divisor, "explicit flags"
+
+    meta_path = Path(args.pipeline_meta) if args.pipeline_meta else (
+        Path(args.reports_dir).resolve().parent / f"cache_{args.family.lower()}_meta.json")
+    if not meta_path.exists():
+        sys.exit(
+            f"FATAL: no reference config. {meta_path} not found, and "
+            f"--ref-neighbors/--divisor were not both given.\n"
+            f"The pipeline's clustering search is adaptive, so this script cannot "
+            f"assume one. Point --pipeline-meta at the core run's "
+            f"cache_<family>_meta.json, or pass both flags explicitly.")
+
+    meta = json.loads(meta_path.read_text())
+    missing = [k for k in ("n_neighbors", "divisor") if k not in meta]
+    if missing:
+        sys.exit(f"FATAL: {meta_path} lacks {missing}; pass --ref-neighbors/--divisor.")
+
+    nn  = args.ref_neighbors if args.ref_neighbors is not None else int(meta["n_neighbors"])
+    div = args.divisor       if args.divisor       is not None else int(meta["divisor"])
+    return nn, div, f"from {meta_path.name}"
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -80,11 +112,19 @@ def main():
     p.add_argument("--kmers", type=int, nargs="+", default=[5, 6, 7])
     p.add_argument("--neighbors", type=int, nargs="+", default=[15, 30, 50])
     p.add_argument("--ref-kmer", type=int, default=6,
-                   help="k accepted by the pipeline's search (reference).")
-    p.add_argument("--ref-neighbors", type=int, default=30,
-                   help="n_neighbors accepted by the pipeline's search (reference).")
-    p.add_argument("--divisor", type=int, default=5,
-                   help="min_cluster_size = floor(N/divisor), as the pipeline does.")
+                   help="k accepted by the pipeline's search (reference). The search "
+                        "does not sweep k, so 6 is the pipeline's fixed value.")
+    p.add_argument("--ref-neighbors", type=int, default=None,
+                   help="n_neighbors accepted by the pipeline's search (reference). "
+                        "Default: read from --pipeline-meta. The pipeline's search is "
+                        "adaptive, so there is no correct constant to fall back on.")
+    p.add_argument("--divisor", type=int, default=None,
+                   help="min_cluster_size = floor(N/divisor), as the pipeline does. "
+                        "Default: read from --pipeline-meta.")
+    p.add_argument("--pipeline-meta", default=None,
+                   help="cache_<family>_meta.json from the core run, holding the "
+                        "divisor/n_neighbors its adaptive search accepted. Default: "
+                        "look beside the reports dir's parent.")
     p.add_argument("--max-loci", type=int, default=None,
                    help="Subsample for a faster sweep (sampling is seeded).")
     p.add_argument("--seed", type=int, default=42)
@@ -101,14 +141,19 @@ def main():
     if args.max_loci and len(df) > args.max_loci:
         df = df.sample(args.max_loci, random_state=args.seed).reset_index(drop=True)
 
+    ref_nn, divisor, ref_src = _resolve_reference(args)
+
     n = len(df)
-    mcs = max(2, n // args.divisor)
+    mcs = max(2, n // divisor)
     print(f"=== CLUSTER VALIDATION ({args.family}) ===")
-    print(f"  {n:,} loci | min_cluster_size = N/{args.divisor} = {mcs}")
-    print(f"  reference config: k={args.ref_kmer}, n_neighbors={args.ref_neighbors}")
+    print(f"  {n:,} loci | min_cluster_size = N/{divisor} = {mcs}")
+    print(f"  reference config: k={args.ref_kmer}, n_neighbors={ref_nn}  [{ref_src}]")
+    if ref_nn not in args.neighbors:
+        print(f"  WARNING: reference n_neighbors={ref_nn} is not in the sweep grid "
+              f"{args.neighbors}; the ARI=1.0 self-comparison cell will be absent.")
 
     # Reference partition = the configuration the pipeline's search accepted.
-    ref = _labels_for(df, args.ref_kmer, args.ref_neighbors, mcs, args.seed)
+    ref = _labels_for(df, args.ref_kmer, ref_nn, mcs, args.seed)
     ref_noise = float((ref == -1).mean())
     print(f"  reference: {len(set(ref[ref != -1]))} clusters, "
           f"noise {ref_noise*100:.1f}%")
@@ -116,7 +161,7 @@ def main():
     rows = []
     for k in args.kmers:
         for nn in args.neighbors:
-            is_ref = (k == args.ref_kmer and nn == args.ref_neighbors)
+            is_ref = (k == args.ref_kmer and nn == ref_nn)
             lab = ref if is_ref else _labels_for(df, k, nn, mcs, args.seed)
             ari_all, ami_all, ari_core = _score(ref, lab)
             rows.append(dict(
@@ -179,7 +224,7 @@ def main():
         fh.write(f"\\providecommand{{\\cvNLoci}}{{{n:,}}}\n")
         fh.write(f"\\providecommand{{\\cvNConfigs}}{{{len(res)}}}\n")
         fh.write(f"\\providecommand{{\\cvRefKmer}}{{{args.ref_kmer}}}\n")
-        fh.write(f"\\providecommand{{\\cvRefNeighbors}}{{{args.ref_neighbors}}}\n")
+        fh.write(f"\\providecommand{{\\cvRefNeighbors}}{{{ref_nn}}}\n")
         fh.write(f"\\providecommand{{\\cvNoisePct}}{{{ref_noise*100:.1f}}}\n")
         fh.write(f"\\providecommand{{\\cvNoiseMinPct}}{{{res['noise_frac'].min()*100:.1f}}}\n")
         fh.write(f"\\providecommand{{\\cvNoiseMaxPct}}{{{res['noise_frac'].max()*100:.1f}}}\n")
