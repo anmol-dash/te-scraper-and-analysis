@@ -39,6 +39,7 @@ Ying Jin, Oliver~H. Tam, Eric Paniagua, and Molly Hammell.
 \newblock {TEtranscripts}: a package for including transposable elements in
   differential expression analysis of {RNA-seq} datasets.
 \newblock \emph{Bioinformatics}, 31\penalty0 (22):\penalty0 3593--3599, 2015.
+\newblock \doi{10.1093/bioinformatics/btv422}.
 
 \bibitem[Bendall et~al.(2019)Bendall, de~Mulder, I{\~n}iguez, Lecanda-Sánchez,
   Pérez-Losada, Ostrowski, Jones, Mulder, Reyes-Terán, Crandall, Ormsby, and
@@ -51,6 +52,7 @@ Matthew~L. Bendall, Miguel de~Mulder, Luis~P. I{\~n}iguez, Aarón
   estimation of transposable element expression.
 \newblock \emph{PLoS Computational Biology}, 15\penalty0 (9):\penalty0
   e1006453, 2019.
+\newblock \doi{10.1371/journal.pcbi.1006453}.
 
 \bibitem[Di~Tommaso et~al.(2017)Di~Tommaso, Chatzou, Floden, Barja, Palumbo,
   and Notredame]{ditommaso2017}
@@ -114,6 +116,7 @@ Jiangping He, Isaac~A. Babarinde, Li~Sun, Shuyang Xu, Ruhai Chen, Junjie Shi,
   heterogeneity during development at the single-cell level with a processing
   pipeline {scTE}.
 \newblock \emph{Nature Communications}, 12:\penalty0 1456, 2021.
+\newblock \doi{10.1038/s41467-021-21808-x}.
 
 \bibitem[Tokuyama et~al.(2018)Tokuyama, Kong, Song, Jayewickreme, Kang, and
   Iwasaki]{tokuyama2018ervmap}
@@ -123,6 +126,7 @@ Maria Tokuyama, Yong Kong, Eric Song, Teshika Jayewickreme, Insoo Kang, and
   endogenous retroviruses.
 \newblock \emph{Proceedings of the National Academy of Sciences}, 115\penalty0
   (50):\penalty0 12565--12572, 2018.
+\newblock \doi{10.1073/pnas.1814589115}.
 
 \bibitem[{The Galaxy Community}(2022)]{galaxy2022}
 {The Galaxy Community}.

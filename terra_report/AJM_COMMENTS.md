@@ -66,3 +66,27 @@ the introduction, and has its own results subsection (§2.6).
 3. **C28 / C130** — Vamshi's input on positioning and his sections.
 4. **C2** — run `run_cluster_validation.py` on the L1Md_T clustered CSV to populate the sweep numbers (script written; needs the real input). Consensus-alignment cross-check still outstanding.
 5. **Figures** — the data-figure files still need to be generated; see `README.md`.
+
+---
+
+## Citation audit (all references validated against DOI registries)
+
+Every reference cited by `terra_report.tex` was checked programmatically against the
+**Crossref** registry (and **DataCite** for the arXiv preprint), comparing title, first author,
+journal, volume, pages and year against the registrar's own record. Verified July 2026.
+
+**Result: 31/31 cited references are correct.** Each now carries its verified DOI in
+`references.bib`, so any reviewer can resolve them.
+
+Two entries are legitimate special cases, not errors:
+
+| Entry | Note |
+|---|---|
+| `pedregosa2011` (scikit-learn) | JMLR does not register DOIs. Canonical citation JMLR 12:2825-2830 (2011), verified against jmlr.org citation metadata. |
+| `mcinnes2018umap` (UMAP) | arXiv preprint. Its DOI (`10.48550/arXiv.1802.03426`) is registered with **DataCite**, not Crossref, so a Crossref lookup 404s by design. Verified via the arXiv API and DataCite: McInnes, Healy, Melville, 2018. |
+
+Beware two traps found during the audit, in case anyone re-runs this check: a naive title search
+matches **Faculty Opinions** post-publication reviews and journal **Corrections** whose titles
+echo the original. For example a title search for Lander 2001 returns the *Correction*
+(Nature 412:565-566), not the paper (Nature **409**:860-921, doi:10.1038/35057062), and Galaxy
+2022 returns its Correction rather than NAR **50**:W345-W351. Always resolve by DOI.
