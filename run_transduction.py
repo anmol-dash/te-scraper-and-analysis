@@ -87,6 +87,18 @@ def kmers(seq, k):
     return {seq[i:i+k] for i in range(len(seq) - k + 1) if "N" not in seq[i:i+k]}
 
 
+def is_low_complexity(km, max_base_frac):
+    """True for homopolymer-ish k-mers (poly-A tail, A-rich linker).
+
+    These carry no lineage information but survive the consensus subtraction,
+    because consensus_of() is positional over unaligned tails and so rarely
+    places the poly-A run at a fixed offset. Left in, a single poly-A k-mer is
+    shared by nearly every copy: it fuses the family into one component and its
+    posting list expands to O(n^2) pairs.
+    """
+    return max(km.count(b) for b in "ACGT") >= max_base_frac * len(km)
+
+
 def parse_args():
     p = argparse.ArgumentParser(
         description="3' transduction detection", epilog=__doc__,
@@ -98,6 +110,25 @@ def parse_args():
     p.add_argument("--kmer", type=int, default=12)
     p.add_argument("--min-shared", type=int, default=3,
                    help="Min shared transduced k-mers to link two copies")
+    p.add_argument("--max-base-frac", type=float, default=0.8,
+                   help="Drop transduced k-mers where one base is >= this fraction "
+                        "(poly-A tail / A-rich linker); they are not lineage markers")
+    p.add_argument("--max-kmer-copies", type=int, default=0,
+                   help="Explicit cap on how many copies may carry a transduced k-mer "
+                        "before it is treated as family background. 0 => derive from "
+                        "--max-kmer-frac / --kmer-cap-floor")
+    p.add_argument("--max-kmer-frac", type=float, default=0.02,
+                   help="A k-mer carried by more than this fraction of copies is family "
+                        "background, not a lineage marker. This is the k-mer-based "
+                        "backstop for consensus_of() being positional over unaligned "
+                        "tails: variable poly-A length shifts the element body to a "
+                        "different offset per copy, so body k-mers survive the consensus "
+                        "subtraction and would otherwise fuse the whole family.")
+    p.add_argument("--kmer-cap-floor", type=int, default=50,
+                   help="Lower bound for the derived cap, so small families are not "
+                        "over-filtered")
+    p.add_argument("--heatmap-max", type=int, default=200,
+                   help="Max lineage copies drawn in the shared-k-mer heatmap")
     p.add_argument("--flank-col", default="",
                    help="Column holding downstream genomic flank (else 3' of Seq)")
     return p.parse_args()
@@ -157,19 +188,49 @@ def main():
     def union(a, b):
         parent[find(a)] = find(b)
 
-    shared_mat = np.zeros((n, n), dtype=int)
-    for i in range(n):
-        for j in range(i + 1, n):
-            sh = len(trans_kmers[i] & trans_kmers[j])
-            shared_mat[i, j] = shared_mat[j, i] = sh
-            if sh >= args.min_shared:
-                union(i, j)
+    # Invert transduced k-mers to kmer -> copies. Only copies that share at
+    # least one k-mer can ever reach --min-shared, so pair counting runs over
+    # posting lists rather than all n^2 pairs.
+    postings = defaultdict(list)
+    n_lowc = 0
+    for i, tk in enumerate(trans_kmers):
+        for km in tk:
+            if is_low_complexity(km, args.max_base_frac):
+                n_lowc += 1
+                continue
+            postings[km].append(i)
+    _pp(f"  dropped {n_lowc:,} low-complexity k-mer instances "
+        f"(>= {args.max_base_frac:.0%} one base)")
+
+    # A k-mer carried by a large share of the family is consensus-like residue,
+    # not a lineage marker; its posting list is quadratic to expand and links
+    # everything into one component. Drop it.
+    if args.max_kmer_copies > 0:
+        max_copies = args.max_kmer_copies
+    else:
+        max_copies = max(args.kmer_cap_floor, int(round(n * args.max_kmer_frac)))
+    informative = {km: ids for km, ids in postings.items() if 2 <= len(ids) <= max_copies}
+    _pp(f"  {len(postings):,} transduced k-mers; {len(informative):,} informative "
+        f"(shared by 2..{max_copies:,} copies)")
+
+    pair_counts = defaultdict(int)
+    for ids in informative.values():
+        for a in range(len(ids)):
+            for b in range(a + 1, len(ids)):
+                pair_counts[(ids[a], ids[b])] += 1
+    _pp(f"  {len(pair_counts):,} candidate pairs share >= 1 transduced k-mer")
+
+    linked = [p for p, c in pair_counts.items() if c >= args.min_shared]
+    for i, j in linked:
+        union(i, j)
+    _pp(f"  {len(linked):,} pairs linked at >= {args.min_shared} shared k-mers")
 
     groups = defaultdict(list)
     for i in range(n):
         groups[find(i)].append(i)
     lineages = [g for g in groups.values() if len(g) >= 2]
     lineages.sort(key=len, reverse=True)
+    n_in_lineage_all = sum(len(g) for g in lineages)
 
     df_out = df.copy()
     df_out["label"] = labels
@@ -196,10 +257,28 @@ def main():
         axes[0].text(0.5, 0.5, "no multi-copy lineages\n(shared 3' tails)",
                      ha="center", va="center", transform=axes[0].transAxes, color="gray")
         axes[0].set_title("Lineage sizes", fontweight="bold")
-    im = axes[1].imshow(shared_mat, cmap="magma", aspect="auto")
-    axes[1].set_title("Shared transduced k-mers", fontweight="bold")
-    axes[1].set_xlabel("copy"); axes[1].set_ylabel("copy")
-    plt.colorbar(im, ax=axes[1], shrink=0.8, label="shared k-mers")
+    # Heatmap over lineage members only, largest lineage first. At full family
+    # size an n-by-n image is neither renderable nor legible; the informative
+    # block is the copies that actually got linked.
+    hm_idx = [i for g in lineages for i in g][:args.heatmap_max]
+    if hm_idx:
+        m = len(hm_idx)
+        shared_mat = np.zeros((m, m), dtype=np.int32)
+        for a in range(m):
+            ka = trans_kmers[hm_idx[a]]
+            for b in range(a + 1, m):
+                sh = len(ka & trans_kmers[hm_idx[b]])
+                shared_mat[a, b] = shared_mat[b, a] = sh
+        im = axes[1].imshow(shared_mat, cmap="magma", aspect="auto")
+        plt.colorbar(im, ax=axes[1], shrink=0.8, label="shared k-mers")
+        shown = f"{m} of {n_in_lineage_all}" if n_in_lineage_all > m else f"{m}"
+        axes[1].set_title(f"Shared transduced k-mers\n({shown} lineage copies)",
+                          fontweight="bold")
+        axes[1].set_xlabel("copy"); axes[1].set_ylabel("copy")
+    else:
+        axes[1].text(0.5, 0.5, "no linked copies to compare",
+                     ha="center", va="center", transform=axes[1].transAxes, color="gray")
+        axes[1].set_title("Shared transduced k-mers", fontweight="bold")
     for ax in (axes[0],):
         ax.spines[["top", "right"]].set_visible(False)
     fig.suptitle(f"{args.family} --- 3' transduction lineages", fontweight="bold", y=1.02)
@@ -226,7 +305,7 @@ def main():
     # ── measured values ──
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     largest = len(lineages[0]) if lineages else 0
-    n_in_lineage = sum(len(g) for g in lineages)
+    n_in_lineage = n_in_lineage_all
     tex = [
         "% Auto-generated by run_transduction.py", f"% {ts}", "",
         rf"\providecommand{{\transFamily}}{{{_texesc(args.family)}}}",

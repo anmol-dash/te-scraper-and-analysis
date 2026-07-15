@@ -999,10 +999,14 @@ def main():
         _pp(f"FAMILY: {family}  ({FAMILIES[family]['type']})")
         _pp(f"{'='*60}")
 
-        loci_cache   = reports_dir / f"cache_{family.lower()}_loci.pkl"
-        clust_cache  = reports_dir / f"cache_{family.lower()}_clustered.pkl"
-        labels_cache = reports_dir / f"cache_{family.lower()}_labels.npy"
-        meta_cache   = reports_dir / f"cache_{family.lower()}_meta.json"
+        # --max-loci is part of the cache identity: a capped run and a full run
+        # are different datasets, and reusing one for the other silently feeds
+        # the wrong row count downstream.
+        cap = f"_max{args.max_loci}" if args.max_loci else ""
+        loci_cache   = reports_dir / f"cache_{family.lower()}{cap}_loci.pkl"
+        clust_cache  = reports_dir / f"cache_{family.lower()}{cap}_clustered.pkl"
+        labels_cache = reports_dir / f"cache_{family.lower()}{cap}_labels.npy"
+        meta_cache   = reports_dir / f"cache_{family.lower()}{cap}_meta.json"
         de_path      = reports_dir / f"de_{family.lower()}.csv"
 
         # ── 1a. Loci + sequences ──────────────────────────────────────────────
