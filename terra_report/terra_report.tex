@@ -597,31 +597,54 @@ reported as a separate labelled group; they are not merged into the nearest clus
 excluded from per-cluster consensus building, so a locus never contributes to a consensus it
 was not confidently assigned to.
 
-\paragraph{Clustering is stable under its parameter search.} Because $k$ and
-\texttt{n\_neighbors} are chosen automatically, the partition could in principle be an artefact
-of that choice, so we measured it directly (\texttt{run\_cluster\_validation.py}). Every
-combination of $k$ and \texttt{n\_neighbors} in the search space was re-clustered from scratch
-and scored against the accepted configuration ($k=\cvRefKmer$,
-\texttt{n\_neighbors}~$=\cvRefNeighbors$) with the Adjusted Rand Index (ARI). Across
-\cvNConfigs{} configurations on \cvNLoci{} loci, the recovered cluster count ranged from
-\cvClustersMin{} to \cvClustersMax{}, the noise-class fraction ranged from \cvNoiseMinPct\% to
-\cvNoiseMaxPct\% (\cvNoisePct\% at the accepted configuration), and agreement with the accepted
-partition had a median ARI of \cvMedianARI{} and a worst case of \cvMinARI{}
-(Figure~\ref{fig:cluster_validation}). Restricting the comparison to loci that both runs place
-in a cluster, so that the score tests the cluster structure independently of how much sequence
-is called noise, gives a worst-case ARI of \cvMinARIcore{}. We report ARI both ways because the
-two answer different questions, and we treat sub-family boundaries as provisional until they are
-cross-checked against the consensus alignments.
+\paragraph{The default parameterisation does not yield a stable partition.} Because $k$ and
+\texttt{n\_neighbors} are chosen automatically, the partition could be an artefact of that
+choice, so we measured it rather than assuming it
+(\texttt{run\_cluster\_validation.py}). Every combination of $k$ and \texttt{n\_neighbors} in
+the search space was re-clustered from scratch and scored against the accepted configuration
+($k=\cvRefKmer$, \texttt{n\_neighbors}~$=\cvRefNeighbors$) with the Adjusted Rand Index (ARI).
+The result is negative and we report it as such. Across \cvNConfigs{} configurations on
+\cvNLoci{} loci the recovered cluster count ranged only from \cvClustersMin{} to
+\cvClustersMax{}, the noise-class fraction ranged from \cvNoiseMinPct\% to \cvNoiseMaxPct\%,
+and agreement with the accepted partition had a median ARI of only \cvMedianARI{} and a worst
+case of \cvMinARI{} (Figure~\ref{fig:cluster_validation}). Restricting the comparison to loci
+that both runs place in a cluster gives a worst-case ARI of \cvMinARIcore{}. An ARI near zero
+means two configurations of the same algorithm on the same sequences agree about as well as
+chance.
+
+The cause is the minimum cluster size. The search fixes it at
+$\lfloor N/\protoDivisor \rfloor$, which for \emph{\protoFamily} demands
+\protoMinClusterSize{} loci per cluster: with \protoLoci{} loci, only two groups can satisfy
+that threshold and everything else is forced into the noise class. The
+\protoClusters{}-cluster partition and the \protoNoisePctMeasured\% noise fraction reported in
+Section~\ref{sec:resolve} are therefore properties of that threshold, not of the family. We
+draw two conclusions. First, the sub-family boundaries this configuration produces should not
+be treated as biological, and we do not claim them as such. Second, the concept the boundaries
+serve (Section~\ref{sec:resolve}) is unaffected: the expression split between the two groups is
+large and consistent across all \protoDETotal{} stages, so the separation of expressed from
+inert copies does not depend on the partition being finely resolved.
+
+A parameter search over $k$, \texttt{n\_neighbors}, \texttt{min\_cluster\_size} and
+\texttt{min\_samples} that targets a biologically plausible number of sub-families at minimal
+noise (\texttt{run\_cluster\_search.py}) is the appropriate remedy, and its result should
+replace the default before these boundaries are interpreted.
+\todo{Search is running; adopt its configuration, re-run this validation against it, and
+cross-check the resulting sub-families against the consensus alignments (AJM C2). A caveat that
+must be resolved first: re-clustering at the same nominal parameters reproduced
+\cvNoisePct\% noise where the pipeline's stored labels have \protoNoisePctMeasured\%, so the
+run is not bit-for-bit reproducible and that gap needs explaining.}
 
 \begin{figure}[h]
   \centering
   \resizebox{1.0\textwidth}{!}{\figorbox{fig_cluster_validation}}
   \caption{Clustering and noise-class validation for \emph{\protoFamily}. \textbf{Left:}
     Adjusted Rand Index of each $k$ and \texttt{n\_neighbors} configuration against the
-    configuration the automatic search accepted; values near 1 indicate the partition does not
-    depend on the parameter choice. \textbf{Right:} HDBSCAN noise-class fraction per
-    configuration, with the accepted configuration highlighted. Noise-class loci are retained as
-    a labelled group and excluded from consensus building.}
+    configuration the automatic search accepted. Values near 1 would indicate the partition is
+    independent of the parameter choice; the observed median of \cvMedianARI{} indicates it is
+    not, which is why these sub-family boundaries are not interpreted as biological.
+    \textbf{Right:} HDBSCAN noise-class fraction per configuration, with the accepted
+    configuration highlighted. Noise-class loci are retained as a labelled group and excluded
+    from consensus building.}
   \label{fig:cluster_validation}
 \end{figure}
 
@@ -781,8 +804,12 @@ counts, so quantification quality and its multi-mapping policy are inherited fro
 tool. Family resolution and sequence depend on external services (RMSK/Dfam, UCSC, JASPAR,
 mygene.info), so a run is only as reproducible as the database releases it draws on, and
 supported assemblies are currently the common human and mouse builds. The $k$-mer clustering,
-while fast and alignment-free, yields sub-family boundaries that should be validated against
-the consensus alignments before being treated as biological, and the guide frontier reports
+while fast and alignment-free, does not yield stable sub-family boundaries at the default
+minimum cluster size: agreement between parameter settings is close to chance (median ARI
+\cvMedianARI{}, Section~\ref{sec:validation}), so we report the partition as a device for
+separating expressed from inert copies rather than as a subfamily assignment. Resolving this
+requires the parameter search described in Section~\ref{sec:validation} followed by
+cross-validation against the consensus alignments. The guide frontier likewise reports
 sequence-level predictions that require experimental confirmation. The modules in
 Section~\ref{sec:exploratory} are not yet validated to the standard of the results reported
 here.
