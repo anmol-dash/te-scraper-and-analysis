@@ -99,11 +99,20 @@ fig_antisense_motifs          bidirectional promoter content           (Fig 10)
 
 3. Rebuild. The placeholder boxes become the real figures.
 
-**Check the numbers when they land.** The values in the `.tex` preamble (`\protoLoci` etc.) are
-the real L1Md_T results from the run Andrew reviewed. A fresh run should reproduce them; if it
-does not, update the preamble rather than the prose. The `*_measured_values.tex` files in the
-repo root are from an **older IAP run** (12,577 copies, 25 lineages) and contradict these
-numbers, which is why this draft deliberately does not `\input` them.
+### How the numbers work (you do not have to remember anything)
+
+One rule: **a generated file wins if it exists; otherwise the fallback in the preamble is used.**
+
+The preamble's `\protoLoci`, `\protoGuides` etc. are the real L1Md_T values from the run Andrew
+reviewed. `\inputL` looks for generated macro files **only** in `reports8/stage11_l1mdt/`, so
+when a fresh L1Md_T run lands you just drop `reports8/` next to the `.tex` and rebuild: the
+numbers update themselves. The prose never contains a literal number, only macros, so there is
+nothing to hand-edit.
+
+The search path is restricted on purpose. The `*_measured_values.tex` files sitting in the **repo
+root** are left over from an older **IAP** run (they say `\grnaOTFamily{IAP}`, 12,577 copies, 25
+lineages). If they were picked up they would silently overwrite the L1Md_T numbers with a
+different family's results. Because `\inputL` never looks in the root, that cannot happen.
 
 ## Figure brand (C144)
 

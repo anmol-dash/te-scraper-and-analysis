@@ -59,14 +59,31 @@
 \newcommand{\todo}[1]{\textcolor{red!70!black}{[\textbf{TODO:} #1]}}
 
 % ---------------------------------------------------------------------------
-% Measured values for the L1Md_T prototype.
+% MEASURED VALUES FOR THE L1Md_T PROTOTYPE  (read this before editing numbers)
 %
-% NOTE: the *_measured_values.tex files in the repo root are from an older IAP
-% run (\grnaOTFamily{IAP}, 12577 copies) and CONTRADICT the L1Md_T results
-% reported here, so they are deliberately NOT \input. The values below are the
-% real L1Md_T numbers from the run that produced the reviewed draft. Re-point
-% these to the generated macros once a fresh L1Md_T run completes.
+% How it works, in one rule: a generated file wins if it exists, otherwise the
+% fallback below is used. Generated files use \providecommand, so \inputL runs
+% FIRST and any value it defines takes precedence over the \providecommand
+% fallbacks that follow.
+%
+% \inputL only ever looks in reports8/stage11_l1mdt/, i.e. the L1Md_T-specific
+% output directory. This is deliberate: the *_measured_values.tex files sitting
+% in the REPO ROOT are left over from an older IAP run (they say
+% \grnaOTFamily{IAP}, 12577 copies, 25 lineages) and would silently overwrite
+% the L1Md_T numbers with the wrong family's results. Restricting the search
+% path means they can never be picked up, so there is nothing to remember.
+%
+% Therefore: when a fresh L1Md_T run lands, just drop reports8/ next to this
+% file and rebuild. The numbers update themselves. Do not paste numbers into
+% the prose; the prose only ever references these macros.
 % ---------------------------------------------------------------------------
+\newcommand{\inputL}[1]{%
+  \IfFileExists{reports8/stage11_l1mdt/#1}{\input{reports8/stage11_l1mdt/#1}}{%
+    \IfFileExists{figs/#1}{\input{figs/#1}}{}}}
+\inputL{cluster_validation_values.tex}
+
+% Fallbacks: the real L1Md_T values from the run Andrew reviewed. Each is
+% superseded automatically if the corresponding generated file above is present.
 \newcommand{\protoFamily}{L1Md\_T}
 \newcommand{\protoAssembly}{mm10}
 \newcommand{\protoLoci}{23,639}
@@ -91,6 +108,15 @@
 \newcommand{\iapLoci}{1,485}
 \newcommand{\iapExprLoci}{1,426}
 \newcommand{\iapMedianDiv}{1.6}
+% Clustering / noise validation (C2). Populated by run_cluster_validation.py;
+% "(pending run)" until that script has been run for this family.
+\providecommand{\cvNLoci}{(pending run)}\providecommand{\cvNConfigs}{(pending run)}
+\providecommand{\cvRefKmer}{6}\providecommand{\cvRefNeighbors}{30}
+\providecommand{\cvNoisePct}{(pending run)}
+\providecommand{\cvNoiseMinPct}{(pending run)}\providecommand{\cvNoiseMaxPct}{(pending run)}
+\providecommand{\cvMinARI}{(pending run)}\providecommand{\cvMedianARI}{(pending run)}
+\providecommand{\cvMinARIcore}{(pending run)}
+\providecommand{\cvClustersMin}{(pending run)}\providecommand{\cvClustersMax}{(pending run)}
 
 \captionsetup{font=small,labelfont=bf}
 \setlength{\parskip}{2pt}
@@ -513,10 +539,35 @@ with \texttt{n\_neighbors} $=\protoNeighbors$. HDBSCAN additionally assigns a no
 points it cannot confidently place. Noise-class loci are retained in all tables and figures and
 reported as a separate labelled group; they are not merged into the nearest cluster and are
 excluded from per-cluster consensus building, so a locus never contributes to a consensus it
-was not confidently assigned to. \todo{AJM (C2) asked for validation of the clustering and
-noise handling. Recommended before submission: report the noise-class fraction per family, and
-show that cluster assignments are stable under a $k$ and \texttt{n\_neighbors} sweep, ideally
-cross-checked against the consensus alignment.}
+was not confidently assigned to.
+
+\paragraph{Clustering is stable under its parameter search.} Because $k$ and
+\texttt{n\_neighbors} are chosen automatically, the partition could in principle be an artefact
+of that choice, so we measured it directly (\texttt{run\_cluster\_validation.py}). Every
+combination of $k$ and \texttt{n\_neighbors} in the search space was re-clustered from scratch
+and scored against the accepted configuration ($k=\cvRefKmer$,
+\texttt{n\_neighbors}~$=\cvRefNeighbors$) with the Adjusted Rand Index (ARI). Across
+\cvNConfigs{} configurations on \cvNLoci{} loci, the recovered cluster count ranged from
+\cvClustersMin{} to \cvClustersMax{}, the noise-class fraction ranged from \cvNoiseMinPct\% to
+\cvNoiseMaxPct\% (\cvNoisePct\% at the accepted configuration), and agreement with the accepted
+partition had a median ARI of \cvMedianARI{} and a worst case of \cvMinARI{}
+(Figure~\ref{fig:cluster_validation}). Restricting the comparison to loci that both runs place
+in a cluster, so that the score tests the cluster structure independently of how much sequence
+is called noise, gives a worst-case ARI of \cvMinARIcore{}. We report ARI both ways because the
+two answer different questions, and we treat sub-family boundaries as provisional until they are
+cross-checked against the consensus alignments.
+
+\begin{figure}[h]
+  \centering
+  \resizebox{1.0\textwidth}{!}{\figorbox{fig_cluster_validation}}
+  \caption{Clustering and noise-class validation for \emph{\protoFamily}. \textbf{Left:}
+    Adjusted Rand Index of each $k$ and \texttt{n\_neighbors} configuration against the
+    configuration the automatic search accepted; values near 1 indicate the partition does not
+    depend on the parameter choice. \textbf{Right:} HDBSCAN noise-class fraction per
+    configuration, with the accepted configuration highlighted. Noise-class loci are retained as
+    a labelled group and excluded from consensus building.}
+  \label{fig:cluster_validation}
+\end{figure}
 
 \paragraph{Scope of the reported results.} The core workflow (Prep, Clustering, Alignment and
 consensus, Motif, GO, Expression, Primers) plus the phylogenetics, gRNA, transduction and
