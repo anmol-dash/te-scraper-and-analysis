@@ -31,20 +31,26 @@
 % Figure slot: use the real file if present, otherwise draw a labelled box that
 % names the missing file. Figures are never fabricated.
 % ---------------------------------------------------------------------------
+% NOTE: \IfFileExists does NOT consult \graphicspath, so every candidate
+% directory must be probed explicitly here. Drop generated figures into any of
+% figs/, reports8/ or reports8/stage11_l1mdt/ and they resolve automatically.
+\newcommand{\fbinc}[2]{%
+  \includegraphics[width=#1,height=0.20\textheight,keepaspectratio]{#2}}
 \newcommand{\figorbox}[2][\linewidth]{%
-  \IfFileExists{#2.pdf}{%
-    \includegraphics[width=#1,height=0.20\textheight,keepaspectratio]{#2.pdf}%
-  }{%
-    \IfFileExists{#2.png}{%
-      \includegraphics[width=#1,height=0.20\textheight,keepaspectratio]{#2.png}%
-    }{%
-      \setlength{\fboxsep}{0pt}%
-      \fbox{\parbox[c][0.18\textheight][c]{\dimexpr#1-2\fboxrule\relax}{%
-        \centering\ttfamily\detokenize{#2.pdf}\\[8pt]%
-        \normalfont\itshape\small figure not yet generated; see README.md%
-      }}%
-    }%
-  }%
+  \IfFileExists{#2.pdf}{\fbinc{#1}{#2.pdf}}{%
+  \IfFileExists{figs/#2.pdf}{\fbinc{#1}{figs/#2.pdf}}{%
+  \IfFileExists{reports8/#2.pdf}{\fbinc{#1}{reports8/#2.pdf}}{%
+  \IfFileExists{reports8/stage11_l1mdt/#2.pdf}{\fbinc{#1}{reports8/stage11_l1mdt/#2.pdf}}{%
+  \IfFileExists{#2.png}{\fbinc{#1}{#2.png}}{%
+  \IfFileExists{figs/#2.png}{\fbinc{#1}{figs/#2.png}}{%
+  \IfFileExists{reports8/#2.png}{\fbinc{#1}{reports8/#2.png}}{%
+  \IfFileExists{reports8/stage11_l1mdt/#2.png}{\fbinc{#1}{reports8/stage11_l1mdt/#2.png}}{%
+    \setlength{\fboxsep}{0pt}%
+    \fbox{\parbox[c][0.18\textheight][c]{\dimexpr#1-2\fboxrule\relax}{%
+      \centering\ttfamily\detokenize{#2.pdf}\\[8pt]%
+      \normalfont\itshape\small figure not yet generated; see README.md%
+    }}%
+  }}}}}}}}%
 }
 
 \newcommand{\cYes}{\textcolor{green!45!black}{\checkmark}}
