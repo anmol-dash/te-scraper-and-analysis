@@ -52,12 +52,17 @@ sys.path.insert(0, str(HERE))
 CORE, STAND, DELIV = "#2f6f8f", "#3f8f5f", "#b0413e"
 
 
-def _labels_for(df, kmer, n_neighbors, min_cluster_size, seed):
-    """Run the real clustering path once; return the HDBSCAN label array."""
+def _labels_for(df, kmer, n_neighbors, min_cluster_size, seed, min_samples=5):
+    """Run the real clustering path once; return the HDBSCAN label array.
+
+    min_samples must be passed explicitly: te_clustering defaults it to 5, so a
+    configuration adopted with a different value (e.g. the searched
+    min_samples=25) cannot be validated unless it is threaded through here.
+    """
     from te_clustering import clustering_analysis
     _, labels = clustering_analysis(
         df.copy(), kmer=kmer, n_neighbors=n_neighbors,
-        min_cluster_size=min_cluster_size, out_dir=None,
+        min_cluster_size=min_cluster_size, min_samples=min_samples, out_dir=None,
         family_name="validation", compute_tsne=False, random_state=seed,
     )
     return np.asarray(labels)
@@ -82,6 +87,10 @@ def _resolve_reference(args):
     """
     if args.ref_neighbors is not None and args.divisor is not None:
         return args.ref_neighbors, args.divisor, "explicit flags"
+    # --min-cluster-size supersedes the divisor entirely (it is what the caller
+    # will actually cluster with), so it satisfies the requirement on its own.
+    if args.ref_neighbors is not None and args.min_cluster_size is not None:
+        return args.ref_neighbors, None, "explicit flags (--min-cluster-size)"
 
     meta_path = Path(args.pipeline_meta) if args.pipeline_meta else (
         Path(args.reports_dir).resolve().parent / f"cache_{args.family.lower()}_meta.json")
@@ -120,7 +129,18 @@ def main():
                         "adaptive, so there is no correct constant to fall back on.")
     p.add_argument("--divisor", type=int, default=None,
                    help="min_cluster_size = floor(N/divisor), as the pipeline does. "
-                        "Default: read from --pipeline-meta.")
+                        "Default: read from --pipeline-meta. Ignored if "
+                        "--min-cluster-size is given.")
+    p.add_argument("--min-cluster-size", type=int, default=None,
+                   help="Absolute HDBSCAN min_cluster_size, overriding --divisor. "
+                        "Needed to validate a configuration chosen by "
+                        "run_cluster_search.py, whose value (e.g. 2000) is generally "
+                        "not expressible as floor(N/divisor) for integer divisor.")
+    p.add_argument("--min-samples", type=int, default=5,
+                   help="HDBSCAN min_samples for every configuration in the sweep. "
+                        "te_clustering defaults to 5; a searched config using a "
+                        "different value must set this or the sweep validates the "
+                        "wrong configuration.")
     p.add_argument("--pipeline-meta", default=None,
                    help="cache_<family>_meta.json from the core run, holding the "
                         "divisor/n_neighbors its adaptive search accepted. Default: "
@@ -144,16 +164,20 @@ def main():
     ref_nn, divisor, ref_src = _resolve_reference(args)
 
     n = len(df)
-    mcs = max(2, n // divisor)
+    if args.min_cluster_size:
+        mcs, mcs_src = args.min_cluster_size, "explicit --min-cluster-size"
+    else:
+        mcs, mcs_src = max(2, n // divisor), f"N/{divisor}"
     print(f"=== CLUSTER VALIDATION ({args.family}) ===")
-    print(f"  {n:,} loci | min_cluster_size = N/{divisor} = {mcs}")
+    print(f"  {n:,} loci | min_cluster_size = {mcs} [{mcs_src}] | "
+          f"min_samples = {args.min_samples}")
     print(f"  reference config: k={args.ref_kmer}, n_neighbors={ref_nn}  [{ref_src}]")
     if ref_nn not in args.neighbors:
         print(f"  WARNING: reference n_neighbors={ref_nn} is not in the sweep grid "
               f"{args.neighbors}; the ARI=1.0 self-comparison cell will be absent.")
 
     # Reference partition = the configuration the pipeline's search accepted.
-    ref = _labels_for(df, args.ref_kmer, ref_nn, mcs, args.seed)
+    ref = _labels_for(df, args.ref_kmer, ref_nn, mcs, args.seed, args.min_samples)
     ref_noise = float((ref == -1).mean())
     print(f"  reference: {len(set(ref[ref != -1]))} clusters, "
           f"noise {ref_noise*100:.1f}%")
@@ -162,7 +186,7 @@ def main():
     for k in args.kmers:
         for nn in args.neighbors:
             is_ref = (k == args.ref_kmer and nn == ref_nn)
-            lab = ref if is_ref else _labels_for(df, k, nn, mcs, args.seed)
+            lab = ref if is_ref else _labels_for(df, k, nn, mcs, args.seed, args.min_samples)
             ari_all, ami_all, ari_core = _score(ref, lab)
             rows.append(dict(
                 kmer=k, n_neighbors=nn, is_reference=is_ref,
@@ -225,6 +249,10 @@ def main():
         fh.write(f"\\providecommand{{\\cvNConfigs}}{{{len(res)}}}\n")
         fh.write(f"\\providecommand{{\\cvRefKmer}}{{{args.ref_kmer}}}\n")
         fh.write(f"\\providecommand{{\\cvRefNeighbors}}{{{ref_nn}}}\n")
+        # Record WHICH configuration was validated, so the manuscript cannot cite
+        # stability figures that describe a partition it no longer reports.
+        fh.write(f"\\providecommand{{\\cvRefMinClusterSize}}{{{mcs}}}\n")
+        fh.write(f"\\providecommand{{\\cvRefMinSamples}}{{{args.min_samples}}}\n")
         fh.write(f"\\providecommand{{\\cvNoisePct}}{{{ref_noise*100:.1f}}}\n")
         fh.write(f"\\providecommand{{\\cvNoiseMinPct}}{{{res['noise_frac'].min()*100:.1f}}}\n")
         fh.write(f"\\providecommand{{\\cvNoiseMaxPct}}{{{res['noise_frac'].max()*100:.1f}}}\n")
