@@ -616,6 +616,17 @@ def main():
     if "Cluster" in df.columns:
         cluster_col = "Cluster"
         groups = list(df.groupby(cluster_col).groups.items())
+        # HDBSCAN labels loci it cannot confidently place as -1. That is not a
+        # cluster: it is a bag of leftovers with no shared ancestry, and for
+        # L1Md_T it held 12,720 of 23,639 loci. Collapsing it to a consensus and
+        # placing it in the tree as "cluster_-1" produced a meaningless taxon and
+        # let unassigned loci contaminate a consensus. Drop it.
+        n_before = len(groups)
+        groups = [(cid, idx) for cid, idx in groups if cid != -1]
+        if len(groups) < n_before:
+            n_noise = int((df[cluster_col] == -1).sum())
+            _pp(f"  Excluding the HDBSCAN noise class (-1): {n_noise:,} loci "
+                f"({n_noise/len(df)*100:.1f}%) are not a cluster and get no consensus")
         _pp(f"Per-cluster divergence over {len(groups)} clusters "
             f"(consensus from up to {args.consensus_sample} copies each)...")
     else:
