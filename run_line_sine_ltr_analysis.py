@@ -62,6 +62,14 @@ _NON_EXPR = {
     "te_id","repclass","repfamily","swscore","millidiv","ucsc_url",
     "name","score","locus","te_chromosome","te_start","te_end",
     "te_length","te_strand","unnamed: 0","_total_expr",
+    # _read_expression_file() renames the coordinate columns (tx_start/chromStart
+    # /... -> expr_start, tx_stop/... -> expr_stop) BEFORE _auto_expr_cols() runs,
+    # so the pre-rename names above do not catch them. Without these two entries
+    # the genomic coordinates are treated as expression values: they dominate the
+    # per-cluster heatmap (values ~1e8 vs ~1e2 for real counts) and are tested for
+    # differential expression, manufacturing significant "stages" that only say the
+    # clusters sit at different genomic positions.
+    "expr_start","expr_stop",
 }
 
 # ─── Stage 11 module registry ─────────────────────────────────────────────────

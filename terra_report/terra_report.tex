@@ -77,10 +77,31 @@
 % file and rebuild. The numbers update themselves. Do not paste numbers into
 % the prose; the prose only ever references these macros.
 % ---------------------------------------------------------------------------
+% Do NOT input reports8/measured_values.tex: the aggregate file the cross-family
+% script writes is brace-unbalanced (it drops the closing "}" on values that wrap
+% a \texttt{...}, e.g. \lOneTPhyloMasterName), which breaks the build. The
+% per-family files below are well-formed and are the authoritative source.
 \newcommand{\inputL}[1]{%
   \IfFileExists{reports8/stage11_l1mdt/#1}{\input{reports8/stage11_l1mdt/#1}}{%
     \IfFileExists{figs/#1}{\input{figs/#1}}{}}}
+\inputL{phylo_measured_values.tex}
+\inputL{grna_offtarget_measured_values.tex}
+\inputL{transduction_measured_values.tex}
+\inputL{antisense_measured_values.tex}
 \inputL{cluster_validation_values.tex}
+
+% Fallbacks matching the 2026-07-14 run, superseded automatically by the files above.
+\providecommand{\phyloNCopies}{23639}
+\providecommand{\phyloNIntact}{9388}
+\providecommand{\phyloMasterName}{\texttt{chrX:40304675}}
+\providecommand{\phyloMasterDiv}{5.35}
+\providecommand{\phyloMedianAgeMyr}{9.02}
+\providecommand{\grnaOTNGuides}{400}
+\providecommand{\grnaOTNFrontier}{17}
+\providecommand{\grnaOTBestGuide}{\texttt{AGGGAGGGAAGGAGGGAGGG}}
+\providecommand{\transNLineages}{3}
+\providecommand{\transNPolyaSignal}{8227}
+\providecommand{\antiNBidir}{13246}
 
 % Fallbacks: the real L1Md_T values from the run Andrew reviewed. Each is
 % superseded automatically if the corresponding generated file above is present.
@@ -90,17 +111,36 @@
 \newcommand{\protoClusters}{2}
 \newcommand{\protoExprLoci}{7,490}
 \newcommand{\protoMedianDiv}{3.5}
-\newcommand{\protoDESig}{8}
+% 6 of 6 real developmental stages are significant. The earlier draft said 8:
+% that run also tested expr_start/expr_stop, which are genomic coordinates rather
+% than expression (fixed in run_line_sine_ltr_analysis.py _NON_EXPR), so two of
+% the eight "stages" only reflected the clusters sitting at different positions.
+\newcommand{\protoDESig}{6}
+\newcommand{\protoDETotal}{6}
 \newcommand{\protoDivisor}{5}
-\newcommand{\protoNeighbors}{30}
+% n_neighbors=15 per the run's cache_l1md_t_meta.json (the reviewed draft said 30,
+% which does not match the run whose figures this paper now ships).
+\newcommand{\protoNeighbors}{15}
+\newcommand{\protoMinClusterSize}{4,727}
+% Noise class: HDBSCAN leaves 12,720 of 23,639 loci unassigned (53.8%); the two
+% clusters therefore hold 10,919 loci. Measured from cache_l1md_t_clustered.pkl.
+\newcommand{\protoNoiseLoci}{12,720}
+\newcommand{\protoNoisePctMeasured}{53.8}
+\newcommand{\protoClusteredLoci}{10,919}
 % copy-resolved module results (L1Md_T)
-\newcommand{\protoIntact}{9,388}
-\newcommand{\protoMaster}{chr1:95511396}
-\newcommand{\protoGuides}{400}
-\newcommand{\protoFrontier}{17}
-\newcommand{\protoLineages}{3}
-\newcommand{\protoPolyA}{8,227}
-\newcommand{\protoBidir}{13,246}
+% Module numbers: alias the generated macros so a fresh run updates them itself.
+% (The reviewed draft named chr1:95511396 as the master element; the run whose
+% figures this paper ships nominates chrX:40304675, so the generated value wins.)
+\newcommand{\protoIntact}{\phyloNIntact}
+\newcommand{\protoMaster}{\phyloMasterName}
+\newcommand{\protoMasterDiv}{\phyloMasterDiv}
+\newcommand{\protoMedianAge}{\phyloMedianAgeMyr}
+\newcommand{\protoGuides}{\grnaOTNGuides}
+\newcommand{\protoFrontier}{\grnaOTNFrontier}
+\newcommand{\protoBestGuide}{\grnaOTBestGuide}
+\newcommand{\protoLineages}{\transNLineages}
+\newcommand{\protoPolyA}{\transNPolyaSignal}
+\newcommand{\protoBidir}{\antiNBidir}
 % supplementary families
 \newcommand{\bOneMTLoci}{70,685}
 \newcommand{\bOneMTExprLoci}{21,407}
@@ -111,7 +151,7 @@
 % Clustering / noise validation (C2). Populated by run_cluster_validation.py;
 % "(pending run)" until that script has been run for this family.
 \providecommand{\cvNLoci}{(pending run)}\providecommand{\cvNConfigs}{(pending run)}
-\providecommand{\cvRefKmer}{6}\providecommand{\cvRefNeighbors}{30}
+\providecommand{\cvRefKmer}{6}\providecommand{\cvRefNeighbors}{15}
 \providecommand{\cvNoisePct}{(pending run)}
 \providecommand{\cvNoiseMinPct}{(pending run)}\providecommand{\cvNoiseMaxPct}{(pending run)}
 \providecommand{\cvMinARI}{(pending run)}\providecommand{\cvMedianARI}{(pending run)}
@@ -262,8 +302,18 @@ two dimensions with UMAP~\citep{mcinnes2018umap}, and partitioned with
 HDBSCAN~\citep{mcinnes2017hdbscan}. This avoids a family-wide multiple alignment and scales
 to tens of thousands of loci. For \emph{\protoFamily} the parameter search
 (Section~\ref{sec:validation}) converged to a divisor of $N/\protoDivisor{}$ with UMAP
-\texttt{n\_neighbors} $=\protoNeighbors{}$, partitioning the family into \protoClusters{}
-clusters.
+\texttt{n\_neighbors} $=\protoNeighbors{}$ (minimum cluster size \protoMinClusterSize{}),
+partitioning the family into \protoClusters{} clusters that hold \protoClusteredLoci{} loci
+between them.
+
+The remaining \protoNoiseLoci{} loci, \protoNoisePctMeasured\% of the family, fall into
+HDBSCAN's noise class: the algorithm declines to assign them rather than forcing them into a
+cluster. This number is worth stating plainly, because it is itself a result. Over half of what
+the annotation calls \emph{\protoFamily} is too diverged or too fragmentary to group
+confidently with anything else, which is precisely the population that a family-level average
+would silently fold into the signal. These loci are retained and reported as a labelled group
+and are excluded from per-cluster consensus building (Section~\ref{sec:validation}), so they
+cannot contaminate a consensus that reagents are then designed against.
 
 The reason to do this is shown in Figure~\ref{fig:filtering}. Treating the family as a single
 unit averages across three quite different populations: a minority of expressed, intact
@@ -293,8 +343,11 @@ entries in the SQuIRE table, that is, roughly a third of annotated copies contri
 measured signal. Expression is reported per locus as SQuIRE counts and is summarised per
 cluster; units and the exact counting convention are stated in Section~\ref{sec:validation}.
 Pairwise Wilcoxon rank-sum tests between clusters, corrected with the Benjamini--Hochberg
-procedure, identify \protoDESig{} cluster-by-stage comparisons that are significant at
-$q<0.05$. Figure~\ref{fig:proto_results} shows the measured partition, the per-cluster
+procedure, find all \protoDESig{} of \protoDETotal{} developmental stages significantly
+different between the two clusters at $q<0.05$. The direction is consistent across stages:
+one cluster carries essentially all of the measured expression, peaking at the 8-cell stage,
+while the other is close to silent (Figure~\ref{fig:proto_results}b). This is the separation
+that a family-level average would remove. Figure~\ref{fig:proto_results} shows the measured partition, the per-cluster
 expression profile, and the divergence distribution from this run.
 
 We report what the counts show and do not over-interpret the developmental profile; any
@@ -317,7 +370,7 @@ embryo~\citep{macfarlan2012,peaston2004}.
   \resizebox{1.0\textwidth}{!}{\figorbox{fig_de_l1mdt}}
   \caption{Differential expression between \emph{\protoFamily} clusters. Heatmap of
     $-\log_{10}(q)$ from pairwise Wilcoxon rank-sum tests with Benjamini--Hochberg correction;
-    \protoDESig{} comparisons reach $q<0.05$. Cluster-resolved testing recovers stage-specific
+    all \protoDESig{} developmental stages reach $q<0.05$. Cluster-resolved testing recovers stage-specific
     differences that a family-level summary averages away (Section~\ref{sec:resolve}).}
   \label{fig:de}
 \end{figure}
@@ -329,8 +382,9 @@ each copy's Kimura two-parameter divergence~\citep{kimura1980} from that consens
 converted to a molecular-clock age. ORF integrity separates intact from degraded copies, and a
 master-element score combining intactness and divergence nominates the youngest, most intact
 copies, which are the ones most likely to still be capable of mobilisation. For
-\emph{\protoFamily}, \protoIntact{} of \protoLoci{} copies retain ORF integrity, and the top
-master-element candidate is \protoMaster{} (Figures~\ref{fig:phylo_tree}
+\emph{\protoFamily}, \protoIntact{} of \protoLoci{} copies retain ORF integrity, the median
+copy age is \protoMedianAge{} Myr, and the top master-element candidate is \protoMaster{} at
+\protoMasterDiv\% divergence from the consensus (Figures~\ref{fig:phylo_tree}
 and~\ref{fig:phylo_master}). Naming a specific locus matters: it converts a family-level
 observation into a testable, orderable target.
 
@@ -368,7 +422,8 @@ background FASTA) using seed-anchored, mismatch-tolerant matching, and reports t
 coverage-versus-off-target Pareto frontier. For \emph{\protoFamily}, \protoGuides{} candidate
 guides were scored against all \protoLoci{} copies, of which \protoFrontier{} are
 non-dominated and therefore represent the genuine design choices
-(Figure~\ref{fig:grna_pareto}). A user selecting from that frontier is choosing a documented
+(Figure~\ref{fig:grna_pareto}); the best-scoring guide on that frontier is
+\protoBestGuide{}. A user selecting from that frontier is choosing a documented
 position on the coverage/specificity trade-off rather than trusting an opaque ranking. The
 same output supports CRISPRa and CRISPRi, since both depend on the guide-to-copy mapping
 rather than on the effector. Figure~\ref{fig:crispr} summarises the design logic.
