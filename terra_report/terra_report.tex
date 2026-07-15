@@ -454,8 +454,9 @@ repeats: SQuIRE reports locus-specific repeat expression~\citep{yang2019squire};
 TEtranscripts and TElocal handle multi-mapping reads at family and locus
 level~\citep{jin2015tetranscripts}; Telescope reassigns reads across the
 retrotranscriptome~\citep{bendall2019telescope}; scTE extends TE quantification to
-single-cell data~\citep{he2021scte}; and ERVmap targets human endogenous
-retroviruses~\citep{tokuyama2018ervmap}. TERRA consumes per-locus counts from any of these
+single-cell data~\citep{he2021scte}; ERVmap targets human endogenous
+retroviruses~\citep{tokuyama2018ervmap}; and TE-Seq runs an end-to-end gene and TE
+RNA-Seq pipeline with TE-aware annotation~\citep{kelsey2025teseq}. TERRA consumes per-locus counts from any of these
 (SQuIRE in this paper) and does not perform quantification itself. These tools answer
 ``how much is expressed''; TERRA addresses what follows, namely which copies to group
 together, what their consensus is, and what reagent will target them.
@@ -493,7 +494,7 @@ in Section~\ref{sec:design} concern TERRA's own engineering only.
     Telescope~\citep{bendall2019telescope}      & \cYes & \cPart & \cNo   & \cNo  & \cNo   & \cPart \\
     scTE~\citep{he2021scte}                     & \cYes & \cPart & \cNo   & \cNo  & \cNo   & \cPart \\
     ERVmap~\citep{tokuyama2018ervmap}           & \cYes & \cPart & \cNo   & \cNo  & \cNo   & \cPart \\
-    TE-Seq \todo{add citation (C101)}           & \cYes & \cPart & \cNo   & \cNo  & \cPart & \cPart \\
+    TE-Seq~\citep{kelsey2025teseq}              & \cYes & \cPart & \cNo   & \cNo  & \cPart & \cPart \\
     Galaxy~\citep{galaxy2022}                   & \cNo  & \cPart & \cNo   & \cYes & \cPart & \cYes  \\
     GenePattern~\citep{genepattern2006}         & \cNo  & \cPart & \cNo   & \cYes & \cPart & \cYes  \\
     nf-core/Nextflow~\citep{ewels2020}          & \cNo  & \cPart & \cNo   & \cNo  & \cYes  & \cYes  \\

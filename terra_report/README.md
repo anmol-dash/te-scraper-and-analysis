@@ -32,7 +32,7 @@ pdflatex terra_report && bibtex terra_report && pdflatex terra_report && pdflate
   Supplementary Files.
 - **Lumping vs resolving** (C149, C107) promoted to a headline conceptual contribution.
 - **Comparison broadened** (C101): TEtranscripts/TElocal, Telescope, scTE, ERVmap added with real
-  citations. TE-Seq is listed but its citation is a TODO (not invented).
+  citations, plus TE-Seq (citation verified via Crossref).
 - **No em-dashes** (C15): zero in the prose, verified programmatically.
 
 ## Prototype family: why L1Md_T
