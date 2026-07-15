@@ -65,54 +65,78 @@ _NON_EXPR = {
 }
 
 # ─── Stage 11 module registry ─────────────────────────────────────────────────
+# Each module's *_values.tex, written last (after its figures). Single source of
+# truth for both skip-if-exists and meta collection: a module that died partway
+# leaves no .tex and correctly re-runs.
+_MODULE_TEX = {
+    "phylo":          "phylo_measured_values.tex",
+    "grna_offtarget": "grna_offtarget_measured_values.tex",
+    "transduction":   "transduction_measured_values.tex",
+    "antisense":      "antisense_measured_values.tex",
+    "ctcf_tad":       "ctcf_tad_measured_values.tex",
+    "epigenetic":     "epigenetic_measured_values.tex",
+    "ortholog":       "ortholog_measured_values.tex",
+    "multiassembly":  "multiassembly_measured_values.tex",
+    "fold":           "fold_measured_values.tex",
+    "divergence":     "repeat_landscape_values.tex",
+    "ltr_struct":     "ltr_struct_values.tex",
+    "subfamily":      "subfamily_values.tex",
+    "benchmark":      "benchmark_values.tex",
+    "motif_gain":     "motif_gain_values.tex",
+}
+
 # Mirrors query.py's _MODULES list exactly so the two code paths stay in sync.
-# primary_output: the first file the module writes; used for skip-if-exists.
+# primary_output: completion sentinel, filled in from _MODULE_TEX below.
 # needs_consensus: pass --consensus-fasta if all_cluster_consensuses.fa exists.
 _STAGE11_MODULES = [
     dict(key="phylo",          runner="run_phylo_analysis.py",
          extra=["--subst-rate", "2.2e-9", "--clock-divisor", "2",
                 "--intact-orf-aa", "100"],
-         primary_output="fig_phylo_tree.png",          needs_consensus=True),
+         needs_consensus=True),
     dict(key="grna_offtarget", runner="run_grna_offtarget.py",
          extra=["--cas", "SpCas9", "--max-mm", "2"],
-         primary_output="fig_grna_offtarget_pareto.png", needs_consensus=False),
+         needs_consensus=False),
     dict(key="transduction",   runner="run_transduction.py",
          extra=["--tail-bp", "150", "--min-shared", "3"],
-         primary_output="fig_transduction_groups.png",  needs_consensus=False),
+         needs_consensus=False),
     dict(key="antisense",      runner="run_antisense_promoter.py",
          extra=["--promoter-bp", "200"],
-         primary_output="fig_antisense_motifs.png",     needs_consensus=False),
+         needs_consensus=False),
     dict(key="ctcf_tad",       runner="run_ctcf_tad.py",
          extra=["--motif-mismatch", "3"],
-         primary_output="fig_ctcf_overlap.png",         needs_consensus=False),
+         needs_consensus=False),
     dict(key="epigenetic",     runner="run_epigenetic_overlay.py",
          extra=[],          # --preset injected at runtime from --epigenetic-preset
-         primary_output="epigenetic_measured_values.tex", needs_consensus=False),
+         needs_consensus=False),
     dict(key="ortholog",       runner="run_ortholog_insertion.py",
          extra=[],          # --species injected at runtime from --ortholog-species
-         primary_output="ortholog_measured_values.tex", needs_consensus=False),
+         needs_consensus=False),
     dict(key="multiassembly",  runner="run_multiassembly_liftover.py",
          extra=[],          # --source-assembly + --target-assemblies injected at runtime
-         primary_output="multiassembly_measured_values.tex", needs_consensus=False),
+         needs_consensus=False),
     dict(key="fold",           runner="run_fold_prediction.py",
          extra=["--per-cluster", "--min-aa", "100", "--top-n", "5"],
-         primary_output="fold_measured_values.tex",     needs_consensus=True),
+         needs_consensus=True),
     dict(key="divergence",     runner="run_divergence.py",
          extra=[],          # --assembly injected at runtime
-         primary_output="fig_repeat_landscape.png",     needs_consensus=True),
+         needs_consensus=True),
     dict(key="ltr_struct",     runner="run_ltr_struct.py",
          extra=[],
-         primary_output="fig_ltr_struct.png",           needs_consensus=False),
+         needs_consensus=False),
     dict(key="subfamily",      runner="run_subfamily.py",
          extra=[],          # --assembly injected at runtime
-         primary_output="fig_subfamily_tree.png",       needs_consensus=True),
+         needs_consensus=True),
     dict(key="benchmark",      runner="run_benchmark.py",
          extra=[],          # --assembly injected at runtime
-         primary_output="fig_benchmark.png",            needs_consensus=False),
+         needs_consensus=False),
     dict(key="motif_gain",     runner="run_motif_gain.py",
          extra=[],          # --assembly injected at runtime
-         primary_output="motif_gain_values.tex", needs_consensus=True),
+         needs_consensus=True),
 ]
+
+# primary_output is the module's *_values.tex -- see _MODULE_TEX above.
+for _m in _STAGE11_MODULES:
+    _m["primary_output"] = _MODULE_TEX[_m["key"]]
 
 # Macro names to extract from each module's *_values.tex for report_numbers.txt.
 # Only headline numbers; full detail stays in the raw tex files in stage11_dir.
@@ -576,22 +600,7 @@ def _parse_tex_macros(tex_path: Path) -> dict:
 def collect_stage11_meta(family: str, stage11_dir: Path) -> dict:
     """Read the *_values.tex files written by each Stage 11 module and
     return a dict of {module_key: {macro_name: value}} for report generation."""
-    tex_file_map = {
-        "phylo":         stage11_dir / "phylo_measured_values.tex",
-        "grna_offtarget":stage11_dir / "grna_offtarget_measured_values.tex",
-        "transduction":  stage11_dir / "transduction_measured_values.tex",
-        "antisense":     stage11_dir / "antisense_measured_values.tex",
-        "ctcf_tad":      stage11_dir / "ctcf_tad_measured_values.tex",
-        "epigenetic":    stage11_dir / "epigenetic_measured_values.tex",
-        "ortholog":      stage11_dir / "ortholog_measured_values.tex",
-        "multiassembly": stage11_dir / "multiassembly_measured_values.tex",
-        "fold":          stage11_dir / "fold_measured_values.tex",
-        "divergence":    stage11_dir / "repeat_landscape_values.tex",
-        "ltr_struct":    stage11_dir / "ltr_struct_values.tex",
-        "subfamily":     stage11_dir / "subfamily_values.tex",
-        "benchmark":     stage11_dir / "benchmark_values.tex",
-        "motif_gain":    stage11_dir / "motif_gain_values.tex",
-    }
+    tex_file_map = {k: stage11_dir / v for k, v in _MODULE_TEX.items()}
     result: dict = {}
     for mod, path in tex_file_map.items():
         if path.exists():
