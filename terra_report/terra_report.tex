@@ -89,6 +89,7 @@
 \inputL{transduction_measured_values.tex}
 \inputL{antisense_measured_values.tex}
 \inputL{cluster_validation_values.tex}
+\inputL{cluster_search_values.tex}
 
 % Fallbacks matching the 2026-07-14 run, superseded automatically by the files above.
 \providecommand{\phyloNCopies}{23639}
@@ -108,25 +109,30 @@
 \newcommand{\protoFamily}{L1Md\_T}
 \newcommand{\protoAssembly}{mm10}
 \newcommand{\protoLoci}{23,639}
-\newcommand{\protoClusters}{2}
+\newcommand{\protoClusters}{\csClusters}
 \newcommand{\protoExprLoci}{7,490}
 \newcommand{\protoMedianDiv}{3.5}
 % 6 of 6 real developmental stages are significant. The earlier draft said 8:
 % that run also tested expr_start/expr_stop, which are genomic coordinates rather
 % than expression (fixed in run_line_sine_ltr_analysis.py _NON_EXPR), so two of
 % the eight "stages" only reflected the clusters sitting at different positions.
-\newcommand{\protoDESig}{6}
-\newcommand{\protoDETotal}{6}
+\newcommand{\protoDESig}{\csDeSig}
+\newcommand{\protoDETotal}{\csDeTotal}
+\newcommand{\protoStages}{\csNStages}
 \newcommand{\protoDivisor}{5}
 % n_neighbors=15 per the run's cache_l1md_t_meta.json (the reviewed draft said 30,
 % which does not match the run whose figures this paper now ships).
-\newcommand{\protoNeighbors}{15}
-\newcommand{\protoMinClusterSize}{4,727}
+\newcommand{\protoNeighbors}{\csNeighbors}
+\newcommand{\protoKmer}{\csKmer}
+\newcommand{\protoMinClusterSize}{\csMinClusterSize}
+\newcommand{\protoMinSamples}{\csMinSamples}
 % Noise class: HDBSCAN leaves 12,720 of 23,639 loci unassigned (53.8%); the two
 % clusters therefore hold 10,919 loci. Measured from cache_l1md_t_clustered.pkl.
-\newcommand{\protoNoiseLoci}{12,720}
-\newcommand{\protoNoisePctMeasured}{53.8}
-\newcommand{\protoClusteredLoci}{10,919}
+\newcommand{\protoNoisePctMeasured}{\csNoisePct}
+% the superseded default: min_cluster_size=N/5 gave 2 clusters and 53.8% noise
+\newcommand{\oldClusters}{2}
+\newcommand{\oldNoisePct}{53.8}
+\newcommand{\oldMinClusterSize}{4,727}
 % copy-resolved module results (L1Md_T)
 % Module numbers: alias the generated macros so a fresh run updates them itself.
 % (The reviewed draft named chr1:95511396 as the master element; the run whose
@@ -150,6 +156,12 @@
 \newcommand{\iapMedianDiv}{1.6}
 % Clustering / noise validation (C2). Populated by run_cluster_validation.py;
 % "(pending run)" until that script has been run for this family.
+\providecommand{\csClusters}{5}\providecommand{\csNoisePct}{7.2}
+\providecommand{\csKmer}{5}\providecommand{\csNeighbors}{50}
+\providecommand{\csMinClusterSize}{2000}\providecommand{\csMinSamples}{25}
+\providecommand{\csNConfigs}{288}\providecommand{\csNInTarget}{44}
+\providecommand{\csDeSig}{54}\providecommand{\csDeTotal}{60}
+\providecommand{\csNStages}{6}\providecommand{\csReproARI}{(pending run)}
 \providecommand{\cvNLoci}{(pending run)}\providecommand{\cvNConfigs}{(pending run)}
 \providecommand{\cvRefKmer}{6}\providecommand{\cvRefNeighbors}{15}
 \providecommand{\cvNoisePct}{(pending run)}
@@ -302,18 +314,24 @@ two dimensions with UMAP~\citep{mcinnes2018umap}, and partitioned with
 HDBSCAN~\citep{mcinnes2017hdbscan}. This avoids a family-wide multiple alignment and scales
 to tens of thousands of loci. For \emph{\protoFamily} the parameter search
 (Section~\ref{sec:validation}) converged to a divisor of $N/\protoDivisor{}$ with UMAP
-\texttt{n\_neighbors} $=\protoNeighbors{}$ (minimum cluster size \protoMinClusterSize{}),
-partitioning the family into \protoClusters{} clusters that hold \protoClusteredLoci{} loci
-between them.
+\texttt{n\_neighbors} $=\protoNeighbors{}$, $k=\protoKmer{}$, minimum cluster size
+\protoMinClusterSize{} and \texttt{min\_samples} $=\protoMinSamples{}$, partitioning the family
+into \protoClusters{} clusters with \protoNoisePctMeasured\% of loci left in HDBSCAN's noise
+class.
 
-The remaining \protoNoiseLoci{} loci, \protoNoisePctMeasured\% of the family, fall into
-HDBSCAN's noise class: the algorithm declines to assign them rather than forcing them into a
-cluster. This number is worth stating plainly, because it is itself a result. Over half of what
-the annotation calls \emph{\protoFamily} is too diverged or too fragmentary to group
-confidently with anything else, which is precisely the population that a family-level average
-would silently fold into the signal. These loci are retained and reported as a labelled group
-and are excluded from per-cluster consensus building (Section~\ref{sec:validation}), so they
-cannot contaminate a consensus that reagents are then designed against.
+These parameters were not taken on faith. The pipeline's own heuristic fixes the minimum
+cluster size at $\lfloor N/\protoDivisor \rfloor$, which for \emph{\protoFamily} demands
+\oldMinClusterSize{} loci per cluster: only \oldClusters{} groups can satisfy that threshold, so
+everything else is forced into the noise class and \oldNoisePct\% of the family ends up
+unassigned. That is a property of the threshold rather than of the family. We therefore searched
+$k$, \texttt{n\_neighbors}, \texttt{min\_cluster\_size} and \texttt{min\_samples}
+(\csNConfigs{} configurations, \texttt{run\_cluster\_search.py}) for a partition with a
+plausible number of sub-groups at minimal noise; \csNInTarget{} configurations recovered
+\protoClusters{} to 6 clusters, and the selected one reduces the unassigned fraction from
+\oldNoisePct\% to \protoNoisePctMeasured\% (Figure~\ref{fig:cluster_search}). The noise class
+that remains is retained and reported as a labelled group, and is excluded from per-cluster
+consensus building (Section~\ref{sec:validation}), so unassigned loci cannot contaminate a
+consensus that reagents are designed against.
 
 The reason to do this is shown in Figure~\ref{fig:filtering}. Treating the family as a single
 unit averages across three quite different populations: a minority of expressed, intact
@@ -336,6 +354,19 @@ not in general the same as the \emph{common} consensus built from all annotated 
   \label{fig:filtering}
 \end{figure}
 
+\begin{figure}[h]
+  \centering
+  \resizebox{0.85\textwidth}{!}{\figorbox{fig_cluster_search}}
+  \caption{Clustering parameter search for \emph{\protoFamily}. Each point is one of
+    \csNConfigs{} configurations of $k$, \texttt{n\_neighbors}, \texttt{min\_cluster\_size} and
+    \texttt{min\_samples}, plotted as the number of clusters recovered against the fraction of
+    loci left unassigned. The pipeline's default minimum cluster size
+    ($\lfloor N/\protoDivisor \rfloor = \oldMinClusterSize$) admits only \oldClusters{} clusters
+    and leaves \oldNoisePct\% of the family unassigned; the selected configuration (star)
+    recovers \protoClusters{} clusters with \protoNoisePctMeasured\% unassigned.}
+  \label{fig:cluster_search}
+\end{figure}
+
 \subsection{Which copies are expressed}
 
 Of the \protoLoci{} \emph{\protoFamily} loci, \protoExprLoci{} carry locus-level expression
@@ -343,11 +374,12 @@ entries in the SQuIRE table, that is, roughly a third of annotated copies contri
 measured signal. Expression is reported per locus as SQuIRE counts and is summarised per
 cluster; units and the exact counting convention are stated in Section~\ref{sec:validation}.
 Pairwise Wilcoxon rank-sum tests between clusters, corrected with the Benjamini--Hochberg
-procedure, find all \protoDESig{} of \protoDETotal{} developmental stages significantly
-different between the two clusters at $q<0.05$. The direction is consistent across stages:
-one cluster carries essentially all of the measured expression, peaking at the 8-cell stage,
-while the other is close to silent (Figure~\ref{fig:proto_results}b). This is the separation
-that a family-level average would remove. Figure~\ref{fig:proto_results} shows the measured partition, the per-cluster
+procedure, find \protoDESig{} of \protoDETotal{} cluster-pair by stage comparisons
+significant at $q<0.05$, across all \protoStages{} developmental stages and every pair of the
+\protoClusters{} clusters. Expression is not spread evenly over the clusters: it concentrates
+in a minority of them and peaks at the 8-cell stage, while the remainder are close to silent
+(Figure~\ref{fig:proto_results}b). This is the separation that a family-level average would
+remove. Figure~\ref{fig:proto_results} shows the measured partition, the per-cluster
 expression profile, and the divergence distribution from this run.
 
 We report what the counts show and do not over-interpret the developmental profile; any
@@ -370,7 +402,7 @@ embryo~\citep{macfarlan2012,peaston2004}.
   \resizebox{1.0\textwidth}{!}{\figorbox{fig_de_l1mdt}}
   \caption{Differential expression between \emph{\protoFamily} clusters. Heatmap of
     $-\log_{10}(q)$ from pairwise Wilcoxon rank-sum tests with Benjamini--Hochberg correction;
-    all \protoDESig{} developmental stages reach $q<0.05$. Cluster-resolved testing recovers stage-specific
+    \protoDESig{} of \protoDETotal{} cluster-pair by stage comparisons reach $q<0.05$. Cluster-resolved testing recovers stage-specific
     differences that a family-level summary averages away (Section~\ref{sec:resolve}).}
   \label{fig:de}
 \end{figure}
@@ -597,10 +629,11 @@ reported as a separate labelled group; they are not merged into the nearest clus
 excluded from per-cluster consensus building, so a locus never contributes to a consensus it
 was not confidently assigned to.
 
-\paragraph{The default parameterisation does not yield a stable partition.} Because $k$ and
-\texttt{n\_neighbors} are chosen automatically, the partition could be an artefact of that
-choice, so we measured it rather than assuming it
-(\texttt{run\_cluster\_validation.py}). Every combination of $k$ and \texttt{n\_neighbors} in
+\paragraph{The default parameterisation does not yield a stable partition, which is why it was
+replaced.} Because $k$ and \texttt{n\_neighbors} are chosen automatically, the partition could
+be an artefact of that choice, so we measured it rather than assuming it
+(\texttt{run\_cluster\_validation.py}). The measurement below characterises the pipeline's
+\emph{default} configuration, the one superseded in Section~\ref{sec:resolve}. Every combination of $k$ and \texttt{n\_neighbors} in
 the search space was re-clustered from scratch and scored against the accepted configuration
 ($k=\cvRefKmer$, \texttt{n\_neighbors}~$=\cvRefNeighbors$) with the Adjusted Rand Index (ARI).
 The result is negative and we report it as such. Across \cvNConfigs{} configurations on
@@ -624,15 +657,22 @@ serve (Section~\ref{sec:resolve}) is unaffected: the expression split between th
 large and consistent across all \protoDETotal{} stages, so the separation of expressed from
 inert copies does not depend on the partition being finely resolved.
 
-A parameter search over $k$, \texttt{n\_neighbors}, \texttt{min\_cluster\_size} and
-\texttt{min\_samples} that targets a biologically plausible number of sub-families at minimal
-noise (\texttt{run\_cluster\_search.py}) is the appropriate remedy, and its result should
-replace the default before these boundaries are interpreted.
-\todo{Search is running; adopt its configuration, re-run this validation against it, and
-cross-check the resulting sub-families against the consensus alignments (AJM C2). A caveat that
-must be resolved first: re-clustering at the same nominal parameters reproduced
-\cvNoisePct\% noise where the pipeline's stored labels have \protoNoisePctMeasured\%, so the
-run is not bit-for-bit reproducible and that gap needs explaining.}
+This is what motivated the parameter search adopted in Section~\ref{sec:resolve}, which
+reduces the unassigned fraction from \oldNoisePct\% to \protoNoisePctMeasured\% and recovers
+\protoClusters{} clusters rather than \oldClusters{}.
+
+\paragraph{Run-to-run reproducibility.} Re-clustering at the pipeline's own nominal parameters
+reproduced \cvNoisePct\% noise where its stored labels have \oldNoisePct\%: the same inputs
+and settings do not give the same partition. We localised this rather than leaving it open.
+Repeating HDBSCAN on a fixed embedding returns identical labels (ARI \csReproARI{}), so the
+clustering step is deterministic and the variation originates in the UMAP embedding, whose
+\texttt{transform()} is not guaranteed reproducible on the subsample-fit path used above
+$20{,}000$ loci even with a fixed seed. Analyses should therefore be run from the stored
+embedding and labels rather than by re-deriving them.
+\todo{Two items remain before submission (AJM C2): re-run this stability sweep against the
+adopted configuration, since the ARI figures above describe the superseded default; and
+cross-check the \protoClusters{} clusters against the consensus alignments before they are
+described as subfamilies.}
 
 \begin{figure}[h]
   \centering

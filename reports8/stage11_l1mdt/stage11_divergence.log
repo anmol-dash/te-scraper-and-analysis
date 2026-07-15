@@ -1,0 +1,41 @@
+CMD: /usr/local/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/run_divergence.py --input reports8/stage11_l1mdt/l1md_t_clustered.csv --reports-dir reports8/stage11_l1mdt --family L1Md_T --assembly mm10
+EXIT: 0  (4193s)
+STDOUT:
+
+=== DIVERGENCE ANALYSIS (L1Md_T) ===
+  23,639 loci × 30 columns
+  Clusters: [0, 1]
+  No consensus FASTA found — building majority-vote consensus per cluster
+    Cluster 0: consensus len=8659
+    Cluster 1: consensus len=1934
+  Computing K2P divergence (ω=10.0)...
+    500/23639 done
+    1000/23639 done
+    1500/23639 done
+    2500/23639 done
+    3500/23639 done
+    4000/23639 done
+    5000/23639 done
+    6000/23639 done
+    6500/23639 done
+    8000/23639 done
+    8500/23639 done
+    10000/23639 done
+    11500/23639 done
+    12500/23639 done
+    13500/23639 done
+    15500/23639 done
+    17500/23639 done
+    18000/23639 done
+    20000/23639 done
+    21000/23639 done
+    21500/23639 done
+  Per-locus CSV → reports8/stage11_l1mdt/divergence_per_locus.csv
+  PDF → reports8/stage11_l1mdt/fig_repeat_landscape.pdf
+  PNG → reports8/stage11_l1mdt/fig_repeat_landscape.png
+  Per-cluster PNG → reports8/stage11_l1mdt/fig_repeat_landscape_per_cluster.png
+  Stats CSV → reports8/stage11_l1mdt/divergence_stats.csv
+  LaTeX values → reports8/stage11_l1mdt/repeat_landscape_values.tex
+
+STDERR:
+

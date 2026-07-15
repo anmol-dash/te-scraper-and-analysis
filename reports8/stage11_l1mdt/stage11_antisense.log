@@ -1,0 +1,29 @@
+CMD: /usr/local/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/run_antisense_promoter.py --input reports8/stage11_l1mdt/l1md_t_clustered.csv --reports-dir reports8/stage11_l1mdt --family L1Md_T --promoter-bp 200
+EXIT: 0  (88s)
+STDOUT:
+[05:56:24] ============================================================
+[05:56:24] GAMECA Antisense / Bidirectional Promoter --- L1Md_T
+[05:56:24] ============================================================
+[05:56:27]   No stranded expression columns --- using sequence bidirectionality only.
+[05:56:30]   Wrote reports8/stage11_l1mdt/antisense_per_copy.csv
+[05:57:49]   Saved reports8/stage11_l1mdt/fig_antisense_motifs.pdf
+[05:57:49]   Saved reports8/stage11_l1mdt/fig_antisense_expr.pdf
+[05:57:49]   Written antisense_measured_values.tex and antisense_report.txt
+[05:57:49] ============================================================
+[05:57:49] DONE
+
+============================================================
+MEASURED VALUES (paste into chat):
+============================================================
+============================================================
+GAMECA Antisense / Bidirectional Promoter --- Measured Values
+Generated: 2026-07-14 05:57:49
+============================================================
+  Family:                  L1Md_T
+  Copies:                  23639
+  Bidirectional (>=0.4):   13246
+  Median bidir. score:     0.500
+  Stranded expression:     no
+
+STDERR:
+

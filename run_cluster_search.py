@@ -99,6 +99,41 @@ def hdb(emb, mcs, min_samples):
     return np.asarray(lbl)
 
 
+def _regen_expression(df, args, out):
+    """Recompute DE + expression figures from df['Cluster'] with corrected columns.
+
+    Shared by --regen-only and the --apply path so both use one implementation.
+    Returns (n_significant, n_tests, expr_cols).
+    """
+    import importlib.util
+    import shutil as _sh
+    spec = importlib.util.spec_from_file_location("rl", HERE / "run_line_sine_ltr_analysis.py")
+    rl = importlib.util.module_from_spec(spec); spec.loader.exec_module(rl)
+
+    expr_cols = rl._auto_expr_cols(df)     # excludes expr_start/expr_stop after the fix
+    if not expr_cols:
+        _pp("  no expression columns present; skipping expression regeneration")
+        return 0, 0, []
+    _pp(f"  regenerating expression/DE over {len(expr_cols)} columns: {expr_cols}")
+    de = rl.differential_expression(df, expr_cols)
+    de.to_csv(out / f"de_{args.family.lower()}.csv", index=False)
+    tag = args.family.lower().replace("_", "")
+    rl.plot_de_heatmap(de, args.family, out / f"fig_de_{tag}.pdf")
+    rl.plot_family_results(df, args.family, expr_cols, out / f"fig_{tag}_results.pdf")
+    nsig = int(de["sig"].sum()) if "sig" in de else 0
+    _pp(f"  DE: {nsig}/{len(de)} comparisons significant (BH-FDR < 0.05)")
+
+    # The manuscript and the cross-family script use the per-class alias
+    # (fig_line_results / fig_sine_results / fig_ltr_results), not fig_<tag>_results.
+    alias = {"l1md_t": "fig_line_results", "b1_mus2": "fig_sine_results",
+             "iapltr1_mm": "fig_ltr_results"}.get(args.family.lower())
+    if alias:
+        for d in (out, out.parent):
+            _sh.copy2(out / f"fig_{tag}_results.pdf", d / f"{alias}.pdf")
+        _pp(f"  wrote {alias}.pdf (manuscript alias) in {out} and {out.parent}")
+    return nsig, len(de), expr_cols
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -120,6 +155,17 @@ def main():
     p.add_argument("--apply", action="store_true",
                    help="Re-cluster with the winning config and regenerate "
                         "expression/DE outputs.")
+    p.add_argument("--regen-only", action="store_true",
+                   help="Skip the search entirely. Recompute expression/DE from the "
+                        "Cluster column already in --input, using the corrected "
+                        "expression columns. Use this to rebuild a family whose "
+                        "figures carry the expr_start/expr_stop coordinate bug.")
+    p.add_argument("--repro-check", type=int, default=0, metavar="N",
+                   help="Re-run the winning config N extra times and report whether "
+                        "the labels are identical (ARI between repeats). UMAP's "
+                        "transform() is not guaranteed deterministic on the >20k "
+                        "subsample path even with a fixed seed, so this measures "
+                        "reproducibility instead of assuming it.")
     args = p.parse_args()
 
     out = Path(args.reports_dir); out.mkdir(parents=True, exist_ok=True)
@@ -129,6 +175,20 @@ def main():
     df = df[df["Seq"].astype(str).str.len() > 0].reset_index(drop=True)
     seqs = df["Seq"].astype(str).tolist()
     n = len(seqs)
+
+    # --regen-only: no search, just rebuild expression/DE off the existing labels.
+    # This is the fix path for families whose figures were built when
+    # expr_start/expr_stop (genomic coordinates) were treated as expression.
+    if args.regen_only:
+        if "Cluster" not in df.columns:
+            sys.exit("FATAL: --regen-only needs an existing 'Cluster' column in --input.")
+        _pp(f"=== REGENERATE EXPRESSION ONLY ({args.family}) ===")
+        vc = df["Cluster"].value_counts()
+        nc = len([c for c in vc.index if c != -1])
+        _pp(f"  {n:,} loci | {nc} existing clusters | "
+            f"noise {vc.get(-1, 0)/len(df)*100:.1f}%")
+        _regen_expression(df, args, out)
+        return
 
     _pp(f"=== CLUSTER PARAMETER SEARCH ({args.family}) ===")
     _pp(f"  {n:,} loci | target {args.min_clusters}-{args.max_clusters} clusters, minimal noise")
@@ -241,33 +301,29 @@ def main():
     _pp(f"  wrote {csv_path}  ({int(best['n_clusters'])} clusters, "
         f"noise {best['noise_frac']*100:.1f}%)")
 
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("rl", HERE / "run_line_sine_ltr_analysis.py")
-    rl = importlib.util.module_from_spec(spec); spec.loader.exec_module(rl)
-    expr_cols = rl._auto_expr_cols(df)      # excludes expr_start/expr_stop
-    if not expr_cols:
-        _pp("  no expression columns present; skipping expression regeneration")
-        return
-    _pp(f"  regenerating expression/DE over {len(expr_cols)} columns: {expr_cols}")
-    de = rl.differential_expression(df, expr_cols)
-    de.to_csv(out / f"de_{args.family.lower()}.csv", index=False)
-    tag = args.family.lower().replace("_", "")
-    rl.plot_de_heatmap(de, args.family, out / f"fig_de_{tag}.pdf")
-    rl.plot_family_results(df, args.family, expr_cols, out / f"fig_{tag}_results.pdf")
-    nsig = int(de["sig"].sum()) if "sig" in de else 0
-    _pp(f"  DE: {nsig}/{len(de)} comparisons significant (BH-FDR < 0.05)")
-    _pp(f"  wrote fig_de_{tag}.pdf and fig_{tag}_results.pdf")
+    # Determinism self-check: UMAP's transform() on the >20k subsample path is not
+    # guaranteed reproducible even with a fixed seed, and re-clustering L1Md_T at the
+    # pipeline's own nominal parameters produced 35.4% noise where its stored labels
+    # have 53.8%. Measure it rather than assume it.
+    repro_ari = None
+    if args.repro_check:
+        from sklearn.metrics import adjusted_rand_score
+        aris = []
+        for i in range(args.repro_check):
+            lbl2 = hdb(emb, int(best["min_cluster_size"]), int(best["min_samples"]))
+            aris.append(adjusted_rand_score(lbl, lbl2))
+        repro_ari = float(min(aris))
+        verdict = "identical" if repro_ari >= 0.999 else "NOT reproducible"
+        _pp(f"  determinism check ({args.repro_check} repeats on the cached embedding): "
+            f"min ARI {repro_ari:.4f} -> {verdict}")
+        if repro_ari < 0.999:
+            _pp("    NOTE: HDBSCAN on a fixed embedding differs between runs; the "
+                "instability is downstream of UMAP.")
+        else:
+            _pp("    NOTE: HDBSCAN is stable on a fixed embedding, so any run-to-run "
+                "difference comes from the UMAP embedding, not the clustering step.")
 
-    # The manuscript and the cross-family script refer to the per-class alias
-    # (fig_line_results / fig_sine_results / fig_ltr_results), not fig_<tag>_results.
-    # Emit the alias too, or the report's figure silently keeps the stale version.
-    alias = {"l1md_t": "fig_line_results", "b1_mus2": "fig_sine_results",
-             "iapltr1_mm": "fig_ltr_results"}.get(args.family.lower())
-    if alias:
-        import shutil as _sh
-        for d in (out, out.parent):          # stage11_<tag>/ and reports8/
-            _sh.copy2(out / f"fig_{tag}_results.pdf", d / f"{alias}.pdf")
-        _pp(f"  wrote {alias}.pdf (manuscript alias) in {out} and {out.parent}")
+    nsig, ntests, expr_cols = _regen_expression(df, args, out)
 
     with open(out / "cluster_search_values.tex", "w") as fh:
         fh.write(f"% Auto-generated by run_cluster_search.py ({args.family})\n")
@@ -278,8 +334,12 @@ def main():
         fh.write(f"\\providecommand{{\\csMinClusterSize}}{{{int(best['min_cluster_size'])}}}\n")
         fh.write(f"\\providecommand{{\\csMinSamples}}{{{int(best['min_samples'])}}}\n")
         fh.write(f"\\providecommand{{\\csNConfigs}}{{{len(res)}}}\n")
+        fh.write(f"\\providecommand{{\\csNInTarget}}{{{int(res['in_target'].sum())}}}\n")
         fh.write(f"\\providecommand{{\\csDeSig}}{{{nsig}}}\n")
-        fh.write(f"\\providecommand{{\\csDeTotal}}{{{len(de)}}}\n")
+        fh.write(f"\\providecommand{{\\csDeTotal}}{{{ntests}}}\n")
+        fh.write(f"\\providecommand{{\\csNStages}}{{{len(expr_cols)}}}\n")
+        if repro_ari is not None:
+            fh.write(f"\\providecommand{{\\csReproARI}}{{{repro_ari:.3f}}}\n")
     _pp(f"  wrote {out/'cluster_search_values.tex'}")
 
 

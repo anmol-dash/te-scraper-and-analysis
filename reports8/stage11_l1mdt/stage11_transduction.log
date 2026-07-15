@@ -1,0 +1,31 @@
+CMD: /usr/local/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/run_transduction.py --input reports8/stage11_l1mdt/l1md_t_clustered.csv --reports-dir reports8/stage11_l1mdt --family L1Md_T --tail-bp 150 --min-shared 3
+EXIT: 0  (2011s)
+STDOUT:
+[05:22:53] ============================================================
+[05:22:53] GAMECA 3' Transduction --- L1Md_T
+[05:22:53] ============================================================
+[05:22:58]   23639 copies; consensus tail 150 bp
+[05:54:50]   3 candidate transduction lineages (>= 2 copies, >= 3 shared k-mers)
+[05:56:22]   Saved reports8/stage11_l1mdt/fig_transduction_groups.pdf
+[05:56:22]   Saved reports8/stage11_l1mdt/fig_transduction_polya.pdf
+[05:56:22]   Written transduction_measured_values.tex and transduction_report.txt
+[05:56:22] ============================================================
+[05:56:22] DONE
+
+============================================================
+MEASURED VALUES (paste into chat):
+============================================================
+============================================================
+GAMECA 3' Transduction --- Measured Values
+Generated: 2026-07-14 05:56:22
+============================================================
+  Family:               L1Md_T
+  Copies:               23639
+  Transduction lineages:3
+  Largest lineage:      23555 copies
+  Copies in a lineage:  23569
+  With poly-A signal:   8227
+  Median poly-A tail:   0 bp
+
+STDERR:
+

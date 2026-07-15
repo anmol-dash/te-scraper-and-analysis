@@ -1,0 +1,10 @@
+============================================================
+GAMECA CTCF / TAD --- Measured Values
+Generated: 2026-07-14 06:00:13
+============================================================
+  Family:               L1Md_T
+  Copies:               23639
+  CTCF core motif:      3927
+  CTCF ChIP overlap:    n/a (no peaks file)
+  Boundary-proximal:    n/a (no TAD file)
+  Median TAD distance:  n/a

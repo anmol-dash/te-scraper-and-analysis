@@ -1,0 +1,31 @@
+CMD: /usr/local/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/run_ctcf_tad.py --input reports8/stage11_l1mdt/l1md_t_clustered.csv --reports-dir reports8/stage11_l1mdt --family L1Md_T --motif-mismatch 3
+EXIT: 0  (142s)
+STDOUT:
+[05:57:53] ============================================================
+[05:57:53] GAMECA CTCF / TAD --- L1Md_T
+[05:57:53] ============================================================
+[05:57:54]   23639 loci
+[06:00:10]   CTCF core-motif scan: 3927/23639 copies hit (<= 3 mismatch)
+[06:00:12]   Wrote reports8/stage11_l1mdt/ctcf_tad_per_copy.csv
+[06:00:12]   Saved reports8/stage11_l1mdt/fig_ctcf_overlap.pdf
+[06:00:13]   Saved reports8/stage11_l1mdt/fig_ctcf_tad_distance.pdf
+[06:00:13]   Written ctcf_tad_measured_values.tex and ctcf_tad_report.txt
+[06:00:13] ============================================================
+[06:00:13] DONE
+
+============================================================
+MEASURED VALUES (paste into chat):
+============================================================
+============================================================
+GAMECA CTCF / TAD --- Measured Values
+Generated: 2026-07-14 06:00:13
+============================================================
+  Family:               L1Md_T
+  Copies:               23639
+  CTCF core motif:      3927
+  CTCF ChIP overlap:    n/a (no peaks file)
+  Boundary-proximal:    n/a (no TAD file)
+  Median TAD distance:  n/a
+
+STDERR:
+

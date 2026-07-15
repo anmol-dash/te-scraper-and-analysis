@@ -1,0 +1,29 @@
+CMD: /usr/local/bin/python3 /home/amodz/anmol/te-scraper-and-analysis/run_multiassembly_liftover.py --input reports8/stage11_l1mdt/l1md_t_clustered.csv --reports-dir reports8/stage11_l1mdt --family L1Md_T --source-assembly mm10
+EXIT: 0  (6s)
+STDOUT:
+[06:00:25] ============================================================
+[06:00:25] GAMECA Multi-Assembly Liftover --- L1Md_T (from mm10)
+[06:00:25] ============================================================
+[06:00:26]   23639 loci
+[06:00:26]   No chains available. Use --target-assemblies hg19 t2t to auto-download, or pass --chains ASM=chain.
+[06:00:29]   Wrote reports8/stage11_l1mdt/multiassembly_per_copy.csv
+[06:00:29]   Saved reports8/stage11_l1mdt/fig_multiassembly_mapping.pdf
+[06:00:29]   Saved reports8/stage11_l1mdt/fig_multiassembly_coords.pdf
+[06:00:29]   Written multiassembly_measured_values.tex and multiassembly_report.txt
+[06:00:29] ============================================================
+[06:00:29] DONE
+
+============================================================
+MEASURED VALUES (paste into chat):
+============================================================
+============================================================
+GAMECA Multi-Assembly Liftover --- Measured Values
+Generated: 2026-07-14 06:00:29
+============================================================
+  Family:           L1Md_T
+  Source assembly:  mm10
+  Copies:           23639
+  Target assemblies:0  (none)
+
+STDERR:
+

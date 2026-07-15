@@ -1,0 +1,9 @@
+{
+  "kmer": 5,
+  "n_neighbors": 50,
+  "min_cluster_size": 2000,
+  "min_samples": 25,
+  "n_clusters": 5,
+  "noise_frac": 0.07242269131519946,
+  "in_target": 1
+}
