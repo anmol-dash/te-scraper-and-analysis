@@ -1,0 +1,273 @@
+\begin{thebibliography}{30}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\expandafter\ifx\csname urlstyle\endcsname\relax
+  \providecommand{\doi}[1]{doi: #1}\else
+  \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[Bourque et~al.(2018)Bourque, Burns, Gehring, Gorbunova, Seluanov,
+  Hammell, Imbeault, Izsv{\'a}k, Levin, Macfarlan, Mager, and
+  Feschotte]{bourque2018}
+Guillaume Bourque, Kathleen~H. Burns, Mary Gehring, Vera Gorbunova, Andrei
+  Seluanov, Molly Hammell, Micha{\"e}l Imbeault, Zsuzsanna Izsv{\'a}k, Henry~L.
+  Levin, Todd~S. Macfarlan, Dixie~L. Mager, and C{\'e}dric Feschotte.
+\newblock Ten things you should know about transposable elements.
+\newblock \emph{Genome Biology}, 19\penalty0 (1):\penalty0 199, 2018.
+\newblock \doi{10.1186/s13059-018-1577-z}.
+
+\bibitem[Flynn et~al.(2020)Flynn, Hubley, Goubert, Rosen, Clark, Feschotte, and
+  Smit]{flynn2020}
+Jullien~M. Flynn, Robert Hubley, Cl{\'e}ment Goubert, Jeb Rosen, Andrew~G.
+  Clark, C{\'e}dric Feschotte, and Arian~F. Smit.
+\newblock {RepeatModeler2} for automated genomic discovery of transposable
+  element families.
+\newblock \emph{Proceedings of the National Academy of Sciences}, 117\penalty0
+  (17):\penalty0 9451--9457, 2020.
+\newblock \doi{10.1073/pnas.1921046117}.
+
+\bibitem[Yang et~al.(2019)Yang, Ardeljan, Pacyna, Payer, and
+  Burns]{yang2019squire}
+Wan~R. Yang, Daniel Ardeljan, Clarissa~N. Pacyna, Lindsay~M. Payer, and
+  Kathleen~H. Burns.
+\newblock {SQuIRE} reveals locus-specific regulation of interspersed repeat
+  expression.
+\newblock \emph{Nucleic Acids Research}, 47\penalty0 (5):\penalty0 e27, 2019.
+\newblock \doi{10.1093/nar/gky1301}.
+
+\bibitem[Jin et~al.(2015)Jin, Tam, Paniagua, and Hammell]{jin2015tetranscripts}
+Ying Jin, Oliver~H. Tam, Eric Paniagua, and Molly Hammell.
+\newblock {TEtranscripts}: a package for including transposable elements in
+  differential expression analysis of {RNA-seq} datasets.
+\newblock \emph{Bioinformatics}, 31\penalty0 (22):\penalty0 3593--3599, 2015.
+
+\bibitem[Bendall et~al.(2019)Bendall, de~Mulder, I{\~n}iguez, Lecanda-Sánchez,
+  Pérez-Losada, Ostrowski, Jones, Mulder, Reyes-Terán, Crandall, Ormsby, and
+  Nixon]{bendall2019telescope}
+Matthew~L. Bendall, Miguel de~Mulder, Luis~P. I{\~n}iguez, Aarón
+  Lecanda-Sánchez, Marcos Pérez-Losada, Mario~A. Ostrowski, R.~Brad Jones,
+  Lubbertus C.~F. Mulder, Gustavo Reyes-Terán, Keith~A. Crandall,
+  Christopher~E. Ormsby, and Douglas~F. Nixon.
+\newblock Telescope: characterization of the retrotranscriptome by accurate
+  estimation of transposable element expression.
+\newblock \emph{PLoS Computational Biology}, 15\penalty0 (9):\penalty0
+  e1006453, 2019.
+
+\bibitem[Di~Tommaso et~al.(2017)Di~Tommaso, Chatzou, Floden, Barja, Palumbo,
+  and Notredame]{ditommaso2017}
+Paolo Di~Tommaso, Maria Chatzou, Evan~W. Floden, Pablo~Prieto Barja, Emilio
+  Palumbo, and Cedric Notredame.
+\newblock Nextflow enables reproducible computational workflows.
+\newblock \emph{Nature Biotechnology}, 35\penalty0 (4):\penalty0 316--319,
+  2017.
+\newblock \doi{10.1038/nbt.3820}.
+
+\bibitem[Ewels et~al.(2020)Ewels, Peltzer, Fillinger, Patel, Alneberg, Wilm,
+  Garcia, Di~Tommaso, and Nahnsen]{ewels2020}
+Philip~A. Ewels, Alexander Peltzer, Sven Fillinger, Harshil Patel, Johannes
+  Alneberg, Andreas Wilm, Maxime~Ulysse Garcia, Paolo Di~Tommaso, and Sven
+  Nahnsen.
+\newblock The nf-core framework for community-curated bioinformatics pipelines.
+\newblock \emph{Nature Biotechnology}, 38\penalty0 (3):\penalty0 276--278,
+  2020.
+\newblock \doi{10.1038/s41587-020-0439-x}.
+
+\bibitem[Lander et~al.(2001)]{lander2001}
+Eric~S. Lander et~al.
+\newblock Initial sequencing and analysis of the human genome.
+\newblock \emph{Nature}, 409\penalty0 (6822):\penalty0 860--921, 2001.
+\newblock \doi{10.1038/35057062}.
+
+\bibitem[Wicker et~al.(2007)Wicker, Sabot, Hua-Van, Bennetzen, Capy, Chalhoub,
+  Flavell, Leroy, Morgante, Panaud, Paux, SanMiguel, and Schulman]{wicker2007}
+Thomas Wicker, Fran{\c{c}}ois Sabot, Aur{\'e}lie Hua-Van, Jeffrey~L. Bennetzen,
+  Pierre Capy, Boulos Chalhoub, Andrew Flavell, Philippe Leroy, Michele
+  Morgante, Olivier Panaud, Etienne Paux, Phillip SanMiguel, and Alan~H.
+  Schulman.
+\newblock A unified classification system for eukaryotic transposable elements.
+\newblock \emph{Nature Reviews Genetics}, 8\penalty0 (12):\penalty0 973--982,
+  2007.
+\newblock \doi{10.1038/nrg2165}.
+
+\bibitem[Chuong et~al.(2017)Chuong, Elde, and Feschotte]{chuong2017enhancers}
+Edward~B. Chuong, Nels~C. Elde, and C{\'e}dric Feschotte.
+\newblock Regulatory activities of transposable elements: from conflicts to
+  benefits.
+\newblock \emph{Nature Reviews Genetics}, 18\penalty0 (2):\penalty0 71--86,
+  2017.
+\newblock \doi{10.1038/nrg.2016.139}.
+
+\bibitem[Hubley et~al.(2016)Hubley, Finn, Clements, Eddy, Jones, Bao, Smit, and
+  Wheeler]{hubley2016}
+Robert Hubley, Robert~D. Finn, Jody Clements, Sean~R. Eddy, Thomas~A. Jones,
+  Weidong Bao, Arian F.~A. Smit, and Travis~J. Wheeler.
+\newblock The {Dfam} database of repetitive {DNA} families.
+\newblock \emph{Nucleic Acids Research}, 44\penalty0 (D1):\penalty0 D81--D89,
+  2016.
+\newblock \doi{10.1093/nar/gkv1272}.
+
+\bibitem[He et~al.(2021)He, Babarinde, Sun, Xu, Chen, Shi, Wei, Li, Ma, Zhuang,
+  Jouneau, Chen, Esteban, and Hutchins]{he2021scte}
+Jiangping He, Isaac~A. Babarinde, Li~Sun, Shuyang Xu, Ruhai Chen, Junjie Shi,
+  Yuanjie Wei, Yuhao Li, Gang Ma, Qiang Zhuang, Alice Jouneau, Jiekai Chen,
+  Miguel~A. Esteban, and Andrew~P. Hutchins.
+\newblock Identifying transposable element expression dynamics and
+  heterogeneity during development at the single-cell level with a processing
+  pipeline {scTE}.
+\newblock \emph{Nature Communications}, 12:\penalty0 1456, 2021.
+
+\bibitem[Tokuyama et~al.(2018)Tokuyama, Kong, Song, Jayewickreme, Kang, and
+  Iwasaki]{tokuyama2018ervmap}
+Maria Tokuyama, Yong Kong, Eric Song, Teshika Jayewickreme, Insoo Kang, and
+  Akiko Iwasaki.
+\newblock {ERVmap} analysis reveals genome-wide transcription of human
+  endogenous retroviruses.
+\newblock \emph{Proceedings of the National Academy of Sciences}, 115\penalty0
+  (50):\penalty0 12565--12572, 2018.
+
+\bibitem[{The Galaxy Community}(2022)]{galaxy2022}
+{The Galaxy Community}.
+\newblock The galaxy platform for accessible, reproducible and collaborative
+  biomedical analyses: 2022 update.
+\newblock \emph{Nucleic Acids Research}, 50\penalty0 (W1):\penalty0 W345--W351,
+  2022.
+\newblock \doi{10.1093/nar/gkac247}.
+
+\bibitem[Reich et~al.(2006)Reich, Liefeld, Gould, Lerner, Tamayo, and
+  Mesirov]{genepattern2006}
+Michael Reich, Ted Liefeld, Joshua Gould, Jim Lerner, Pablo Tamayo, and Jill~P.
+  Mesirov.
+\newblock {GenePattern} 2.0.
+\newblock \emph{Nature Genetics}, 38\penalty0 (5):\penalty0 500--501, 2006.
+\newblock \doi{10.1038/ng0506-500}.
+
+\bibitem[Pedregosa et~al.(2011)Pedregosa, Varoquaux, Gramfort, Michel, Thirion,
+  Grisel, Blondel, Prettenhofer, Weiss, Dubourg, Vanderplas, Passos,
+  Cournapeau, Brucher, Perrot, and Duchesnay]{pedregosa2011}
+Fabian Pedregosa, Ga{\"e}l Varoquaux, Alexandre Gramfort, Vincent Michel,
+  Bertrand Thirion, Olivier Grisel, Mathieu Blondel, Peter Prettenhofer, Ron
+  Weiss, Vincent Dubourg, Jake Vanderplas, Alexandre Passos, David Cournapeau,
+  Matthieu Brucher, Matthieu Perrot, and {\'E}douard Duchesnay.
+\newblock Scikit-learn: Machine learning in {Python}.
+\newblock \emph{Journal of Machine Learning Research}, 12:\penalty0 2825--2830,
+  2011.
+
+\bibitem[McInnes et~al.(2018)McInnes, Healy, and Melville]{mcinnes2018umap}
+Leland McInnes, John Healy, and James Melville.
+\newblock {UMAP}: Uniform manifold approximation and projection for dimension
+  reduction.
+\newblock \emph{arXiv preprint arXiv:1802.03426}, 2018.
+\newblock \doi{10.48550/arXiv.1802.03426}.
+
+\bibitem[McInnes et~al.(2017)McInnes, Healy, and Astels]{mcinnes2017hdbscan}
+Leland McInnes, John Healy, and Steve Astels.
+\newblock hdbscan: Hierarchical density based clustering.
+\newblock \emph{Journal of Open Source Software}, 2\penalty0 (11):\penalty0
+  205, 2017.
+\newblock \doi{10.21105/joss.00205}.
+
+\bibitem[Macfarlan et~al.(2012)Macfarlan, Gifford, Driscoll, Lettieri, Rowe,
+  Bonanomi, Firth, Singer, Trono, and Pfaff]{macfarlan2012}
+Todd~S. Macfarlan, Wesley~D. Gifford, Shawn Driscoll, Kathleen Lettieri,
+  Helen~M. Rowe, Dario Bonanomi, Amy Firth, Oded Singer, Didier Trono, and
+  Samuel~L. Pfaff.
+\newblock Embryonic stem cell potency fluctuates with endogenous retrovirus
+  activity.
+\newblock \emph{Nature}, 487\penalty0 (7405):\penalty0 57--63, 2012.
+\newblock \doi{10.1038/nature11244}.
+
+\bibitem[Peaston et~al.(2004)Peaston, Evsikov, Graber, de~Vries, Holbrook,
+  Solter, and Knowles]{peaston2004}
+Anne~E. Peaston, Alexei~V. Evsikov, Joel~H. Graber, Wilhelmine~N. de~Vries,
+  Andrea~E. Holbrook, Davor Solter, and Barbara~B. Knowles.
+\newblock Retrotransposons regulate host genes in mouse oocytes and
+  preimplantation embryos.
+\newblock \emph{Developmental Cell}, 7\penalty0 (4):\penalty0 597--606, 2004.
+\newblock \doi{10.1016/j.devcel.2004.09.004}.
+
+\bibitem[Katoh et~al.(2002)Katoh, Misawa, Kuma, and Miyata]{katoh2002mafft}
+Kazutaka Katoh, Kazuharu Misawa, Kei-ichi Kuma, and Takashi Miyata.
+\newblock {MAFFT}: a novel method for rapid multiple sequence alignment based
+  on fast {Fourier} transform.
+\newblock \emph{Nucleic Acids Research}, 30\penalty0 (14):\penalty0 3059--3066,
+  2002.
+\newblock \doi{10.1093/nar/gkf436}.
+
+\bibitem[Kimura(1980)]{kimura1980}
+Motoo Kimura.
+\newblock A simple method for estimating evolutionary rates of base
+  substitutions through comparative studies of nucleotide sequences.
+\newblock \emph{Journal of Molecular Evolution}, 16\penalty0 (2):\penalty0
+  111--120, 1980.
+\newblock \doi{10.1007/BF01731581}.
+
+\bibitem[Castro-Mondragon et~al.(2022)Castro-Mondragon, Riudavets-Puig,
+  Rauluseviciute, Berhanu~Lemma, Turchi, Blanc-Mathieu, Lucas, Boddie, Khan,
+  Manosalva~P{\'e}rez, et~al.]{castromondragon2022jaspar}
+Jaime~A. Castro-Mondragon, Rafael Riudavets-Puig, Ieva Rauluseviciute, Roza
+  Berhanu~Lemma, Laura Turchi, Romain Blanc-Mathieu, Jeremy Lucas, Paul Boddie,
+  Aziz Khan, Nicol{\'a}s Manosalva~P{\'e}rez, et~al.
+\newblock {JASPAR} 2022: the 9th release of the open-access database of
+  transcription factor binding profiles.
+\newblock \emph{Nucleic Acids Research}, 50\penalty0 (D1):\penalty0 D165--D173,
+  2022.
+\newblock \doi{10.1093/nar/gkab1113}.
+
+\bibitem[Quinlan and Hall(2010)]{quinlan2010bedtools}
+Aaron~R. Quinlan and Ira~M. Hall.
+\newblock {BEDTools}: a flexible suite of utilities for comparing genomic
+  features.
+\newblock \emph{Bioinformatics}, 26\penalty0 (6):\penalty0 841--842, 2010.
+\newblock \doi{10.1093/bioinformatics/btq033}.
+
+\bibitem[Kent et~al.(2002)Kent, Sugnet, Furey, Roskin, Pringle, Zahler, and
+  Haussler]{kent2002ucsc}
+W.~James Kent, Charles~W. Sugnet, Terrence~S. Furey, Krishna~M. Roskin, Tom~H.
+  Pringle, Alan~M. Zahler, and David Haussler.
+\newblock The human genome browser at {UCSC}.
+\newblock \emph{Genome Research}, 12\penalty0 (6):\penalty0 996--1006, 2002.
+\newblock \doi{10.1101/gr.229102}.
+
+\bibitem[Xin et~al.(2016)Xin, Mark, Afrasiabi, Tsueng, Juchler, Gopal, Stupp,
+  Putman, Ainscough, Griffith, Torkamani, Whetzel, Mungall, Mooney, Su, and
+  Wu]{xin2016mygene}
+Jiwen Xin, Adam Mark, Cyrus Afrasiabi, Ginger Tsueng, Moritz Juchler, Nikhil
+  Gopal, Gregory~S. Stupp, Timothy~E. Putman, Benjamin~J. Ainscough, Obi~L.
+  Griffith, Ali Torkamani, Patricia~L. Whetzel, Christopher~J. Mungall, Sean~D.
+  Mooney, Andrew~I. Su, and Chunlei Wu.
+\newblock High-performance web services for querying gene and variant
+  annotation.
+\newblock \emph{Genome Biology}, 17\penalty0 (1):\penalty0 91, 2016.
+\newblock \doi{10.1186/s13059-016-0953-9}.
+
+\bibitem[Tumescheit et~al.(2022)Tumescheit, Firth, and
+  Brown]{tumescheit2022cialign}
+Charlotte Tumescheit, Andrew~E. Firth, and Katherine Brown.
+\newblock {CIAlign}: A highly customisable command line tool to clean,
+  interpret and visualise multiple sequence alignments.
+\newblock \emph{PeerJ}, 10:\penalty0 e12983, 2022.
+\newblock \doi{10.7717/peerj.12983}.
+
+\bibitem[Behnel et~al.(2011)Behnel, Bradshaw, Citro, Dalcin, Seljebotn, and
+  Smith]{behnel2011cython}
+Stefan Behnel, Robert Bradshaw, Craig Citro, Lisandro Dalcin, Dag~Sverre
+  Seljebotn, and Kurt Smith.
+\newblock Cython: The best of both worlds.
+\newblock \emph{Computing in Science \& Engineering}, 13\penalty0 (2):\penalty0
+  31--39, 2011.
+\newblock \doi{10.1109/MCSE.2010.118}.
+
+\bibitem[Love et~al.(2014)Love, Huber, and Anders]{love2014deseq2}
+Michael~I. Love, Wolfgang Huber, and Simon Anders.
+\newblock Moderated estimation of fold change and dispersion for {RNA-seq} data
+  with {DESeq2}.
+\newblock \emph{Genome Biology}, 15\penalty0 (12):\penalty0 550, 2014.
+\newblock \doi{10.1186/s13059-014-0550-8}.
+
+\bibitem[Robinson et~al.(2010)Robinson, McCarthy, and Smyth]{robinson2010edger}
+Mark~D. Robinson, Davis~J. McCarthy, and Gordon~K. Smyth.
+\newblock {edgeR}: a {Bioconductor} package for differential expression
+  analysis of digital gene expression data.
+\newblock \emph{Bioinformatics}, 26\penalty0 (1):\penalty0 139--140, 2010.
+\newblock \doi{10.1093/bioinformatics/btp616}.
+
+\end{thebibliography}
