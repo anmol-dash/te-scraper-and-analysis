@@ -89,6 +89,11 @@ class GenomeCache:
     MAX_GENOME_HITS = 10_000
 
     def __init__(self, fasta_path, cache_dir=None):
+        """Create an unloaded cache for the given FASTA (call load() to populate).
+
+        cache_dir is where the parsed-genome pickle is read from / written to so
+        subsequent runs skip re-parsing the FASTA.
+        """
         self.genomes = {}
         self.fasta_path = Path(fasta_path) if fasta_path else None
         self._loaded = False

@@ -49,6 +49,12 @@ from pathlib import Path
 # query.py is designed to run on a SLURM or LSF cluster.  Bypass with --local
 # for local execution or --test for CI/unit-test mode.
 def _check_hpc_environment():
+    """Abort early with guidance unless we're on an HPC scheduler (LSF/Slurm).
+
+    The full pipeline is designed to run on a cluster node. Local/test/help and
+    other self-contained invocations (--local, --test, --run-stage, --nextflow,
+    -h) are exempt; everything else exits(1) with instructions.
+    """
     on_slurm = bool(os.environ.get("SLURM_JOB_ID") or os.environ.get("SLURM_NODELIST"))
     on_lsf   = bool(os.environ.get("LSB_JOBID")    or os.environ.get("LSB_HOSTS"))
     if on_slurm or on_lsf:
@@ -93,6 +99,12 @@ from te_go import run_go_annotation
 # ═══════════════════════════════════════════════════════════════════════════
 
 def parse_args(argv=None):
+    """Define and parse the full pipeline CLI.
+
+    Covers input/genome selection, mode switches (--local/--test), per-stage
+    skip flags, Stage 11 standout-module knobs, and execution-backend options
+    (Nextflow/Singularity). Returns the parsed argparse.Namespace.
+    """
     p = argparse.ArgumentParser(
         description="TE Analysis Pipeline",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -415,6 +427,8 @@ def _orient_sequence(seq, row):
 
 
 def log_error(stage, err, context=None):
+    """Print a boxed error report (with traceback) and append it to
+    pipeline_errors.log under OUT_DIR when available. Never raises."""
     print("\n" + "=" * 70, flush=True)
     print(f"ERROR in stage: {stage}", flush=True)
     print(f"  {type(err).__name__}: {err}", flush=True)
@@ -440,6 +454,12 @@ def log_error(stage, err, context=None):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def create_test_data():
+    """Build a deterministic synthetic TE dataset for --test runs.
+
+    Generates a few seeded 'families' of mutated sequences with coordinates and
+    mock expression columns so the whole pipeline can run end-to-end without any
+    genome, network, or input file. Returns a DataFrame shaped like real input.
+    """
     import random as _r
     _r.seed(42); np.random.seed(42)
 
@@ -633,6 +653,10 @@ def _attach_expression_assembly(df_te, expression_path, buffer_bp=50):
     ]
 
     def _listlike_count(v):
+        # SQUIRE expression cells hold a list of read IDs; the "expression"
+        # value is that list's length. Returns 0 for empty/NaN cells, the
+        # element count for real/stringified lists, and NaN for scalars (so a
+        # genuinely numeric column isn't mistaken for a list-like one).
         if pd.isna(v):
             return 0
         if isinstance(v, (list, tuple, set)):
@@ -979,6 +1003,9 @@ def _fetch_sequences_parallel(df, assembly="hg38", n_workers=10):
             progress_print(msg)
 
     def _fetch_one(i):
+        # Fetch one locus's sequence from the UCSC REST API with a shared
+        # semaphore (≤3 concurrent, ~2.5 req/s) and exponential backoff on HTTP
+        # 429. Records the result into seqs[i]; appends to `failed` on giving up.
         chrom = df["chr"].iloc[i]
         start = int(df["start"].iloc[i])
         stop  = int(df["stop"].iloc[i])
@@ -1112,6 +1139,13 @@ def _cluster_summary_sql(df):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def compute_basic_stats(df, label="", output_file=None, expr_cols=None):
+    """Compute and report length/GC and expression summary stats for a locus set.
+
+    Uses the Cython te_fast batch kernels when compiled, else numpy. Writes a
+    human-readable summary to output_file (if given) and returns the list of
+    expression columns it detected/used (reused downstream so detection is
+    consistent across stages).
+    """
     seqs = df["Seq"].astype(str)
     seqs_list = seqs.tolist()
 
@@ -2086,6 +2120,9 @@ def run_motif_stage_full(args, out_dir, dirs, family_name,
                 print(f"  Loaded {len(_gf_df):,} records from cache")
             else:
                 def _qgene(name):
+                    # Look a TF/gene symbol up on mygene.info, trying progressively
+                    # looser queries (exact symbol → cleaned symbol → free text).
+                    # Returns the first hit dict, or None if nothing matches.
                     _c = re.sub(r"[^A-Za-z0-9]","",name)
                     _h = re.sub(r"[^A-Za-z0-9-]","",name)
                     for _q in [f"symbol:{_h}",f"symbol:{_c}",_h,_c]:
@@ -2941,6 +2978,12 @@ def _resolve_expr_cols(args, df_family, dirs):
 
 
 def _stage1_genome(args, out_dir):
+    """Stage 1 — load the reference genome into a GenomeCache.
+
+    A loaded cache enables fast local sequence extraction and in-memory primer
+    search; if the FASTA is missing the pipeline silently falls back to the
+    UCSC API for sequence fetching. Returns the GenomeCache (loaded or not).
+    """
     _diag("STAGE 1: Load genome")
     print("\n=== LOADING REFERENCE GENOME ===")
     progress_print(f"Genome path argument: {args.genome or '(none)'}")
@@ -2957,6 +3000,14 @@ def _stage1_genome(args, out_dir):
 
 
 def _stage2_load_data(args, family_name, out_dir):
+    """Stage 2 — resolve the input source and filter to the target TE family.
+
+    Source precedence: --test (mock data) → --local (auto-download via UCSC) →
+    --input CSV → a pre-loaded global `df`. Rows are kept where TE_name matches
+    `family_name` (case-insensitive); TE_name is derived from TE_ID when absent.
+    Exits(1) on any load error or an empty family match. Returns
+    (df_family, family_name) — the latter may be overridden (e.g. "TEST_TE").
+    """
     _diag("STAGE 2: Load data")
     print("\n=== LOADING DATA ===")
     try:
@@ -3016,6 +3067,13 @@ def _stage2_load_data(args, family_name, out_dir):
 
 
 def _stage3_sequences(args, df_family, genome_cache, dirs, out_dir, family_name):
+    """Stage 3 — populate the 'Seq' column for every locus.
+
+    Uses local genome extraction when the GenomeCache is loaded, otherwise
+    fetches from the UCSC API in parallel worker threads. Writes
+    <family>_with_sequences.csv and exits(1) on failure. Returns df_family with
+    sequences attached.
+    """
     _diag("STAGE 3: Fetch sequences")
     print("\n=== FETCHING SEQUENCES ===")
     try:
@@ -3102,6 +3160,12 @@ def _stage3_sequences(args, df_family, genome_cache, dirs, out_dir, family_name)
 
 
 def _stage4_statistics(df_family, dirs, out_dir, family_name):
+    """Stage 4 — compute basic sequence/expression statistics (non-fatal).
+
+    Resolves the user-designated expression columns, writes
+    overall_statistics.txt, and returns the resolved expr_cols list (empty on
+    error) for reuse by later stages.
+    """
     _diag("STAGE 4: Statistics")
     print("\n=== BASIC STATISTICS ===")
     resolved_cols, _resolved_labels = _load_expr_cols(dirs)
@@ -3121,6 +3185,13 @@ def _stage4_statistics(df_family, dirs, out_dir, family_name):
 
 
 def _stage5_clustering(args, df_family, dirs, out_dir, family_name):
+    """Stage 5 — cluster loci by sequence (k-mer → SVD → UMAP → HDBSCAN).
+
+    Delegates to te_clustering.clustering_analysis. Families below
+    --min-sequences (or on any error) collapse to a single Cluster=0. Always
+    writes <family>_clustered.csv (the canonical input for Stages 9-11).
+    Returns (df_family with a 'Cluster' column, n_clusters).
+    """
     _diag("STAGE 5: Clustering")
     print("\n=== CLUSTERING ===")
 
@@ -3209,6 +3280,7 @@ def _stage5_clustering(args, df_family, dirs, out_dir, family_name):
 
 
 def _stage5b_percluster_stats(df_family, dirs):
+    """Write per-cluster statistics files plus a cluster_summary.csv overview."""
     _diag("  Writing per-cluster stats")
     cs_dir = dirs["stats"] / "per_cluster"
     cs_dir.mkdir(exist_ok=True)
@@ -3224,6 +3296,7 @@ def _stage5b_percluster_stats(df_family, dirs):
 
 
 def _stage6_dashboard(df_family, expr_cols, dirs, out_dir, family_name):
+    """Stage 6 — build the visualization dashboard (non-fatal on error)."""
     _diag("STAGE 6: Dashboard")
     print("\n=== VISUALIZATION DASHBOARD ===")
     try:
@@ -3235,6 +3308,12 @@ def _stage6_dashboard(df_family, expr_cols, dirs, out_dir, family_name):
 
 
 def _stage7_alignment(df_family, out_dir, family_name):
+    """Stage 7 — MAFFT alignment + CIAlign + consensus (non-fatal, leaf stage).
+
+    Nothing downstream hard-depends on this, so it can run inline, on a
+    background thread (--parallel-alignment), or be skipped entirely without
+    affecting primers, motif/TFBS, or Stage 11.
+    """
     _diag("STAGE 7: Alignment")
     print("\n=== ALIGNMENT ===")
     try:
@@ -3247,6 +3326,13 @@ def _stage7_alignment(df_family, out_dir, family_name):
 
 
 def _stage9_motif(args, out_dir, dirs, family_name, clustered_csv, fatal_on_error=True):
+    """Stage 9 — motif / TFBS enrichment + GO analysis over the clustered CSV.
+
+    Delegates to run_motif_stage_full. Unlike most stages this is fatal by
+    default (aborts the job on failure) because downstream reporting depends on
+    it; pass fatal_on_error=False to demote failures to a warning. Writes a
+    MOTIF_ANALYSIS_FAILED.txt breadcrumb on error.
+    """
     _diag("STAGE 9: Motif / TFBS / GO")
     _diag(f"  clustered_csv={clustered_csv}  exists={Path(clustered_csv).exists()}")
     _diag(f"  jaspar_bed={getattr(args,'jaspar_bed',None)}  p_threshold={getattr(args,'p_threshold',None)}")
@@ -3278,6 +3364,12 @@ def _stage9_motif(args, out_dir, dirs, family_name, clustered_csv, fatal_on_erro
 
 
 def _stage10_primers(args, df_family, out_dir, dirs, family_name, genome_cache=None):
+    """Stage 10 — design family-specific primers with genome-wide specificity.
+
+    Reuses the in-memory GenomeCache when available (optionally with parallel
+    per-chromosome search via --parallel-primers); falls back to slower paths
+    when the genome isn't loaded or --skip-genome is set.
+    """
     _diag("STAGE 10: Primer design")
     print("\n=== PRIMER DESIGN ===")
     try:

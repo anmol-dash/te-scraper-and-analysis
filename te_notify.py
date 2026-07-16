@@ -17,6 +17,12 @@ _FROM    = "GAMECA <no-reply@anmol-dash.com>"
 
 
 def _detect_proxy() -> str | None:
+    """Find the outbound HTTPS proxy the cluster requires, if any.
+
+    Checks the standard proxy env vars first, then falls back to a `proxy=`
+    line in ~/.curlrc. Returns the proxy URL or None. Compute nodes typically
+    block direct egress, so Resend calls must ride this proxy.
+    """
     for v in ("https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY",
               "all_proxy", "ALL_PROXY"):
         x = os.environ.get(v)

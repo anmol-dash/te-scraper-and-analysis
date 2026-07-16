@@ -1,8 +1,0 @@
-============================================================
-GAMECA Ortholog Insertion --- Measured Values
-Generated: 2026-07-14 06:00:24
-============================================================
-  Family:              L1Md_T
-  Copies:              23639
-  Target species:      0  (none)
-  Lineage-specific:    n/a (no chains)

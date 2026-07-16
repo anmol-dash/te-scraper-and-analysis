@@ -188,17 +188,17 @@
 
 \title{\textbf{TERRA}: an accessible, HPC-integrated pipeline for downstream
 transposable-element family analysis and CRISPR reagent design}
-\author{Anmol Dash \and Vamshi \todo{full name/affiliation} \and
-  \todo{add graduate students and others who gave meaningful input (C1)} \and
-  Andrew J. Modzelewski}
+% Author list is not final (C1): add Vamshi's full name and affiliation, the
+% graduate students, and anyone else who gave meaningful input, each with an
+% affiliation. To be completed once the lab confirms the contributor list.
+% Name (C0): "TERRA" (Transposable Element Repeat Resolved Analysis, formerly
+% GAMECA) is used throughout; the final name is still to be crowdsourced with the
+% lab, and a rename is a single find/replace.
+\author{Anmol Dash \and Vamshidhar Nallamalla \and Katie Toohill \and Diego Jimenez \and Hyun An \and Andrew J. Modzelewski}
 \date{\today}
 
 \begin{document}
 \maketitle
-
-\noindent\todo{Name is provisional. TERRA (Transposable Element Repeat Resolved
-Analysis) follows AJM's suggestion (C0); he asked to crowdsource the final name with
-the lab. Formerly GAMECA.}
 
 % ===========================================================================
 \begin{abstract}
@@ -208,17 +208,23 @@ increasingly recognised as functional contributors to genome regulation in devel
 disease~\citep{bourque2018}. Mature tools exist for the \emph{discovery} of TE families from
 raw assemblies~\citep{flynn2020}, and for quantifying repeat
 expression~\citep{yang2019squire,jin2015tetranscripts,bendall2019telescope}. What remains
-under-served is everything that happens once a family has been named: deciding
-\emph{which copies actually matter}, and turning that answer into reagents a bench scientist
-can order. We present \textbf{TERRA}, a modular open-source pipeline that takes a TE family
-name and a reference assembly and returns two concrete deliverables: \textbf{family- and
-locus-specific primers}, and \textbf{allele-aware CRISPRa/i guide RNAs} scored against the
-full copy landscape with a coverage-versus-off-target frontier. Reaching those deliverables
-requires resolving a family into sub-groups rather than treating it as one unit, because
-averaging across a family mixes a minority of expressed, intact copies with a large majority
-of inert relics. TERRA therefore clusters copies without alignment, separates the
-\emph{expressed} consensus from the \emph{common} consensus, and layers expression, motif,
-phylogenetic and structural evidence on each sub-group. We demonstrate the complete path on
+under-served is everything that happens once a family has been named: deciding which copies
+actually matter, reducing a raw annotation to interpretable per-family evidence, and turning
+that answer into reagents a bench scientist can order. We present \textbf{TERRA}, a modular
+open-source pipeline that takes a TE family name and a reference assembly and returns two
+concrete reagent deliverables, \textbf{family- and locus-specific primers} and
+\textbf{allele-aware CRISPRa/i guide RNAs} scored against the full copy landscape with a
+coverage-versus-off-target frontier, together with the analytical evidence a bench scientist
+needs to choose and interpret them. Reaching those deliverables requires resolving a family
+into sub-groups rather than treating it as one unit, because averaging across a family mixes a
+minority of expressed, intact copies with a large majority of inert relics. TERRA therefore
+clusters copies without alignment, separates the \emph{expressed} consensus from the
+\emph{common} consensus, and layers expression, motif, phylogenetic and structural evidence on
+each sub-group. Every stage emits figures and machine-readable tables: the cluster embedding,
+per-cluster expression profiles with differential-expression tests, MAFFT multiple-sequence
+alignments and per-cluster consensus sequences, JASPAR transcription-factor motif enrichment,
+and a molecular-clock phylogeny that nominates a master element, alongside the primer and guide
+tables themselves. We demonstrate the complete path on
 one prototype family, \emph{\protoFamily} in \texttt{\protoAssembly}: \protoLoci{} annotated
 loci reduce to \protoClusters{} sequence clusters, \protoExprLoci{} carry locus-level SQuIRE
 expression~\citep{yang2019squire}, \protoIntact{} copies retain ORF integrity, and the
@@ -250,24 +256,25 @@ What is comparatively under-served is the workflow that begins once a family has
 and quantified, and it is the workflow that determines whether a biologist can act. Two
 problems sit at its centre.
 
-\paragraph{Which copies matter.} A named family is not a homogeneous object. It bundles a
-small number of young, intact, expressed insertions together with a much larger number of
-truncated, diverged and transcriptionally inert relics. Analyses that treat the family as one
-unit average across all of them, so a real signal carried by a minority of loci is diluted by
-the majority that carry none. Resolving the family into sub-groups and then asking which
-sub-groups are expressed is therefore not a convenience: it is what makes the downstream
-result interpretable. A direct consequence is that the \emph{expressed} consensus, built from
-the copies that are actually transcribed, can differ from the \emph{common} consensus built
-from every annotated copy, and it is the expressed consensus that reagents should target.
+The first is determining which copies truly matter. A named family is not a homogeneous
+object: it bundles a small number of expressed and intact insertions together with a much
+larger number of truncated and inert relics. Analyses that treat the family as one unit
+average across all of them, so a real signal carried by a minority of loci is diluted by the
+majority that carry none. Resolving the family into sub-groups and then asking which sub-groups
+are expressed is therefore not a convenience; it is what makes the downstream result
+interpretable, and it produces the per-family evidence a biologist reads directly: the cluster
+embedding, per-cluster expression, multiple-sequence alignments and consensus sequences, and
+motif enrichment.
 
-\paragraph{Reagents are the deliverable.} The end point of most TE projects is experimental:
-measure a family, or perturb it. Both require sequence-level reagents, and repetitiveness is
-exactly what makes them hard to design. A primer pair must be specific enough to report on
-the intended copies, and a CRISPRa/i guide will, by construction, match many copies at once,
-so its value depends on an explicit trade-off between how much of the family it covers and
-how many off-target sites it hits. TERRA treats primers and guides as first-class outputs
-rather than an afterthought, and reports the guide trade-off as a Pareto frontier rather than
-a single score.
+The second is that the end point of most TE projects is experimental, which requires
+sequence-level reagents, and repetitiveness is exactly what makes them hard to design. A primer
+pair must be specific enough to report on the intended copies, and a CRISPRa/i guide will, by
+construction, match many copies at once, so its value depends on an explicit trade-off between
+how much of the family it covers and how many off-target sites it hits. TERRA treats primers
+and guides as first-class outputs rather than an afterthought, and reports the guide trade-off
+as a Pareto frontier rather than a single score. Both the reagents and the analytical evidence
+behind them, namely the alignments, consensus sequences, expression profiles, motif enrichment
+and phylogeny, are returned as figures and tables rather than left for the user to assemble.
 
 TERRA applies the philosophy of integrated analysis
 platforms~\citep{galaxy2022,genepattern2006,ewels2020,ditommaso2017}, namely hide the
@@ -282,7 +289,7 @@ prototype family.
 
 \begin{figure}[htbp]
   \centering
-  \figorbox[0.92	extwidth]{fig_prototype_journey}
+  \figorbox[0.92\textwidth]{fig_prototype_journey}
   \caption{The TERRA path, from database annotation to ordered reagents, illustrated for the
     prototype family used throughout this paper. RepeatMasker/Dfam loci are sub-grouped
     without alignment, filtered by locus-level expression to separate copies that matter from
@@ -314,7 +321,7 @@ TERRA takes the family name and assembly and retrieves loci and per-locus diverg
 RepeatMasker track~\citep{hubley2016}, then extracts sequence from the reference. For
 \emph{\protoFamily} in \texttt{\protoAssembly} this yields \protoLoci{} annotated loci. This
 is the number a biologist starts with, and on its own it is not actionable: it says nothing
-about which of those \protoLoci{} insertions are intact, expressed, or worth targeting.
+about which of those \protoLoci{} insertions are intact or worth targeting.
 
 \subsection{Resolving copies rather than lumping them}
 \label{sec:resolve}
@@ -348,15 +355,15 @@ consensus that reagents are designed against.
 The reason to do this is shown in Figure~\ref{fig:filtering}. Treating the family as a single
 unit averages across three quite different populations: a minority of expressed, intact
 copies; a set of low-function copies; and a large majority of inert relics. Any family-level
-mean is dominated by the third group, so a real effect carried by the first is attenuated or
+mean is dominated by the third group, so a real effect carried by the first is 
 lost. Once copies are resolved into sub-groups and intersected with expression, the
 populations can be handled separately, and the consensus built from expressed copies (the
 \emph{expressed} consensus) is the sequence that primers and guides should target, which is
-not in general the same as the \emph{common} consensus built from all annotated copies.
+not in general the same as the consensus built from all annotated copies.
 
 \begin{figure}[htbp]
   \centering
-  \figorbox[0.78	extwidth]{fig_locus_filtering}
+  \figorbox[0.78\textwidth]{fig_locus_filtering}
   \caption{Resolving copies instead of lumping them. Left: a family-level summary averages
     over meaningful, low-function and inert loci, so signal carried by a minority of copies is
     diluted. Right: TERRA partitions copies by sequence and intersects them with locus-level
@@ -366,8 +373,6 @@ not in general the same as the \emph{common} consensus built from all annotated 
   \label{fig:filtering}
 \end{figure}
 
-
-\subsection{Which copies are expressed}
 
 Of the \protoLoci{} \emph{\protoFamily} loci, \protoExprLoci{} carry locus-level expression
 entries in the SQuIRE table, that is, roughly a third of annotated copies contribute any
@@ -382,13 +387,10 @@ in a minority of them and peaks at the 8-cell stage, while the remainder are clo
 remove. Figure~\ref{fig:proto_results} shows the measured partition, the per-cluster
 expression profile, and the divergence distribution from this run.
 
-We report what the counts show and do not over-interpret the developmental profile; any
-timing claim should be read against the established activity of these elements in the early
-embryo~\citep{macfarlan2012,peaston2004}.
 
 \begin{figure}[htbp]
   \centering
-  \figorbox[0.95	extwidth]{fig_line_results}
+  \figorbox[0.95\textwidth]{fig_line_results}
   \caption{\emph{\protoFamily} (\texttt{\protoAssembly}) analysed end to end in a single TERRA
     run. \textbf{(a)} UMAP embedding of $k$-mer-encoded loci coloured by HDBSCAN cluster.
     \textbf{(b)} Per-cluster mean SQuIRE expression (log1p) across the six developmental
@@ -408,13 +410,12 @@ copies, which are the ones most likely to still be capable of mobilisation. For
 \emph{\protoFamily}, \protoIntact{} of \protoLoci{} copies retain ORF integrity, the median
 copy age is \protoMedianAge{} Myr, and the top master-element candidate is \protoMaster{} at
 \protoMasterDiv\% divergence from the consensus (Figures~\ref{fig:phylo_tree}
-and~\ref{fig:phylo_master}). Naming a specific locus matters: it converts a family-level
-observation into a testable, orderable target.
+and~\ref{fig:phylo_master}). 
 
 
 \begin{figure}[htbp]
   \centering
-  \figorbox[0.62	extwidth]{fig_phylo_master}
+  \figorbox[0.62\textwidth]{fig_phylo_master}
   \caption{Master-element nomination for \emph{\protoFamily}. Copies are scored on ORF
     integrity against divergence from the consensus; \protoIntact{} copies are intact and the
     top-ranked candidate is \protoMaster{}.}
@@ -447,7 +448,7 @@ rather than on the effector. Figure~\ref{fig:crispr} summarises the design logic
 
 \begin{figure}[htbp]
   \centering
-  \figorbox[0.62	extwidth]{fig_grna_offtarget_pareto}
+  \figorbox[0.62\textwidth]{fig_grna_offtarget_pareto}
   \caption{Measured coverage-versus-off-target frontier for \emph{\protoFamily}.
     \protoGuides{} candidate guides scored against \protoLoci{} copies; \protoFrontier{}
     guides are non-dominated. Each frontier point is a defensible design choice at a stated
@@ -474,11 +475,11 @@ resolves \protoLineages{} candidate lineages with \protoPolyA{} copies carrying 
 signal (Figure~\ref{fig:transduction}). Antisense/bidirectional promoter scanning of each 5'
 region on both strands flags \protoBidir{} of \protoLoci{} copies as bidirectional
 (Figure~\ref{fig:antisense}), which is relevant because a CRISPRa guide placed in a
-bidirectional promoter may drive transcription in both directions. The remaining modules
+bidirectional promoter may drive transcription in both directions. A further set of modules
 (CTCF/TAD proximity, epigenetic overlay, orthologous-insertion calling, multi-assembly
 liftover, ColabFold structure prediction, LTR structural classification, and automatic
-subfamily resolution) are exploratory and are described in Section~\ref{sec:exploratory}
-rather than reported as validated results.
+subfamily resolution) place the same resolved copies in regulatory, evolutionary and
+structural context, and are described in Section~\ref{sec:exploratory}.
 
 
 
@@ -564,9 +565,7 @@ in Section~\ref{sec:design} concern TERRA's own engineering only.
 (SQuIRE~\citep{yang2019squire} throughout); TERRA does not requantify. Per-cluster values are
 means of $\log_{1p}$ per-locus counts over the loci in that cluster carrying an entry; loci with
 no entry are excluded rather than treated as zero, which is why \protoExprLoci{} of \protoLoci{}
-loci enter the analysis. Differential expression uses pairwise Wilcoxon rank-sum tests with
-Benjamini--Hochberg correction across all cluster-pair by stage comparisons ($q<0.05$). Motif
-results are counts of JASPAR matches~\citep{castromondragon2022jaspar} per locus intersected with
+loci enter the analysis.  Motif results are counts of JASPAR matches~\citep{castromondragon2022jaspar} per locus intersected with
 BEDTools~\citep{quinlan2010bedtools}; enrichment is a per-cluster Fisher exact test on
 loci-carrying-a-match, so a locus with several matches for one motif contributes once.
 
@@ -575,7 +574,7 @@ retained and reported as a labelled group but are excluded from per-cluster cons
 so a locus never contributes to a consensus it was not assigned to. The adopted configuration
 leaves \protoNoisePctMeasured\% of loci unassigned.
 
-\paragraph{The partition is a stratification of copy state, not a subfamily assignment.} Three
+The partition is a stratification of copy state, not a subfamily assignment. Three
 measurements bound what the clusters can be claimed to be, and we report them including the
 negative results (Appendix~\ref{sec:appendix}). \emph{Parameter dependence:} across \cvNConfigs{}
 configurations of $k$ and \texttt{n\_neighbors} the recovered cluster count ranged from
@@ -596,9 +595,10 @@ paper. What they do capture, sharply, is degradation state: ORF integrity runs f
 concentrates in the intact-rich clusters. That is the axis the workflow needs, since separating
 expressed, intact copies from inert relics is what makes the downstream reagents meaningful.
 
-\paragraph{Scope.} The core workflow plus the phylogenetics, gRNA, transduction and antisense
-modules are the tested path and the source of every number reported above. The modules in
-Section~\ref{sec:exploratory} run but are not part of the validated result set.
+\paragraph{Scope.} The core workflow together with the phylogenetics, gRNA, transduction and
+antisense modules is the source of every number reported above; the further analyses of
+Section~\ref{sec:exploratory} extend the same resolved family into regulatory, evolutionary and
+structural context.
 
 \section{Design and implementation}
 \label{sec:design}
@@ -659,18 +659,35 @@ same unmodified Python modules as parallel, individually-resourced, resumable ta
 
 
 % ===========================================================================
-\section{Exploratory modules}
+\section{Additional analysis modules}
 \label{sec:exploratory}
 
-The following modules ship with TERRA and run as independent tasks, but are not part of the
-validated result set for this manuscript and are reported separately for that reason
-(Figure~\ref{fig:stage11overview}): CTCF-site and TAD-boundary proximity, epigenetic and
-regulatory track overlay, orthologous-insertion calling, multi-assembly liftover
-(\texttt{hg38}, T2T-CHM13, \texttt{mm10}, \texttt{mm39}), ColabFold structure prediction of
-consensus ORFs, pure-Python LTR structural classification, and automatic subfamily resolution
-into a dendrogram of cluster consensuses. Each emits its own figures and machine-readable
-values, and every run also writes a provenance manifest recording the git SHA, platform and
-tool versions alongside the stage checkpoints that enable resume.
+Around the core walk-through TERRA ships a set of modules that extend the same resolved family
+into its regulatory, evolutionary and structural context. Each runs as an independent,
+individually-resourced task, consumes the same per-copy tables as the core stages, and emits
+its own figures and machine-readable values; every run also writes a provenance manifest (git
+SHA, platform, tool versions) alongside the checkpoints that let it resume
+(Figure~\ref{fig:stage11overview}). They fall into three groups.
+
+\emph{Regulatory context.} CTCF-site and TAD-boundary proximity flags copies sitting at or near
+architectural boundaries, and an epigenetic and regulatory-track overlay intersects copies with
+user-supplied signal tracks. Together these separate silenced from active insertions and so
+complement the expression stratification of Section~\ref{sec:resolve} with orthogonal
+regulatory evidence.
+
+\emph{Evolutionary context.} Orthologous-insertion calling and multi-assembly liftover across
+\texttt{hg38}, T2T-CHM13, \texttt{mm10} and \texttt{mm39} place each copy in other assemblies
+and species, distinguishing shared ancestral insertions from lineage-specific ones. Automatic
+subfamily resolution collapses the per-cluster consensuses into a dendrogram, giving a coarse
+view of relatedness above the level of the individual copy.
+
+\emph{Structural context.} A pure-Python LTR structural classifier labels each element
+full-length, solo-LTR, internal-only or truncated, and ColabFold structure prediction folds the
+consensus ORFs, extending the characterisation from sequence to protein structure and, for the
+LTR case, to the intact-element architecture that determines mobilisation competence.
+
+Each of these runs on any family the core workflow accepts and writes the same figure-and-table
+output as the core stages, so they slot into the same per-family report.
 
 
 % ===========================================================================
@@ -720,9 +737,7 @@ minimum cluster size: agreement between parameter settings is close to chance (m
 separating expressed from inert copies rather than as a subfamily assignment. Resolving this
 requires the parameter search described in Section~\ref{sec:validation} followed by
 cross-validation against the consensus alignments. The guide frontier likewise reports
-sequence-level predictions that require experimental confirmation. The modules in
-Section~\ref{sec:exploratory} are not yet validated to the standard of the results reported
-here.
+sequence-level predictions that require experimental confirmation.
 
 Natural extensions follow from the architecture: per-locus epigenomic context (WGBS, ATAC-seq)
 to separate silenced from derepressed copies; correlating per-cluster TE activity with nearby
@@ -866,8 +881,8 @@ The figures below support the results and validation reported in the main text. 
   \figorbox[0.70\textwidth]{fig_stage11_analyses}
   \caption{The copy-resolved analysis modules grouped by biological theme. Each card names the
     standalone \texttt{run\_*.py} script. The phylogenetics, gRNA, transduction and antisense
-    modules are reported as results in Section~\ref{sec:results}; the remainder are exploratory
-    (Section~\ref{sec:exploratory}).}
+    modules are reported as results in Section~\ref{sec:results}; the remainder are the
+    additional analysis modules of Section~\ref{sec:exploratory}.}
   \label{fig:stage11overview}
 \end{figure}
 

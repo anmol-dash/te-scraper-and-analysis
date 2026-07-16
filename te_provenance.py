@@ -34,6 +34,7 @@ _TOOLS = ["mafft", "bedtools", "liftOver", "colabfold_batch", "samtools",
 
 
 def _git_sha(repo: Path) -> str:
+    """Return the repo's current commit SHA, or "unknown" if git is unavailable."""
     try:
         return subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
                               capture_output=True, text=True).stdout.strip() or "unknown"
@@ -42,6 +43,12 @@ def _git_sha(repo: Path) -> str:
 
 
 def _tool_version(tool: str) -> str:
+    """Best-effort version string for an external tool.
+
+    Returns "not found" if it isn't on PATH; otherwise tries the common version
+    flags and returns the first output line (truncated), falling back to the
+    resolved executable path.
+    """
     exe = shutil.which(tool)
     if not exe:
         return "not found"
@@ -57,6 +64,11 @@ def _tool_version(tool: str) -> str:
 
 
 def file_sha256(path: str, limit_mb: int = 200) -> str:
+    """SHA-256 of a file, streamed in chunks.
+
+    Returns "missing" for absent files and a "skipped(...)" marker for files
+    larger than limit_mb (hashing multi-GB genomes/BEDs isn't worth the cost).
+    """
     p = Path(path)
     if not p.exists() or not p.is_file():
         return "missing"
@@ -74,6 +86,7 @@ def _manifest_path(reports_dir) -> Path:
 
 
 def load(reports_dir) -> dict:
+    """Load the provenance manifest dict, or {} if none exists / is unreadable."""
     mp = _manifest_path(reports_dir)
     if mp.exists():
         try:
@@ -126,15 +139,18 @@ def _ckpt_dir(reports_dir) -> Path:
 
 
 def mark_done(reports_dir, stage: str):
+    """Write a <stage>.done checkpoint so a re-run can skip this stage."""
     (_ckpt_dir(reports_dir) / f"{stage}.done").write_text(
         datetime.datetime.now().isoformat(timespec="seconds"))
 
 
 def is_done(reports_dir, stage: str) -> bool:
+    """True if the given stage has a completed checkpoint."""
     return (_ckpt_dir(reports_dir) / f"{stage}.done").exists()
 
 
 def clear(reports_dir, stage: str = ""):
+    """Delete one stage's checkpoint, or all of them when stage is empty (--force)."""
     cd = _ckpt_dir(reports_dir)
     if stage:
         (cd / f"{stage}.done").unlink(missing_ok=True)
@@ -146,6 +162,11 @@ def clear(reports_dir, stage: str = ""):
 # ── LaTeX export ───────────────────────────────────────────────────────────────
 
 def to_tex(reports_dir) -> str:
+    """Export environment/tool provenance as \\provXxx LaTeX macros.
+
+    Writes provenance_measured_values.tex (git SHA, platform, Python, tool
+    versions, stage count) for \\input into the report, and returns its path.
+    """
     m = init(reports_dir)
     env = m.get("environment", {})
     tools = env.get("tools", {})
@@ -172,6 +193,7 @@ def to_tex(reports_dir) -> str:
 
 
 def main():
+    """CLI entry point: init the manifest, then --show / --tex / --clear-checkpoints."""
     ap = argparse.ArgumentParser(description="GAMECA provenance manifest tool")
     ap.add_argument("--reports-dir", required=True)
     ap.add_argument("--repo-root", default=".")

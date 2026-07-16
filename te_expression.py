@@ -168,6 +168,7 @@ def _coerce_expr_series(s):
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def parse_args():
+    """Parse the standalone expression-analysis CLI (see module docstring)."""
     p = argparse.ArgumentParser(
         description="GAMECA step E: Expression analysis per cluster",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -246,6 +247,11 @@ def _chrom_col(df):
 # ── 1. Boxplots (existing) ─────────────────────────────────────────────────────
 
 def _boxplots(df, cl_col, expr_cols, labels, log1p, expr_dir):
+    """Write the per-cluster expression boxplots (all-data and mid-80% variants).
+
+    Noise cluster -1 is excluded. `log1p` toggles a log1p transform; `labels`
+    supplies display names for the expr_cols.
+    """
     cluster_ids = sorted([c for c in df[cl_col].unique() if c >= 0])
     cluster_colors = {}
     data_dict = {}
@@ -386,6 +392,11 @@ def _plot_stage_profile(df, cl_col, expr_cols, labels, log1p, expr_dir):
 # ── 3. Chromosomal expression ─────────────────────────────────────────────────
 
 def _plot_chromosomal_expression(df, cl_col, expr_cols, labels, log1p, expr_dir):
+    """Write chromosomal-expression figures (per-chromosome means + stage×chrom heatmap).
+
+    No-ops with a [SKIP] message when the input has no recognizable chromosome
+    column.
+    """
     chr_col = _chrom_col(df)
     if chr_col is None:
         print("  [SKIP] No chromosome column found — skipping chromosomal expression")
@@ -601,6 +612,7 @@ def _plot_primer_expression(df, cl_col, expr_cols, labels, log1p, expr_dir, out_
 # ── 5. Extended stats CSV ─────────────────────────────────────────────────────
 
 def _compute_stats(df, cl_col, expr_cols, labels, log1p, expr_dir):
+    """Compute per-cluster expression summary statistics and write them to CSV."""
     cluster_ids = sorted([c for c in df[cl_col].unique() if c >= 0])
     rows = []
     for cid in cluster_ids:
@@ -904,6 +916,8 @@ def run_expression_analysis(input_csv, out_dir, stage_cols=None, stage_labels=No
 
 
 def main():
+    """Standalone entry point: load the clustered CSV, resolve expression
+    columns, and emit all boxplot/stage/chromosomal figures and stats."""
     args = parse_args()
     print("=" * 60)
     print("GAMECA — Expression Analysis")

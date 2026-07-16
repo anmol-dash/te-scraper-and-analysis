@@ -118,6 +118,27 @@ If trimAl isn't installed, or the trimAl-cleaned retry also fails, the stage
 logs the failure and moves on (alignment/consensus output is unaffected —
 only the CIAlign visualization plots are skipped).
 
+## Copy-resolved analysis modules
+
+Beyond the core pipeline, a family of standalone `run_*.py` modules take the clustered,
+per-locus output and characterise each copy. Each writes its own figures, a CSV/JSON of
+per-copy results, and a `*_measured_values.tex` macro file, and each has a matching HPC
+submitter. `run_stage11_all.py` runs them together for one family.
+
+| Module | What it produces |
+|--------|------------------|
+| `run_phylo_analysis.py` | Per-cluster MAFFT alignment, majority-rule consensus, Kimura molecular-clock age, ORF-integrity call, and a nominated master element |
+| `run_grna_offtarget.py` / `run_grna_analysis.py` | Allele-aware CRISPRa/i guides scored against the full copy landscape; coverage-versus-off-target Pareto frontier |
+| `run_transduction.py` | 3′ transduction lineages (shared downstream-tail k-mers) and poly-A signal detection |
+| `run_antisense_promoter.py` | Antisense / bidirectional promoter scan of each 5′ region on both strands |
+| `run_divergence.py` | CpG-corrected Kimura divergence landscape per family/cluster |
+| `run_ltr_struct.py` | LTR structural classification (full-length / solo-LTR / internal-only / truncated) |
+| `run_ctcf_tad.py`, `run_epigenetic_overlay.py` | CTCF-site / TAD-boundary proximity and epigenetic/regulatory-track overlay |
+| `run_ortholog_insertion.py`, `run_multiassembly_liftover.py` | Orthologous-insertion calling and liftover across `hg38` / T2T-CHM13 / `mm10` / `mm39` |
+| `run_fold_prediction.py`, `run_subfamily.py` | ColabFold structure prediction of consensus ORFs; subfamily dendrogram of cluster consensuses |
+| `run_line_sine_ltr_analysis.py` | Cross-family LINE/SINE/LTR batch analysis (clusters, expression, DE, per-family figures) |
+| `run_cluster_search.py`, `run_cluster_validation.py`, `run_cluster_crosscheck.py` | Search for an N-cluster configuration at minimal noise; measure partition stability (ARI); cross-check clusters against the consensus alignments |
+
 ## Supported assemblies
 
 | Species | Assemblies |
@@ -156,15 +177,24 @@ te_fast.pyx               Cython-accelerated hot paths (k-mer matrix, GC, length
 te_fast.c                 Generated C source (committed so the cluster doesn't need Cython)
 setup_cython.py           Build script: python setup_cython.py build_ext --inplace
 
-presentation.py           Batch figure generation for presentations (ideogram, DAG,
-                          enrichment heatmap, primer scatter, etc.)
+run_*.py                  Copy-resolved analysis modules run after the core pipeline
+                          (see "Copy-resolved analysis modules" below): phylogeny,
+                          allele-aware gRNA, transduction, antisense, divergence,
+                          cross-family, and the cluster search/validation tools
+run_stage11_all.py        Orchestrates the copy-resolved modules for one family
+make_report_figures.py    Single entry point for every manuscript figure — schematics
+                          always; `--data` drives the real data-figure generators
 
 requirements.txt          Python dependencies (pinned ranges)
 
-test_pipeline.py          End-to-end pipeline smoke tests
-test_strand_orientation.py Strand-handling unit tests
-test_jaspar_path.py       JASPAR cache path resolution tests
+test_gameca.sh            End-to-end pipeline smoke test (multi-stage, cluster or local)
+backend/tests/            IPC protocol + HPC file-sync integration tests
 ```
+
+The pipeline is described in a short methods manuscript under
+[`terra_report/`](terra_report/) (`terra_report.tex`, compiled `terra_report.pdf`),
+which walks one prototype family (`L1Md_T`) from RepeatMasker annotation to ordered
+primers and CRISPRa/i guides. See [`terra_report/README.md`](terra_report/README.md).
 
 ## System requirements
 

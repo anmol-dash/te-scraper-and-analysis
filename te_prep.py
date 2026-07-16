@@ -123,6 +123,7 @@ STD_CHROMS_MOUSE = set([f"chr{i}" for i in range(1, 20)] + ["chrX", "chrY"])
 # ═══════════════════════════════════════════════════════════════════════════
 
 def parse_args():
+    """Parse the te_prep CLI (family/build selection, --download, --search, etc.)."""
     p = argparse.ArgumentParser(
         description="TE family data prep — local rmsk + local FASTA",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -229,6 +230,11 @@ def download_rmsk(build, rmsk_dir):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def get_rmsk_path(build, rmsk_dir):
+    """Return the cached RepeatMasker table path for a genome build.
+
+    Exits with a "run --download" hint if it isn't present and no download URL
+    is known for the build.
+    """
     path = Path(rmsk_dir) / f"rmsk_{build}.txt.gz"
     if not path.exists():
         if build not in RMSK_URLS:
@@ -537,6 +543,8 @@ def _revcomp(seq):
 
 
 def _row_strand(row):
+    """Return '+' or '-' for a locus row, tolerating strand/Strand column casing
+    and defaulting to '+' when the strand is missing or unrecognized."""
     for col in ("strand", "Strand"):
         if col in row and pd.notna(row.get(col)):
             val = str(row.get(col)).strip()
@@ -638,6 +646,8 @@ def fetch_sequences_ucsc(df, assembly="hg38", n_workers=10):
             print(msg, flush=True)
 
     def _fetch_one(i):
+        # Fetch one locus's sequence from the UCSC API (used only when a local
+        # genome FASTA isn't available). Stores the result into seqs[i].
         row   = df.iloc[i]
         chrom = str(row.get("chr", row.get("Chromosome", "")))
         start = int(row.get("start", row.get("Start", 0)))
@@ -780,6 +790,13 @@ def extract_sequences(genome_fa, df):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def main():
+    """CLI entry point.
+
+    Dispatches the utility modes (--download / --search / --list-families) or,
+    for a normal run, loads the family's loci from the local rmsk table,
+    extracts sequences (local FASTA or UCSC fallback), and writes
+    <family>_analysis_results/clustered_data.csv for the downstream pipeline.
+    """
     args = parse_args()
 
     # Named flags (--family / --build) override positional args when provided.

@@ -217,6 +217,8 @@ def clustering_analysis(df, kmer=10, min_cluster_size=100, out_dir=None,
     _pp(f"  Step 5/5: HDBSCAN (min_cluster_size={mcs}, min_samples={min_s})…")
 
     def _cluster(emb, name):
+        # Run HDBSCAN on a 2-D embedding and return its integer cluster labels
+        # (-1 = noise), using the shared min_samples / min_cluster_size settings.
         lbl = _hdbscan.HDBSCAN(
             min_samples=min_s,
             min_cluster_size=mcs,
@@ -313,6 +315,8 @@ def _save_clustering_viz(df, pca_emb, pca_lbl, umap_emb, umap_lbl,
                 expr_vals = np.full(len(raw), 8.0)
 
         def _build_fig(marker_size):
+            # Assemble the 3-panel PCA / UMAP / t-SNE scatter figure at a given
+            # marker size (called twice to render both a dense and a sparse view).
             f = make_subplots(
                 rows=1, cols=3,
                 subplot_titles=[f"PCA (k={kmer})", f"UMAP (k={kmer})", f"t-SNE (k={kmer})"]
@@ -372,6 +376,7 @@ def _save_clustering_viz(df, pca_emb, pca_lbl, umap_emb, umap_lbl,
 # ── CLI entry point ─────────────────────────────────────────────────────────
 
 def _parse_args():
+    """Parse the standalone CLI for re-running clustering on a *_clustered.csv."""
     p = argparse.ArgumentParser(
         description="Re-run clustering on an existing *_clustered.csv",
         formatter_class=argparse.RawDescriptionHelpFormatter,

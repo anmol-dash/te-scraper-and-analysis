@@ -548,7 +548,7 @@ def plot_family_results(df: pd.DataFrame, family: str, expr_cols: list,
     ax.yaxis.grid(True, linestyle="--", alpha=0.35)
     ax.set_axisbelow(True)
 
-    plt.suptitle(f"{family} ({meta['type']}) --- GAMECA Analysis",
+    plt.suptitle(f"{family} ({meta['type']}): TERRA analysis",
                  fontsize=13, fontweight="bold", y=1.02)
     plt.tight_layout()
     plt.savefig(out_path, bbox_inches="tight")

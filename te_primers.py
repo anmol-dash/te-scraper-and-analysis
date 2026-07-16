@@ -418,6 +418,7 @@ def design_primers(df, primer_k=18, top_global=8, top_cluster=5,
 # ── CLI ─────────────────────────────────────────────────────────────────────
 
 def _parse_args():
+    """Parse the standalone primer-design CLI (input CSV, genome, k-mer size, …)."""
     p = argparse.ArgumentParser(description="Primer design for TE families")
     p.add_argument("--input",   required=True, help="CSV with Seq + Cluster columns")
     p.add_argument("--genome",  default=None,  help="Path to genome FASTA")

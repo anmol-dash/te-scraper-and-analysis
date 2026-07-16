@@ -66,6 +66,12 @@ class HPCClient:
     """Interactive client for running TE analysis on HPC cluster via batch jobs."""
 
     def __init__(self):
+        """Initialize an unconnected client with default state and parameters.
+
+        Nothing touches the network here; scheduler type, remote work dir, and
+        job state stay unset until connect() and the configure/submit steps
+        populate them.
+        """
         self.ssh = None
         self.sftp = None
         self.connected = False
@@ -346,6 +352,7 @@ exit 1
         return fallback
 
     def _try_remote_work_dir(self, candidate: str) -> bool:
+        """Return True if `candidate` can be created and is writable on the remote."""
         if not candidate or candidate == "/":
             return False
         out, err, code = self.run_command(
@@ -357,6 +364,11 @@ exit 1
         return False
 
     def _batch_work_dir_candidates(self) -> list[str]:
+        """Ordered list of remote work-dir paths to try, most-preferred first.
+
+        Prefers large shared filesystems (/project, /scratch, /work) over the
+        home directory so multi-GB genomes and results don't blow the home quota.
+        """
         user = self._username or "$USER"
         candidates = [
             f"/project/{user}/gameca",
@@ -1140,6 +1152,8 @@ fi
         )
 
         def _important_stream_line(line):
+            # Filter streamed job output down to lines worth showing the user:
+            # skip blanks, known-noise patterns, and verbose diagnostic dumps.
             s = line.strip()
             if not s or _NOISE.match(s):
                 return False
@@ -1160,6 +1174,8 @@ fi
             ))
 
         def _emit_summary(chunk):
+            # Decode a raw output chunk, buffer partial lines, and print only the
+            # important complete lines (per _important_stream_line) as they arrive.
             nonlocal line_buffer, last_output_time
             try:
                 text = chunk.decode(errors="replace")
@@ -1769,6 +1785,8 @@ echo "  Input data: OK ({quoted})"'''
         return True
 
     def _log_run_configuration(self, mode: str):
+        """Print a summary of the resolved run configuration (input source,
+        genome, family, resources) before a job is submitted."""
         input_mode = (
             f"input_csv={self.params.get('all_te_file')}"
             if not self._using_auto_family_load()

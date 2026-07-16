@@ -61,11 +61,14 @@ DELIV = "#b0413e"   # deliverables (primers + CRISPR reagents) — the payoff co
 
 # The single worked-example TE used as the prototype throughout the manuscript
 # (AJM comment C33/C158: one named TE from database to reagents; the three-family
-# LINE/SINE/LTR set becomes supplementary). IAPLTR1_Mm is the LTR family already
-# carried in Table 3 / Figs 3-4, so its real data is reused rather than regenerated.
-PROTOTYPE_FAMILY = "IAPLTR1_Mm"
+# LINE/SINE/LTR set becomes supplementary). L1Md_T is the prototype because it is
+# the family the copy-resolved modules were actually run on, so every panel cites a
+# real measured number rather than a regenerated one. This must stay in step with
+# terra_report.tex, which walks L1Md_T (a LINE) throughout.
+PROTOTYPE_FAMILY = "L1Md_T"
+PROTOTYPE_CLASS = "LINE"
 PROTOTYPE_ASSEMBLY = "mm10"
-PROTOTYPE_DIR = "reports8/stage11_iapltr1"
+PROTOTYPE_DIR = "reports8/stage11_l1mdt"
 
 
 def apply_house_style():
@@ -137,7 +140,7 @@ def make_pipeline_flowchart(out_dir):
         linestyle=(0, (6, 4))))
     ax.text(W / 2, 0.95,
             "Execution environment  ·  Nextflow DSL2 orchestration  ·  "
-            "Singularity container (gameca.sif)  ·  LSF / SLURM",
+            "Singularity container image  ·  LSF / SLURM",
             ha="center", va="center", fontsize=9.5, weight="bold", color=ACCENT)
 
     # Core stages (query.py Stages 1-7): a vertical stack in the middle band.
@@ -320,7 +323,7 @@ def make_architecture(out_dir):
             fontsize=10.5, weight="bold", color=ACCENT)
     hpc = [
         ("Login node", "job submission · Nextflow"),
-        ("Compute nodes", "singularity exec gameca.sif"),
+        ("Compute nodes", "singularity exec image.sif"),
         ("Genome / RMSK / JASPAR", "shared filesystem"),
         ("ColabFold node", "GPU folding (separate)"),
     ]
@@ -347,7 +350,7 @@ def make_nextflow_dag(out_dir):
     _round_box(ax, 0.25, 2.35, 1.7, 0.9, "samplesheet", INPUT, fs=9.5,
                sub="family, assembly")
     _arrow(ax, 1.95, 2.8, 2.55, 2.8)
-    _round_box(ax, 2.55, 2.25, 2.0, 1.1, "GAMECA_CORE", CORE, fs=10.5,
+    _round_box(ax, 2.55, 2.25, 2.0, 1.1, "TERRA_CORE", CORE, fs=10.5,
                sub="query.py  Stages 1-10")
 
     ax.text(5.55, 4.95, "STANDOUT subworkflow  —  scatter / gather",
@@ -371,7 +374,7 @@ def make_nextflow_dag(out_dir):
 
     ax.annotate("", xy=(8.62, 0.30), xytext=(2.5, 0.30),
                 arrowprops=dict(arrowstyle="-", color="#999999", lw=1.0))
-    ax.text(5.6, 0.08, "GAMECA subworkflow  (include { GAMECA })",
+    ax.text(5.6, 0.08, "TERRA subworkflow  (include { TERRA })",
             ha="center", va="center", fontsize=8.6, color="#666666")
     ax.text(W / 2, 5.28,
             "Nextflow DSL2  ·  profiles: lsf / slurm · singularity / docker · test",
@@ -396,19 +399,20 @@ def make_nextflow_dag(out_dir):
 # 5. Prototype-TE journey: database numbers -> reagents  (AJM C158/C159/C33)
 # --------------------------------------------------------------------------- #
 def make_prototype_journey(out_dir):
-    """The deliverable-forward storyline for the IAPLTR1_Mm prototype: start from
+    """The deliverable-forward storyline for the L1Md_T prototype: start from
     RepeatMasker/Dfam locus numbers, resolve which insertions matter, and end on
-    the reagents users actually want — family/locus primers and allele-aware
+    the reagents users actually want, namely family/locus primers and allele-aware
     CRISPRa/i guides. Schematic only (no measured values are drawn here); the
-    real per-step panels are produced by the Stage-11 generators and listed in
-    the manifest under reports8/stage11_iapltr1/."""
+    real per-step panels are produced by the copy-resolved generators and listed in
+    the manifest under reports8/stage11_l1mdt/."""
     W, H = 15.6, 4.6
     fig, ax = plt.subplots(figsize=(W, H))
     ax.set_xlim(0, W); ax.set_ylim(0, H); ax.axis("off")
 
     ax.text(W / 2, H - 0.3,
-            f"Prototype walk-through — {PROTOTYPE_FAMILY} (LTR, {PROTOTYPE_ASSEMBLY}):  "
-            "from database annotation to ready-to-order reagents",
+            f"Prototype walk-through: {PROTOTYPE_FAMILY} "
+            f"({PROTOTYPE_CLASS}, {PROTOTYPE_ASSEMBLY}), from database annotation "
+            "to ready-to-order reagents",
             ha="center", va="center", fontsize=12, weight="bold", color="#222222")
 
     # Five narrative steps, then a highlighted deliverables end-cap.
@@ -451,7 +455,7 @@ def make_prototype_journey(out_dir):
             "the payoff that makes the family analysis actionable.",
             ha="center", va="center", fontsize=9, style="italic", color="#666666")
     ax.text(W / 2, 0.5,
-            "Schematic — measured panels for each step are in reports8/stage11_iapltr1/ "
+            f"Schematic: measured panels for each step are in {PROTOTYPE_DIR}/ "
             "(see README.md).",
             ha="center", va="center", fontsize=8, style="italic", color="#999999")
 
@@ -464,9 +468,9 @@ def make_prototype_journey(out_dir):
 # --------------------------------------------------------------------------- #
 def make_locus_filtering(out_dir):
     """Conceptual contrast (AJM C149): lumping every copy of a family averages
-    real signal across meaningful, low-function and inert loci; GAMECA instead
+    real signal across meaningful, low-function and inert loci; TERRA instead
     resolves copies by cluster + expression and distinguishes the expressed
-    consensus from the common consensus (C107). Diagram only — no numbers."""
+    consensus from the common consensus (C107). Diagram only, no numbers."""
     W, H = 12.5, 5.2
     fig, ax = plt.subplots(figsize=(W, H))
     ax.set_xlim(0, W); ax.set_ylim(0, H); ax.axis("off")
@@ -501,7 +505,7 @@ def make_locus_filtering(out_dir):
     ax.add_patch(FancyBboxPatch(
         (6.8, 0.5), 5.4, H - 1.4, boxstyle="round,pad=0.02,rounding_size=0.08",
         linewidth=1.4, edgecolor=STAND, facecolor=STAND + "0f"))
-    ax.text(9.5, H - 1.15, "GAMECA: cluster + expression resolve copies",
+    ax.text(9.5, H - 1.15, "TERRA: cluster + expression resolve copies",
             ha="center", va="center", fontsize=10.5, weight="bold", color=STAND)
     lanes = [
         ("meaningful (expressed)", STAND),
@@ -530,7 +534,7 @@ def make_locus_filtering(out_dir):
 def make_crispr_deliverable(out_dir):
     """Concept diagram for the allele-aware CRISPRa/i guide-design module — the
     deliverable AJM wants surfaced prominently. Repetitive targets make guide
-    design hard: a guide hits many copies, so GAMECA scores candidates against
+    design hard: a guide hits many copies, so TERRA scores candidates against
     the full copy landscape with seed-anchored, mismatch-tolerant matching and
     reports the coverage-vs-off-target trade-off. Drawn as a labelled concept
     diagram, NOT a data scatter — the measured Pareto front is

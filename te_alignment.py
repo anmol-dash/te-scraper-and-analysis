@@ -320,6 +320,7 @@ def _cialign_index_html(cialign_dir, family_name, df):
     ))
 
     def _plot_cards(pattern):
+        # Build the HTML "cards" embedding each CIAlign figure matching `pattern`.
         html = ""
         for pf in sorted(cialign_dir.glob(pattern)):
             if pf.suffix in (".png", ".svg"):
