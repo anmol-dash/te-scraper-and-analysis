@@ -282,7 +282,7 @@ prototype family.
 
 \begin{figure}[htbp]
   \centering
-  \figorbox[1.0\textwidth]{fig_prototype_journey}
+  \figorbox[0.92	extwidth]{fig_prototype_journey}
   \caption{The TERRA path, from database annotation to ordered reagents, illustrated for the
     prototype family used throughout this paper. RepeatMasker/Dfam loci are sub-grouped
     without alignment, filtered by locus-level expression to separate copies that matter from
@@ -356,7 +356,7 @@ not in general the same as the \emph{common} consensus built from all annotated 
 
 \begin{figure}[htbp]
   \centering
-  \figorbox[0.95\textwidth]{fig_locus_filtering}
+  \figorbox[0.78	extwidth]{fig_locus_filtering}
   \caption{Resolving copies instead of lumping them. Left: a family-level summary averages
     over meaningful, low-function and inert loci, so signal carried by a minority of copies is
     diluted. Right: TERRA partitions copies by sequence and intersects them with locus-level
@@ -366,18 +366,6 @@ not in general the same as the \emph{common} consensus built from all annotated 
   \label{fig:filtering}
 \end{figure}
 
-\begin{figure}[htbp]
-  \centering
-  \figorbox[0.85\textwidth]{fig_cluster_search}
-  \caption{Clustering parameter search for \emph{\protoFamily}. Each point is one of
-    \csNConfigs{} configurations of $k$, \texttt{n\_neighbors}, \texttt{min\_cluster\_size} and
-    \texttt{min\_samples}, plotted as the number of clusters recovered against the fraction of
-    loci left unassigned. The pipeline's default minimum cluster size
-    ($\lfloor N/\protoDivisor \rfloor = \oldMinClusterSize$) admits only \oldClusters{} clusters
-    and leaves \oldNoisePct\% of the family unassigned; the selected configuration (star)
-    recovers \protoClusters{} clusters with \protoNoisePctMeasured\% unassigned.}
-  \label{fig:cluster_search}
-\end{figure}
 
 \subsection{Which copies are expressed}
 
@@ -400,7 +388,7 @@ embryo~\citep{macfarlan2012,peaston2004}.
 
 \begin{figure}[htbp]
   \centering
-  \figorbox[1.0\textwidth]{fig_line_results}
+  \figorbox[0.95	extwidth]{fig_line_results}
   \caption{\emph{\protoFamily} (\texttt{\protoAssembly}) analysed end to end in a single TERRA
     run. \textbf{(a)} UMAP embedding of $k$-mer-encoded loci coloured by HDBSCAN cluster.
     \textbf{(b)} Per-cluster mean SQuIRE expression (log1p) across the six developmental
@@ -409,15 +397,6 @@ embryo~\citep{macfarlan2012,peaston2004}.
   \label{fig:proto_results}
 \end{figure}
 
-\begin{figure}[htbp]
-  \centering
-  \figorbox[1.0\textwidth]{fig_de_l1mdt}
-  \caption{Differential expression between \emph{\protoFamily} clusters. Heatmap of
-    $-\log_{10}(q)$ from pairwise Wilcoxon rank-sum tests with Benjamini--Hochberg correction;
-    \protoDESig{} of \protoDETotal{} cluster-pair by stage comparisons reach $q<0.05$. Cluster-resolved testing recovers stage-specific
-    differences that a family-level summary averages away (Section~\ref{sec:resolve}).}
-  \label{fig:de}
-\end{figure}
 
 \subsection{Age, intactness, and the master element}
 
@@ -432,17 +411,10 @@ copy age is \protoMedianAge{} Myr, and the top master-element candidate is \prot
 and~\ref{fig:phylo_master}). Naming a specific locus matters: it converts a family-level
 observation into a testable, orderable target.
 
-\begin{figure}[htbp]
-  \centering
-  \figorbox[1.0\textwidth]{fig_phylo_tree}
-  \caption{Subfamily phylogeny for \emph{\protoFamily}. Neighbour-joining tree relating
-    cluster consensuses and representative copies, built from the MAFFT alignment.}
-  \label{fig:phylo_tree}
-\end{figure}
 
 \begin{figure}[htbp]
   \centering
-  \figorbox[1.0\textwidth]{fig_phylo_master}
+  \figorbox[0.62	extwidth]{fig_phylo_master}
   \caption{Master-element nomination for \emph{\protoFamily}. Copies are scored on ORF
     integrity against divergence from the consensus; \protoIntact{} copies are intact and the
     top-ranked candidate is \protoMaster{}.}
@@ -472,20 +444,10 @@ position on the coverage/specificity trade-off rather than trusting an opaque ra
 same output supports CRISPRa and CRISPRi, since both depend on the guide-to-copy mapping
 rather than on the effector. Figure~\ref{fig:crispr} summarises the design logic.
 
-\begin{figure}[htbp]
-  \centering
-  \figorbox[0.95\textwidth]{fig_crispr_deliverable}
-  \caption{Allele-aware CRISPRa/i guide design for a repetitive family. Candidate guides are
-    enumerated PAM-aware from the consensus and per-copy sequence, scored against the full
-    copy landscape with seed-anchored, mismatch-tolerant matching, and reported as a
-    coverage-versus-off-target trade-off. This panel is a schematic of the logic; the measured
-    frontier for \emph{\protoFamily} is Figure~\ref{fig:grna_pareto}.}
-  \label{fig:crispr}
-\end{figure}
 
 \begin{figure}[htbp]
   \centering
-  \figorbox[1.0\textwidth]{fig_grna_offtarget_pareto}
+  \figorbox[0.62	extwidth]{fig_grna_offtarget_pareto}
   \caption{Measured coverage-versus-off-target frontier for \emph{\protoFamily}.
     \protoGuides{} candidate guides scored against \protoLoci{} copies; \protoFrontier{}
     guides are non-dominated. Each frontier point is a defensible design choice at a stated
@@ -518,23 +480,7 @@ liftover, ColabFold structure prediction, LTR structural classification, and aut
 subfamily resolution) are exploratory and are described in Section~\ref{sec:exploratory}
 rather than reported as validated results.
 
-\begin{figure}[htbp]
-  \centering
-  \figorbox[1.0\textwidth]{fig_transduction_groups}
-  \caption{3' transduction lineages for \emph{\protoFamily}: \protoLineages{} candidate
-    lineages grouped by shared downstream-tail $k$-mers absent from the family consensus;
-    \protoPolyA{} copies carry an AATAAA poly-A signal.}
-  \label{fig:transduction}
-\end{figure}
 
-\begin{figure}[htbp]
-  \centering
-  \figorbox[1.0\textwidth]{fig_antisense_motifs}
-  \caption{Antisense/bidirectional promoter content for \emph{\protoFamily}: core promoter
-    elements scanned on both strands of each 5' region; \protoBidir{} of \protoLoci{} copies
-    are flagged bidirectional.}
-  \label{fig:antisense}
-\end{figure}
 
 % ===========================================================================
 \section{How TERRA relates to existing tools}
@@ -614,147 +560,46 @@ in Section~\ref{sec:design} concern TERRA's own engineering only.
 \section{Validation and reporting conventions}
 \label{sec:validation}
 
-\paragraph{Expression units.} Expression is consumed as per-locus counts produced by an
-external quantifier, SQuIRE~\citep{yang2019squire} throughout this paper. TERRA does not
-requantify. Per-cluster summaries are means of $\log_{1p}$-transformed per-locus counts across
-the loci in that cluster that carry an entry in the counts table; loci with no entry are
-excluded rather than treated as zero, which is why \protoExprLoci{} of \protoLoci{} loci enter
-the expression analysis. Differential expression between clusters uses pairwise Wilcoxon
-rank-sum tests on per-locus values with Benjamini--Hochberg correction across all
-cluster-by-stage comparisons, and significance is reported at $q<0.05$.
+\paragraph{Units.} Expression is consumed as per-locus counts from an external quantifier
+(SQuIRE~\citep{yang2019squire} throughout); TERRA does not requantify. Per-cluster values are
+means of $\log_{1p}$ per-locus counts over the loci in that cluster carrying an entry; loci with
+no entry are excluded rather than treated as zero, which is why \protoExprLoci{} of \protoLoci{}
+loci enter the analysis. Differential expression uses pairwise Wilcoxon rank-sum tests with
+Benjamini--Hochberg correction across all cluster-pair by stage comparisons ($q<0.05$). Motif
+results are counts of JASPAR matches~\citep{castromondragon2022jaspar} per locus intersected with
+BEDTools~\citep{quinlan2010bedtools}; enrichment is a per-cluster Fisher exact test on
+loci-carrying-a-match, so a locus with several matches for one motif contributes once.
 
-\paragraph{Motif counting units.} Motif results are counts of JASPAR
-matches~\citep{castromondragon2022jaspar} per locus interval, intersected with
-BEDTools~\citep{quinlan2010bedtools}. Enrichment is a per-cluster Fisher exact test comparing
-the number of loci in a cluster carrying at least one match for a motif against the rest of the
-family, so the unit is loci-with-a-match rather than total match count, and a locus with
-several matches for the same motif contributes once.
+\paragraph{The noise class.} HDBSCAN labels loci it cannot confidently place as $-1$. These are
+retained and reported as a labelled group but are excluded from per-cluster consensus building,
+so a locus never contributes to a consensus it was not assigned to. The adopted configuration
+leaves \protoNoisePctMeasured\% of loci unassigned.
 
-\paragraph{Clustering parameters and the noise class.} HDBSCAN's $\min\_cluster\_size$ is set
-by a documented search rather than by hand. Starting at $\lfloor N/5 \rfloor$ the pipeline
-decrements the divisor ($N/6$ through $N/15$) and sweeps UMAP \texttt{n\_neighbors} $\in \{15,
-30\}$, stopping at the first configuration yielding ${\geq}2$ clusters; the accepted values are
-recorded for reproducibility, and for \emph{\protoFamily} the search accepted $N/\protoDivisor$
-with \texttt{n\_neighbors} $=\protoNeighbors$. HDBSCAN additionally assigns a noise class to
-points it cannot confidently place. Noise-class loci are retained in all tables and figures and
-reported as a separate labelled group; they are not merged into the nearest cluster and are
-excluded from per-cluster consensus building, so a locus never contributes to a consensus it
-was not confidently assigned to.
+\paragraph{The partition is a stratification of copy state, not a subfamily assignment.} Three
+measurements bound what the clusters can be claimed to be, and we report them including the
+negative results (Appendix~\ref{sec:appendix}). \emph{Parameter dependence:} across \cvNConfigs{}
+configurations of $k$ and \texttt{n\_neighbors} the recovered cluster count ranged from
+\cvClustersMin{} to \cvClustersMax{} with a median ARI of \cvMedianARI{} against the adopted
+partition, an improvement on the pipeline's superseded default (median ARI \oldMedianARI{},
+which admitted only \oldClusters{} clusters and left \oldNoisePct\% unassigned) but short of a
+subfamily claim. \emph{Reproducibility:} clustering is deterministic within an environment
+(re-running returns identical labels, ARI $1.000$), but UMAP runs with \texttt{n\_jobs}$=-1$, so
+cluster counts can shift on hardware with a different core count; every figure here was produced
+from the stored labels and embedding rather than re-derived. \emph{Consensus cross-check:} a
+consensus was built per cluster and every sampled copy projected onto every consensus with
+\texttt{mafft --addfragments --keeplength}; only \xcAccuracy\% of copies are nearest their own
+cluster's consensus (chance \xcChance\%), and the median copy is marginally \emph{closer} to
+another cluster's consensus (\xcDivOwn{} versus \xcDivOther{}). The clusters therefore do not
+correspond to distinct consensus sequences and we do not call them subfamilies anywhere in this
+paper. What they do capture, sharply, is degradation state: ORF integrity runs from
+\intactRich\% intact in the most intact cluster to \intactPoor\% in the least, and expression
+concentrates in the intact-rich clusters. That is the axis the workflow needs, since separating
+expressed, intact copies from inert relics is what makes the downstream reagents meaningful.
 
-\paragraph{The default parameterisation does not yield a stable partition, which is why it was
-replaced.} Because $k$ and \texttt{n\_neighbors} are chosen automatically, the partition could
-be an artefact of that choice, so we measured it rather than assuming it
-(\texttt{run\_cluster\_validation.py}). The measurement below characterises the pipeline's
-\emph{default} configuration, the one superseded in Section~\ref{sec:resolve}. Every combination of $k$ and \texttt{n\_neighbors} in
-the search space was re-clustered from scratch and scored against the accepted configuration
-($k=\cvRefKmer$, \texttt{n\_neighbors}~$=\cvRefNeighbors$) with the Adjusted Rand Index (ARI).
-The result is negative and we report it as such. Across \cvNConfigs{} configurations on
-\cvNLoci{} loci the recovered cluster count ranged only from \cvClustersMin{} to
-\cvClustersMax{}, the noise-class fraction ranged from \cvNoiseMinPct\% to \cvNoiseMaxPct\%,
-and agreement with the accepted partition had a median ARI of only \cvMedianARI{} and a worst
-case of \cvMinARI{} (Figure~\ref{fig:cluster_validation}). Restricting the comparison to loci
-that both runs place in a cluster gives a worst-case ARI of \cvMinARIcore{}. An ARI near zero
-means two configurations of the same algorithm on the same sequences agree about as well as
-chance.
+\paragraph{Scope.} The core workflow plus the phylogenetics, gRNA, transduction and antisense
+modules are the tested path and the source of every number reported above. The modules in
+Section~\ref{sec:exploratory} run but are not part of the validated result set.
 
-The cause is the minimum cluster size. The search fixes it at
-$\lfloor N/\protoDivisor \rfloor$, which for \emph{\protoFamily} demands
-\protoMinClusterSize{} loci per cluster: with \protoLoci{} loci, only two groups can satisfy
-that threshold and everything else is forced into the noise class. The
-\protoClusters{}-cluster partition and the \protoNoisePctMeasured\% noise fraction reported in
-Section~\ref{sec:resolve} are therefore properties of that threshold, not of the family. We
-draw two conclusions. First, the sub-family boundaries this configuration produces should not
-be treated as biological, and we do not claim them as such. Second, the concept the boundaries
-serve (Section~\ref{sec:resolve}) is unaffected: the expression split between the two groups is
-large and consistent across all \protoDETotal{} stages, so the separation of expressed from
-inert copies does not depend on the partition being finely resolved.
-
-This is what motivated the parameter search adopted in Section~\ref{sec:resolve}, which
-reduces the unassigned fraction from \oldNoisePct\% to \protoNoisePctMeasured\% and recovers
-\protoClusters{} clusters rather than \oldClusters{}.
-
-\paragraph{Reproducibility of the partition.} Clustering is deterministic: re-running
-\texttt{te\_clustering} twice on the same machine with the same parameters and seed returns
-byte-identical labels (ARI $1.000$), and the search implementation used to select the
-configuration reproduces the pipeline's own result exactly (ARI $1.000$ against
-\texttt{clustering\_analysis}). A given analysis is therefore repeatable.
-
-Exact reproduction across \emph{different} execution environments is a weaker guarantee. UMAP is
-run with \texttt{n\_jobs}$=-1$, so the order of parallel floating-point reductions depends on the
-available thread count, and the recovered cluster count and noise fraction can shift when the
-same configuration is run on hardware with a different core count. The figures quoted in
-Section~\ref{sec:resolve} are those of the run whose stored labels and embedding accompany this
-paper, and every figure here was produced from that stored artefact rather than re-derived. A
-reader reproducing the analysis on different hardware should expect the same qualitative
-structure rather than an identical cluster count; pinning the thread count makes the result
-bit-for-bit portable.
-
-The sub-family boundaries themselves are a separate question, and we tested them directly
-rather than leaving them provisional. Across \cvNConfigs{} configurations of $k$ and
-\texttt{n\_neighbors} the recovered cluster count ranged from \cvClustersMin{} to
-\cvClustersMax{}, and agreement with the adopted partition had a median ARI of \cvMedianARI{}
-(worst case \cvMinARI{}), an improvement on the superseded default (median ARI \oldMedianARI{})
-but short of what a subfamily assignment would need.
-
-\paragraph{The clusters do not correspond to distinct consensus sequences.} A $k$-mer partition
-is not evidence of subfamily structure, so we cross-checked it against the consensus alignments
-(\texttt{run\_cluster\_crosscheck.py}), which is the test Andrew asked for. A consensus was built
-per cluster from \xcSample{} sampled copies, every sampled copy was projected onto every cluster
-consensus with \texttt{mafft --addfragments --keeplength}, and each copy was assigned to its
-nearest consensus by Kimura two-parameter divergence. If the clusters were subfamilies, copies
-would match their own consensus best. They do not. Of \xcNTested{} copies only \xcAccuracy\% are
-nearest their own cluster's consensus (chance \xcChance\%, worst cluster \xcWorstCluster\%), and
-the median copy is marginally \emph{closer} to another cluster's consensus than to its own
-(divergence \xcDivOwn{} versus \xcDivOther{}, separation \xcSeparation{})
-(Figure~\ref{fig:crosscheck}). We therefore do not describe these clusters as subfamilies
-anywhere in this paper, and the phylogeny in Figure~\ref{fig:phylo_tree} should be read as a
-relationship among cluster consensuses rather than as a subfamily tree.
-
-What the partition does capture is degradation state, and it captures it sharply: ORF integrity
-runs from \intactRich\% of copies intact in the most intact cluster to \intactPoor\% in the
-least, and the expression reported in Section~\ref{sec:results} concentrates in the intact-rich
-clusters. That is precisely the axis the workflow needs, because separating expressed, intact
-copies from inert relics (Section~\ref{sec:resolve}) is what makes the downstream reagents
-meaningful. The clusters are a useful stratification of copy state, not a reconstruction of
-ancestry, and we report them as such.
-
-\begin{figure}[htbp]
-  \centering
-  \figorbox[1.0\textwidth]{fig_cluster_crosscheck}
-  \caption{Cross-check of the clusters against the consensus alignments for
-    \emph{\protoFamily}. \textbf{Left:} fraction of each cluster's copies whose nearest consensus
-    is each cluster's, after projecting every copy onto every consensus with
-    \texttt{mafft --addfragments --keeplength}. A subfamily assignment would put the mass on the
-    diagonal; the observed \xcAccuracy\% (chance \xcChance\%) does not. \textbf{Right:} Kimura
-    divergence of each copy to its own cluster's consensus versus to the nearest other
-    consensus; the distributions overlap, with the median copy marginally closer to another
-    cluster's consensus.}
-  \label{fig:crosscheck}
-\end{figure}
-
-
-
-\begin{figure}[htbp]
-  \centering
-  \figorbox[1.0\textwidth]{fig_cluster_validation}
-  \caption{Clustering and noise-class validation for \emph{\protoFamily}. \textbf{Left:}
-    Adjusted Rand Index of each $k$ and \texttt{n\_neighbors} configuration against the
-    configuration the automatic search accepted. Values near 1 would indicate the partition is
-    independent of the parameter choice; the observed median of \cvMedianARI{} indicates it is
-    not, which is why these sub-family boundaries are not interpreted as biological.
-    \textbf{Right:} HDBSCAN noise-class fraction per configuration, with the accepted
-    configuration highlighted. Noise-class loci are retained as a labelled group and excluded
-    from consensus building.}
-  \label{fig:cluster_validation}
-\end{figure}
-
-\paragraph{Scope of the reported results.} The core workflow (Prep, Clustering, Alignment and
-consensus, Motif, GO, Expression, Primers) plus the phylogenetics, gRNA, transduction and
-antisense modules are the tested path and are the source of every number reported in
-Section~\ref{sec:results}. The modules in Section~\ref{sec:exploratory} are exploratory: they
-run, but they are not part of the validated result set for this manuscript.
-
-% ===========================================================================
 \section{Design and implementation}
 \label{sec:design}
 
@@ -797,25 +642,7 @@ stage re-executed. Figure~\ref{fig:flowchart} gives the end-to-end view.
   \label{tab:stages}
 \end{table}
 
-\begin{figure}[htbp]
-  \centering
-  \figorbox[0.65\textwidth]{fig_architecture}
-  \caption{TERRA's three-layer architecture. A Tauri/React desktop shell drives a Python
-    analysis sidecar over a streaming NDJSON protocol; the backend runs locally or stages and
-    submits jobs to an LSF/Slurm cluster. Coordinate, sequence, motif and annotation data are
-    pulled from RMSK/Dfam, UCSC, JASPAR and mygene.info through uniform adapters.}
-  \label{fig:arch}
-\end{figure}
 
-\begin{figure}[htbp]
-  \centering
-  \figorbox[1.0\textwidth]{fig_pipeline_flowchart}
-  \caption{TERRA pipeline flowchart. A family/assembly request flows through the core stages
-    and into the copy-resolved modules, which run in parallel; outputs are gathered into a
-    per-family folder and report. The run executes inside the Nextflow DSL2 and Singularity
-    environment on an LSF or Slurm scheduler.}
-  \label{fig:flowchart}
-\end{figure}
 
 \paragraph{Engineering for the bottleneck.} The dominant cost in whole-family primer design is
 reading the reference genome, since a naive implementation re-reads the multi-gigabyte FASTA
@@ -830,14 +657,6 @@ subprocess loop, or delegate them to a Nextflow DSL2 layer~\citep{ditommaso2017}
 same unmodified Python modules as parallel, individually-resourced, resumable tasks
 (Figure~\ref{fig:dag}). No scientific code is duplicated between the two.
 
-\begin{figure}[htbp]
-  \centering
-  \figorbox[0.95\textwidth]{fig_nextflow_dag}
-  \caption{The Nextflow DSL2 execution graph: the core engine feeds a scatter of independent
-    copy-resolved module tasks, gathered into a single per-family output. Profiles select LSF
-    or Slurm and Singularity or Docker.}
-  \label{fig:dag}
-\end{figure}
 
 % ===========================================================================
 \section{Exploratory modules}
@@ -853,15 +672,6 @@ into a dendrogram of cluster consensuses. Each emits its own figures and machine
 values, and every run also writes a provenance manifest recording the git SHA, platform and
 tool versions alongside the stage checkpoints that enable resume.
 
-\begin{figure}[htbp]
-  \centering
-  \figorbox[1.0\textwidth]{fig_stage11_analyses}
-  \caption{The copy-resolved analysis modules grouped by biological theme. Each card names the
-    standalone \texttt{run\_*.py} script. The phylogenetics, gRNA, transduction and antisense
-    modules are reported as results in Section~\ref{sec:results}; the remainder are exploratory
-    (Section~\ref{sec:exploratory}).}
-  \label{fig:stage11overview}
-\end{figure}
 
 % ===========================================================================
 \section{Generality across TE classes}
@@ -926,6 +736,142 @@ TERRA is open source at \url{https://github.com/anmol-dash/te-scraper-and-analys
 are generated by the pipeline scripts in that repository, which run the analysis locally or on
 an HPC cluster and emit the figures and measured values cited here.
 
+
+\clearpage
+\appendix
+\section{Supplementary figures}
+\label{sec:appendix}
+
+The figures below support the results and validation reported in the main text. They are placed here to keep the main narrative on the prototype walk-through and the reagent deliverables; each is referenced from the section it belongs to.
+
+\begin{figure}[htbp]
+  \centering
+  \figorbox[0.70\textwidth]{fig_cluster_search}
+  \caption{Clustering parameter search for \emph{\protoFamily}. Each point is one of
+    \csNConfigs{} configurations of $k$, \texttt{n\_neighbors}, \texttt{min\_cluster\_size} and
+    \texttt{min\_samples}, plotted as the number of clusters recovered against the fraction of
+    loci left unassigned. The pipeline's default minimum cluster size
+    ($\lfloor N/\protoDivisor \rfloor = \oldMinClusterSize$) admits only \oldClusters{} clusters
+    and leaves \oldNoisePct\% of the family unassigned; the selected configuration (star)
+    recovers \protoClusters{} clusters with \protoNoisePctMeasured\% unassigned.}
+  \label{fig:cluster_search}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \figorbox[0.70\textwidth]{fig_de_l1mdt}
+  \caption{Differential expression between \emph{\protoFamily} clusters. Heatmap of
+    $-\log_{10}(q)$ from pairwise Wilcoxon rank-sum tests with Benjamini--Hochberg correction;
+    \protoDESig{} of \protoDETotal{} cluster-pair by stage comparisons reach $q<0.05$. Cluster-resolved testing recovers stage-specific
+    differences that a family-level summary averages away (Section~\ref{sec:resolve}).}
+  \label{fig:de}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \figorbox[0.70\textwidth]{fig_phylo_tree}
+  \caption{Subfamily phylogeny for \emph{\protoFamily}. Neighbour-joining tree relating
+    cluster consensuses and representative copies, built from the MAFFT alignment.}
+  \label{fig:phylo_tree}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \figorbox[0.70\textwidth]{fig_crispr_deliverable}
+  \caption{Allele-aware CRISPRa/i guide design for a repetitive family. Candidate guides are
+    enumerated PAM-aware from the consensus and per-copy sequence, scored against the full
+    copy landscape with seed-anchored, mismatch-tolerant matching, and reported as a
+    coverage-versus-off-target trade-off. This panel is a schematic of the logic; the measured
+    frontier for \emph{\protoFamily} is Figure~\ref{fig:grna_pareto}.}
+  \label{fig:crispr}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \figorbox[0.70\textwidth]{fig_transduction_groups}
+  \caption{3' transduction lineages for \emph{\protoFamily}: \protoLineages{} candidate
+    lineages grouped by shared downstream-tail $k$-mers absent from the family consensus;
+    \protoPolyA{} copies carry an AATAAA poly-A signal.}
+  \label{fig:transduction}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \figorbox[0.70\textwidth]{fig_antisense_motifs}
+  \caption{Antisense/bidirectional promoter content for \emph{\protoFamily}: core promoter
+    elements scanned on both strands of each 5' region; \protoBidir{} of \protoLoci{} copies
+    are flagged bidirectional.}
+  \label{fig:antisense}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \figorbox[0.70\textwidth]{fig_cluster_crosscheck}
+  \caption{Cross-check of the clusters against the consensus alignments for
+    \emph{\protoFamily}. \textbf{Left:} fraction of each cluster's copies whose nearest consensus
+    is each cluster's, after projecting every copy onto every consensus with
+    \texttt{mafft --addfragments --keeplength}. A subfamily assignment would put the mass on the
+    diagonal; the observed \xcAccuracy\% (chance \xcChance\%) does not. \textbf{Right:} Kimura
+    divergence of each copy to its own cluster's consensus versus to the nearest other
+    consensus; the distributions overlap, with the median copy marginally closer to another
+    cluster's consensus.}
+  \label{fig:crosscheck}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \figorbox[0.70\textwidth]{fig_cluster_validation}
+  \caption{Clustering and noise-class validation for \emph{\protoFamily}. \textbf{Left:}
+    Adjusted Rand Index of each $k$ and \texttt{n\_neighbors} configuration against the
+    configuration the automatic search accepted. Values near 1 would indicate the partition is
+    independent of the parameter choice; the observed median of \cvMedianARI{} indicates it is
+    not, which is why these sub-family boundaries are not interpreted as biological.
+    \textbf{Right:} HDBSCAN noise-class fraction per configuration, with the accepted
+    configuration highlighted. Noise-class loci are retained as a labelled group and excluded
+    from consensus building.}
+  \label{fig:cluster_validation}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \figorbox[0.70\textwidth]{fig_architecture}
+  \caption{TERRA's three-layer architecture. A Tauri/React desktop shell drives a Python
+    analysis sidecar over a streaming NDJSON protocol; the backend runs locally or stages and
+    submits jobs to an LSF/Slurm cluster. Coordinate, sequence, motif and annotation data are
+    pulled from RMSK/Dfam, UCSC, JASPAR and mygene.info through uniform adapters.}
+  \label{fig:arch}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \figorbox[0.70\textwidth]{fig_pipeline_flowchart}
+  \caption{TERRA pipeline flowchart. A family/assembly request flows through the core stages
+    and into the copy-resolved modules, which run in parallel; outputs are gathered into a
+    per-family folder and report. The run executes inside the Nextflow DSL2 and Singularity
+    environment on an LSF or Slurm scheduler.}
+  \label{fig:flowchart}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \figorbox[0.70\textwidth]{fig_nextflow_dag}
+  \caption{The Nextflow DSL2 execution graph: the core engine feeds a scatter of independent
+    copy-resolved module tasks, gathered into a single per-family output. Profiles select LSF
+    or Slurm and Singularity or Docker.}
+  \label{fig:dag}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \figorbox[0.70\textwidth]{fig_stage11_analyses}
+  \caption{The copy-resolved analysis modules grouped by biological theme. Each card names the
+    standalone \texttt{run\_*.py} script. The phylogenetics, gRNA, transduction and antisense
+    modules are reported as results in Section~\ref{sec:results}; the remainder are exploratory
+    (Section~\ref{sec:exploratory}).}
+  \label{fig:stage11overview}
+\end{figure}
+
+\clearpage
 \bibliographystyle{unsrtnat}
 \bibliography{references}
 

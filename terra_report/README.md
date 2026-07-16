@@ -6,7 +6,7 @@ See **`AJM_COMMENTS.md`** for all 22 comments and how each one is addressed.
 ```
 terra_report/
   terra_report.tex     the rewritten manuscript
-  terra_report.pdf     compiled output (15 pages)
+  terra_report.pdf     compiled output (8pp main + appendix + refs = 19)
   references.bib       bibliography (+4 new entries for AJM's C101)
   figs/                the 7 real schematic figures
   AJM_COMMENTS.md      the compiled comment list + status
@@ -47,7 +47,16 @@ non-dominated.
 > completed, so those numbers do not exist. Rather than invent them, the prototype is the family
 > with real data. IAPLTR1_Mm and B1_Mus2 appear in §7 with their real cross-family numbers.
 
-## Figure status (important)
+## Figure layout
+
+Main text carries **5 figures** (the prototype arc, lumping-vs-resolving, the L1Md_T
+results panel, the master element, and the measured CRISPR frontier). The other **12 are in
+Appendix A**, sized at 0.70\textwidth: the validation trio (search / stability / consensus
+cross-check), the supporting copy-resolved results (DE, phylogeny, transduction, antisense),
+the CRISPR schematic, and the four architecture/workflow schematics. Every appendix figure is
+referenced from the section it belongs to.
+
+## Figure status (historical)
 
 The 7 **schematics in `figs/` are real and render now**:
 
