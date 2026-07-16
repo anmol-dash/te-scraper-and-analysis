@@ -133,6 +133,7 @@
 \newcommand{\oldClusters}{2}
 \newcommand{\oldNoisePct}{53.8}
 \newcommand{\oldMinClusterSize}{4,727}
+\newcommand{\oldMedianARI}{0.21}
 % copy-resolved module results (L1Md_T)
 % Module numbers: alias the generated macros so a fresh run updates them itself.
 % (The reviewed draft named chr1:95511396 as the master element; the run whose
@@ -661,18 +662,34 @@ This is what motivated the parameter search adopted in Section~\ref{sec:resolve}
 reduces the unassigned fraction from \oldNoisePct\% to \protoNoisePctMeasured\% and recovers
 \protoClusters{} clusters rather than \oldClusters{}.
 
-\paragraph{Run-to-run reproducibility.} Re-clustering at the pipeline's own nominal parameters
-reproduced \cvNoisePct\% noise where its stored labels have \oldNoisePct\%: the same inputs
-and settings do not give the same partition. We localised this rather than leaving it open.
-Repeating HDBSCAN on a fixed embedding returns identical labels (ARI \csReproARI{}), so the
-clustering step is deterministic and the variation originates in the UMAP embedding, whose
-\texttt{transform()} is not guaranteed reproducible on the subsample-fit path used above
-$20{,}000$ loci even with a fixed seed. Analyses should therefore be run from the stored
-embedding and labels rather than by re-deriving them.
-\todo{Two items remain before submission (AJM C2): re-run this stability sweep against the
-adopted configuration, since the ARI figures above describe the superseded default; and
-cross-check the \protoClusters{} clusters against the consensus alignments before they are
-described as subfamilies.}
+\paragraph{Run-to-run reproducibility is the binding limitation.} The configuration adopted in
+Section~\ref{sec:resolve} was selected by one run and then re-clustered independently by another
+at identical settings ($k=\cvRefKmer$, \texttt{n\_neighbors}~$=\cvRefNeighbors$,
+\texttt{min\_cluster\_size}~$=\cvRefMinClusterSize$, \texttt{min\_samples}~$=\cvRefMinSamples$,
+same seed). The two runs disagree: the selection run recovered \csClusters{} clusters with
+\csNoisePct\% of loci unassigned, the independent re-run recovered \cvClustersMax{} clusters with
+\cvNoisePct\% unassigned. The same code and parameters therefore do not return the same
+partition, and the specific cluster count and noise fraction quoted in
+Section~\ref{sec:resolve} should be read as one realisation rather than as fixed properties of
+the family.
+
+We localised the cause instead of leaving it open. Repeating HDBSCAN on a fixed embedding
+returns identical labels (ARI \csReproARI{}), so the clustering step is deterministic; the
+variation originates in the UMAP embedding, whose \texttt{transform()} is not guaranteed
+reproducible on the subsample-fit path this pipeline uses above $20{,}000$ loci, even with a
+fixed seed. Two consequences follow. Analyses must be run from the stored embedding and labels
+rather than re-derived, which is how every figure in this paper was produced. And the
+sub-family boundaries remain provisional: across \cvNConfigs{} configurations of $k$ and
+\texttt{n\_neighbors} the recovered cluster count ranged from \cvClustersMin{} to
+\cvClustersMax{} and agreement with the adopted partition had a median ARI of only
+\cvMedianARI{} (worst case \cvMinARI{}). That is an improvement on the superseded default
+(median ARI \oldMedianARI{}) but remains well short of the reproducibility a subfamily
+assignment would require, so we do not describe these clusters as subfamilies.
+
+\todo{Before submission (AJM C2): make the embedding reproducible (pin UMAP to a
+deterministic path, or ship the stored embedding as the artefact of record) so the reported
+partition can be regenerated exactly; then cross-check the clusters against the consensus
+alignments before any of them is described as a subfamily.}
 
 \begin{figure}[h]
   \centering
