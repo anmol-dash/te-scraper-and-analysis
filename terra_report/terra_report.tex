@@ -34,8 +34,13 @@
 % NOTE: \IfFileExists does NOT consult \graphicspath, so every candidate
 % directory must be probed explicitly here. Drop generated figures into any of
 % figs/, reports8/ or reports8/stage11_l1mdt/ and they resolve automatically.
+% Size figures by width and let the aspect ratio set the height, as a normal
+% paper does. The previous version also capped height at 0.20\textheight, which
+% fought the \resizebox wrapper at each call site: wide multi-panel figures hit
+% the height cap, came out narrower than \linewidth, and were then scaled back
+% up, so the effective size was arbitrary.
 \newcommand{\fbinc}[2]{%
-  \includegraphics[width=#1,height=0.20\textheight,keepaspectratio]{#2}}
+  \includegraphics[width=#1,keepaspectratio]{#2}}
 \newcommand{\figorbox}[2][\linewidth]{%
   \IfFileExists{#2.pdf}{\fbinc{#1}{#2.pdf}}{%
   \IfFileExists{figs/#2.pdf}{\fbinc{#1}{figs/#2.pdf}}{%
@@ -275,9 +280,9 @@ academic HPC.
 Figure~\ref{fig:journey} summarises the path this paper follows end to end on a single
 prototype family.
 
-\begin{figure}[h]
+\begin{figure}[htbp]
   \centering
-  \resizebox{1.0\textwidth}{!}{\figorbox{fig_prototype_journey}}
+  \figorbox[1.0\textwidth]{fig_prototype_journey}
   \caption{The TERRA path, from database annotation to ordered reagents, illustrated for the
     prototype family used throughout this paper. RepeatMasker/Dfam loci are sub-grouped
     without alignment, filtered by locus-level expression to separate copies that matter from
@@ -349,9 +354,9 @@ populations can be handled separately, and the consensus built from expressed co
 \emph{expressed} consensus) is the sequence that primers and guides should target, which is
 not in general the same as the \emph{common} consensus built from all annotated copies.
 
-\begin{figure}[h]
+\begin{figure}[htbp]
   \centering
-  \resizebox{0.95\textwidth}{!}{\figorbox{fig_locus_filtering}}
+  \figorbox[0.95\textwidth]{fig_locus_filtering}
   \caption{Resolving copies instead of lumping them. Left: a family-level summary averages
     over meaningful, low-function and inert loci, so signal carried by a minority of copies is
     diluted. Right: TERRA partitions copies by sequence and intersects them with locus-level
@@ -361,9 +366,9 @@ not in general the same as the \emph{common} consensus built from all annotated 
   \label{fig:filtering}
 \end{figure}
 
-\begin{figure}[h]
+\begin{figure}[htbp]
   \centering
-  \resizebox{0.85\textwidth}{!}{\figorbox{fig_cluster_search}}
+  \figorbox[0.85\textwidth]{fig_cluster_search}
   \caption{Clustering parameter search for \emph{\protoFamily}. Each point is one of
     \csNConfigs{} configurations of $k$, \texttt{n\_neighbors}, \texttt{min\_cluster\_size} and
     \texttt{min\_samples}, plotted as the number of clusters recovered against the fraction of
@@ -393,9 +398,9 @@ We report what the counts show and do not over-interpret the developmental profi
 timing claim should be read against the established activity of these elements in the early
 embryo~\citep{macfarlan2012,peaston2004}.
 
-\begin{figure}[h]
+\begin{figure}[htbp]
   \centering
-  \resizebox{1.0\textwidth}{!}{\figorbox{fig_line_results}}
+  \figorbox[1.0\textwidth]{fig_line_results}
   \caption{\emph{\protoFamily} (\texttt{\protoAssembly}) analysed end to end in a single TERRA
     run. \textbf{(a)} UMAP embedding of $k$-mer-encoded loci coloured by HDBSCAN cluster.
     \textbf{(b)} Per-cluster mean SQuIRE expression (log1p) across the six developmental
@@ -404,9 +409,9 @@ embryo~\citep{macfarlan2012,peaston2004}.
   \label{fig:proto_results}
 \end{figure}
 
-\begin{figure}[h]
+\begin{figure}[htbp]
   \centering
-  \resizebox{1.0\textwidth}{!}{\figorbox{fig_de_l1mdt}}
+  \figorbox[1.0\textwidth]{fig_de_l1mdt}
   \caption{Differential expression between \emph{\protoFamily} clusters. Heatmap of
     $-\log_{10}(q)$ from pairwise Wilcoxon rank-sum tests with Benjamini--Hochberg correction;
     \protoDESig{} of \protoDETotal{} cluster-pair by stage comparisons reach $q<0.05$. Cluster-resolved testing recovers stage-specific
@@ -427,17 +432,17 @@ copy age is \protoMedianAge{} Myr, and the top master-element candidate is \prot
 and~\ref{fig:phylo_master}). Naming a specific locus matters: it converts a family-level
 observation into a testable, orderable target.
 
-\begin{figure}[h]
+\begin{figure}[htbp]
   \centering
-  \resizebox{1.0\textwidth}{!}{\figorbox{fig_phylo_tree}}
+  \figorbox[1.0\textwidth]{fig_phylo_tree}
   \caption{Subfamily phylogeny for \emph{\protoFamily}. Neighbour-joining tree relating
     cluster consensuses and representative copies, built from the MAFFT alignment.}
   \label{fig:phylo_tree}
 \end{figure}
 
-\begin{figure}[h]
+\begin{figure}[htbp]
   \centering
-  \resizebox{1.0\textwidth}{!}{\figorbox{fig_phylo_master}}
+  \figorbox[1.0\textwidth]{fig_phylo_master}
   \caption{Master-element nomination for \emph{\protoFamily}. Copies are scored on ORF
     integrity against divergence from the consensus; \protoIntact{} copies are intact and the
     top-ranked candidate is \protoMaster{}.}
@@ -467,9 +472,9 @@ position on the coverage/specificity trade-off rather than trusting an opaque ra
 same output supports CRISPRa and CRISPRi, since both depend on the guide-to-copy mapping
 rather than on the effector. Figure~\ref{fig:crispr} summarises the design logic.
 
-\begin{figure}[h]
+\begin{figure}[htbp]
   \centering
-  \resizebox{0.95\textwidth}{!}{\figorbox{fig_crispr_deliverable}}
+  \figorbox[0.95\textwidth]{fig_crispr_deliverable}
   \caption{Allele-aware CRISPRa/i guide design for a repetitive family. Candidate guides are
     enumerated PAM-aware from the consensus and per-copy sequence, scored against the full
     copy landscape with seed-anchored, mismatch-tolerant matching, and reported as a
@@ -478,9 +483,9 @@ rather than on the effector. Figure~\ref{fig:crispr} summarises the design logic
   \label{fig:crispr}
 \end{figure}
 
-\begin{figure}[h]
+\begin{figure}[htbp]
   \centering
-  \resizebox{1.0\textwidth}{!}{\figorbox{fig_grna_offtarget_pareto}}
+  \figorbox[1.0\textwidth]{fig_grna_offtarget_pareto}
   \caption{Measured coverage-versus-off-target frontier for \emph{\protoFamily}.
     \protoGuides{} candidate guides scored against \protoLoci{} copies; \protoFrontier{}
     guides are non-dominated. Each frontier point is a defensible design choice at a stated
@@ -513,18 +518,18 @@ liftover, ColabFold structure prediction, LTR structural classification, and aut
 subfamily resolution) are exploratory and are described in Section~\ref{sec:exploratory}
 rather than reported as validated results.
 
-\begin{figure}[h]
+\begin{figure}[htbp]
   \centering
-  \resizebox{1.0\textwidth}{!}{\figorbox{fig_transduction_groups}}
+  \figorbox[1.0\textwidth]{fig_transduction_groups}
   \caption{3' transduction lineages for \emph{\protoFamily}: \protoLineages{} candidate
     lineages grouped by shared downstream-tail $k$-mers absent from the family consensus;
     \protoPolyA{} copies carry an AATAAA poly-A signal.}
   \label{fig:transduction}
 \end{figure}
 
-\begin{figure}[h]
+\begin{figure}[htbp]
   \centering
-  \resizebox{1.0\textwidth}{!}{\figorbox{fig_antisense_motifs}}
+  \figorbox[1.0\textwidth]{fig_antisense_motifs}
   \caption{Antisense/bidirectional promoter content for \emph{\protoFamily}: core promoter
     elements scanned on both strands of each 5' region; \protoBidir{} of \protoLoci{} copies
     are flagged bidirectional.}
@@ -713,9 +718,9 @@ copies from inert relics (Section~\ref{sec:resolve}) is what makes the downstrea
 meaningful. The clusters are a useful stratification of copy state, not a reconstruction of
 ancestry, and we report them as such.
 
-\begin{figure}[h]
+\begin{figure}[htbp]
   \centering
-  \resizebox{1.0\textwidth}{!}{\figorbox{fig_cluster_crosscheck}}
+  \figorbox[1.0\textwidth]{fig_cluster_crosscheck}
   \caption{Cross-check of the clusters against the consensus alignments for
     \emph{\protoFamily}. \textbf{Left:} fraction of each cluster's copies whose nearest consensus
     is each cluster's, after projecting every copy onto every consensus with
@@ -729,9 +734,9 @@ ancestry, and we report them as such.
 
 
 
-\begin{figure}[h]
+\begin{figure}[htbp]
   \centering
-  \resizebox{1.0\textwidth}{!}{\figorbox{fig_cluster_validation}}
+  \figorbox[1.0\textwidth]{fig_cluster_validation}
   \caption{Clustering and noise-class validation for \emph{\protoFamily}. \textbf{Left:}
     Adjusted Rand Index of each $k$ and \texttt{n\_neighbors} configuration against the
     configuration the automatic search accepted. Values near 1 would indicate the partition is
@@ -792,9 +797,9 @@ stage re-executed. Figure~\ref{fig:flowchart} gives the end-to-end view.
   \label{tab:stages}
 \end{table}
 
-\begin{figure}[h]
+\begin{figure}[htbp]
   \centering
-  \resizebox{0.65\textwidth}{!}{\figorbox{fig_architecture}}
+  \figorbox[0.65\textwidth]{fig_architecture}
   \caption{TERRA's three-layer architecture. A Tauri/React desktop shell drives a Python
     analysis sidecar over a streaming NDJSON protocol; the backend runs locally or stages and
     submits jobs to an LSF/Slurm cluster. Coordinate, sequence, motif and annotation data are
@@ -802,9 +807,9 @@ stage re-executed. Figure~\ref{fig:flowchart} gives the end-to-end view.
   \label{fig:arch}
 \end{figure}
 
-\begin{figure}[h]
+\begin{figure}[htbp]
   \centering
-  \resizebox{1.0\textwidth}{!}{\figorbox{fig_pipeline_flowchart}}
+  \figorbox[1.0\textwidth]{fig_pipeline_flowchart}
   \caption{TERRA pipeline flowchart. A family/assembly request flows through the core stages
     and into the copy-resolved modules, which run in parallel; outputs are gathered into a
     per-family folder and report. The run executes inside the Nextflow DSL2 and Singularity
@@ -825,9 +830,9 @@ subprocess loop, or delegate them to a Nextflow DSL2 layer~\citep{ditommaso2017}
 same unmodified Python modules as parallel, individually-resourced, resumable tasks
 (Figure~\ref{fig:dag}). No scientific code is duplicated between the two.
 
-\begin{figure}[h]
+\begin{figure}[htbp]
   \centering
-  \resizebox{0.95\textwidth}{!}{\figorbox{fig_nextflow_dag}}
+  \figorbox[0.95\textwidth]{fig_nextflow_dag}
   \caption{The Nextflow DSL2 execution graph: the core engine feeds a scatter of independent
     copy-resolved module tasks, gathered into a single per-family output. Profiles select LSF
     or Slurm and Singularity or Docker.}
@@ -848,9 +853,9 @@ into a dendrogram of cluster consensuses. Each emits its own figures and machine
 values, and every run also writes a provenance manifest recording the git SHA, platform and
 tool versions alongside the stage checkpoints that enable resume.
 
-\begin{figure}[h]
+\begin{figure}[htbp]
   \centering
-  \resizebox{1.0\textwidth}{!}{\figorbox{fig_stage11_analyses}}
+  \figorbox[1.0\textwidth]{fig_stage11_analyses}
   \caption{The copy-resolved analysis modules grouped by biological theme. Each card names the
     standalone \texttt{run\_*.py} script. The phylogenetics, gRNA, transduction and antisense
     modules are reported as results in Section~\ref{sec:results}; the remainder are exploratory

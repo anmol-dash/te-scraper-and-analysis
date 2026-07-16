@@ -170,13 +170,25 @@ def main():
     _pp(f"  Wrote {reports/'antisense_per_copy.csv'}")
 
     # ── figures ──
+    # Plot the DISTRIBUTION of motif counts, not one bar per copy. The previous
+    # version drew a width=0.4 bar for every copy across an x-axis spanning
+    # len(df_out): at 23,639 copies each bar is ~0.002% of the axis width, so the
+    # figure rendered as empty axes (while still embedding 23k invisible bars).
+    # A count-per-motif-number histogram conveys the same information and is
+    # independent of family size.
     fig, ax = plt.subplots(figsize=(8, 5))
-    x = np.arange(len(df_out))
-    ax.bar(x - 0.2, df_out["sense_promoter_motifs"], width=0.4,
+    smax = int(max(df_out["sense_promoter_motifs"].max(),
+                   df_out["antisense_promoter_motifs"].max()))
+    bins = np.arange(0, smax + 2)
+    sense_counts = np.bincount(df_out["sense_promoter_motifs"].astype(int), minlength=smax + 1)
+    anti_counts = np.bincount(df_out["antisense_promoter_motifs"].astype(int), minlength=smax + 1)
+    ax.bar(bins[:-1] - 0.2, sense_counts, width=0.4,
            label="sense", color="#2980b9", edgecolor="white")
-    ax.bar(x + 0.2, df_out["antisense_promoter_motifs"], width=0.4,
+    ax.bar(bins[:-1] + 0.2, anti_counts, width=0.4,
            label="antisense", color="#e74c3c", edgecolor="white")
-    ax.set_xlabel("copy"); ax.set_ylabel("promoter motifs (TATA + Inr)")
+    ax.set_xticks(bins[:-1])
+    ax.set_xlabel("promoter motifs (TATA + Inr) in the copy")
+    ax.set_ylabel(f"copies (of {len(df_out):,})")
     ax.set_title(f"{args.family} --- sense vs antisense promoter motifs",
                  fontweight="bold")
     ax.legend(fontsize=9); ax.spines[["top", "right"]].set_visible(False)
