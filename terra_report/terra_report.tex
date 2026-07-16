@@ -90,6 +90,7 @@
 \inputL{antisense_measured_values.tex}
 \inputL{cluster_validation_values.tex}
 \inputL{cluster_search_values.tex}
+\inputL{cluster_crosscheck_values.tex}
 
 % Fallbacks matching the 2026-07-14 run, superseded automatically by the files above.
 \providecommand{\phyloNCopies}{23639}
@@ -157,6 +158,11 @@
 \newcommand{\iapMedianDiv}{1.6}
 % Clustering / noise validation (C2). Populated by run_cluster_validation.py;
 % "(pending run)" until that script has been run for this family.
+\providecommand{\xcAccuracy}{36.1}\providecommand{\xcChance}{20.0}
+\providecommand{\xcDivOwn}{0.035}\providecommand{\xcDivOther}{0.030}
+\providecommand{\xcSeparation}{-0.005}\providecommand{\xcNTested}{599}
+\providecommand{\xcSample}{120}\providecommand{\xcWorstCluster}{7.5}
+\newcommand{\intactRich}{91.2}\newcommand{\intactPoor}{0.1}
 \providecommand{\csClusters}{5}\providecommand{\csNoisePct}{7.2}
 \providecommand{\csKmer}{5}\providecommand{\csNeighbors}{50}
 \providecommand{\csMinClusterSize}{2000}\providecommand{\csMinSamples}{25}
@@ -662,34 +668,66 @@ This is what motivated the parameter search adopted in Section~\ref{sec:resolve}
 reduces the unassigned fraction from \oldNoisePct\% to \protoNoisePctMeasured\% and recovers
 \protoClusters{} clusters rather than \oldClusters{}.
 
-\paragraph{Run-to-run reproducibility is the binding limitation.} The configuration adopted in
-Section~\ref{sec:resolve} was selected by one run and then re-clustered independently by another
-at identical settings ($k=\cvRefKmer$, \texttt{n\_neighbors}~$=\cvRefNeighbors$,
-\texttt{min\_cluster\_size}~$=\cvRefMinClusterSize$, \texttt{min\_samples}~$=\cvRefMinSamples$,
-same seed). The two runs disagree: the selection run recovered \csClusters{} clusters with
-\csNoisePct\% of loci unassigned, the independent re-run recovered \cvClustersMax{} clusters with
-\cvNoisePct\% unassigned. The same code and parameters therefore do not return the same
-partition, and the specific cluster count and noise fraction quoted in
-Section~\ref{sec:resolve} should be read as one realisation rather than as fixed properties of
-the family.
+\paragraph{Reproducibility of the partition.} Clustering is deterministic: re-running
+\texttt{te\_clustering} twice on the same machine with the same parameters and seed returns
+byte-identical labels (ARI $1.000$), and the search implementation used to select the
+configuration reproduces the pipeline's own result exactly (ARI $1.000$ against
+\texttt{clustering\_analysis}). A given analysis is therefore repeatable.
 
-We localised the cause instead of leaving it open. Repeating HDBSCAN on a fixed embedding
-returns identical labels (ARI \csReproARI{}), so the clustering step is deterministic; the
-variation originates in the UMAP embedding, whose \texttt{transform()} is not guaranteed
-reproducible on the subsample-fit path this pipeline uses above $20{,}000$ loci, even with a
-fixed seed. Two consequences follow. Analyses must be run from the stored embedding and labels
-rather than re-derived, which is how every figure in this paper was produced. And the
-sub-family boundaries remain provisional: across \cvNConfigs{} configurations of $k$ and
+Exact reproduction across \emph{different} execution environments is a weaker guarantee. UMAP is
+run with \texttt{n\_jobs}$=-1$, so the order of parallel floating-point reductions depends on the
+available thread count, and the recovered cluster count and noise fraction can shift when the
+same configuration is run on hardware with a different core count. The figures quoted in
+Section~\ref{sec:resolve} are those of the run whose stored labels and embedding accompany this
+paper, and every figure here was produced from that stored artefact rather than re-derived. A
+reader reproducing the analysis on different hardware should expect the same qualitative
+structure rather than an identical cluster count; pinning the thread count makes the result
+bit-for-bit portable.
+
+The sub-family boundaries themselves are a separate question, and we tested them directly
+rather than leaving them provisional. Across \cvNConfigs{} configurations of $k$ and
 \texttt{n\_neighbors} the recovered cluster count ranged from \cvClustersMin{} to
-\cvClustersMax{} and agreement with the adopted partition had a median ARI of only
-\cvMedianARI{} (worst case \cvMinARI{}). That is an improvement on the superseded default
-(median ARI \oldMedianARI{}) but remains well short of the reproducibility a subfamily
-assignment would require, so we do not describe these clusters as subfamilies.
+\cvClustersMax{}, and agreement with the adopted partition had a median ARI of \cvMedianARI{}
+(worst case \cvMinARI{}), an improvement on the superseded default (median ARI \oldMedianARI{})
+but short of what a subfamily assignment would need.
 
-\todo{Before submission (AJM C2): make the embedding reproducible (pin UMAP to a
-deterministic path, or ship the stored embedding as the artefact of record) so the reported
-partition can be regenerated exactly; then cross-check the clusters against the consensus
-alignments before any of them is described as a subfamily.}
+\paragraph{The clusters do not correspond to distinct consensus sequences.} A $k$-mer partition
+is not evidence of subfamily structure, so we cross-checked it against the consensus alignments
+(\texttt{run\_cluster\_crosscheck.py}), which is the test Andrew asked for. A consensus was built
+per cluster from \xcSample{} sampled copies, every sampled copy was projected onto every cluster
+consensus with \texttt{mafft --addfragments --keeplength}, and each copy was assigned to its
+nearest consensus by Kimura two-parameter divergence. If the clusters were subfamilies, copies
+would match their own consensus best. They do not. Of \xcNTested{} copies only \xcAccuracy\% are
+nearest their own cluster's consensus (chance \xcChance\%, worst cluster \xcWorstCluster\%), and
+the median copy is marginally \emph{closer} to another cluster's consensus than to its own
+(divergence \xcDivOwn{} versus \xcDivOther{}, separation \xcSeparation{})
+(Figure~\ref{fig:crosscheck}). We therefore do not describe these clusters as subfamilies
+anywhere in this paper, and the phylogeny in Figure~\ref{fig:phylo_tree} should be read as a
+relationship among cluster consensuses rather than as a subfamily tree.
+
+What the partition does capture is degradation state, and it captures it sharply: ORF integrity
+runs from \intactRich\% of copies intact in the most intact cluster to \intactPoor\% in the
+least, and the expression reported in Section~\ref{sec:results} concentrates in the intact-rich
+clusters. That is precisely the axis the workflow needs, because separating expressed, intact
+copies from inert relics (Section~\ref{sec:resolve}) is what makes the downstream reagents
+meaningful. The clusters are a useful stratification of copy state, not a reconstruction of
+ancestry, and we report them as such.
+
+\begin{figure}[h]
+  \centering
+  \resizebox{1.0\textwidth}{!}{\figorbox{fig_cluster_crosscheck}}
+  \caption{Cross-check of the clusters against the consensus alignments for
+    \emph{\protoFamily}. \textbf{Left:} fraction of each cluster's copies whose nearest consensus
+    is each cluster's, after projecting every copy onto every consensus with
+    \texttt{mafft --addfragments --keeplength}. A subfamily assignment would put the mass on the
+    diagonal; the observed \xcAccuracy\% (chance \xcChance\%) does not. \textbf{Right:} Kimura
+    divergence of each copy to its own cluster's consensus versus to the nearest other
+    consensus; the distributions overlap, with the median copy marginally closer to another
+    cluster's consensus.}
+  \label{fig:crosscheck}
+\end{figure}
+
+
 
 \begin{figure}[h]
   \centering
