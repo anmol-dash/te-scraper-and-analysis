@@ -137,6 +137,7 @@ submitter. `run_stage11_all.py` runs them together for one family.
 | `run_ortholog_insertion.py`, `run_multiassembly_liftover.py` | Orthologous-insertion calling and liftover across `hg38` / T2T-CHM13 / `mm10` / `mm39` |
 | `run_fold_prediction.py`, `run_subfamily.py` | ColabFold structure prediction of consensus ORFs; subfamily dendrogram of cluster consensuses |
 | `make_report_figures.py` | Cross-family LINE/SINE/LTR batch analysis (clusters, expression, DE, per-family report figures) |
+| `run_cluster_search.py` | Search for an N-cluster configuration at minimal noise; `--regen-only` rebuilds expression/DE and figures from an existing clustered CSV |
 
 ## Supported assemblies
 
