@@ -56,7 +56,7 @@ _pipeline_datas = [
         "run_ltr_struct.py",
         "run_subfamily.py",
         "run_benchmark.py",
-        "run_line_sine_ltr_analysis.py",
+        "make_report_figures.py",
         # ── shared libs + infra ──
         "te_moods_scan.py",
         "te_divergence.py",

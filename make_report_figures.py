@@ -1,1062 +1,1227 @@
 #!/usr/bin/env python3
-"""make_report_figures.py — build EVERY figure used by gameca_report.tex.
+"""
+make_report_figures.py --- GAMECA cross-family batch analysis (report data figures)
+Analyzes LINE (L1Md_T), SINE (B1_Mus2), and LTR (IAPLTR1_Mm) TE families.
 
-Single entry point for the manuscript's figures. It has two phases:
-
-  1. Schematics (always run, need no data): the pipeline flowchart, the Stage-11
-     standout-analysis overview, the software-architecture diagram, and the
-     Nextflow DSL2 DAG. Rendered directly here into --out-dir (report_figs/).
-
-  2. Data figures (run with --data, given real inputs): the phylogenetic trees,
-     Kimura/repeat-landscape plots, gRNA Pareto fronts, DE heatmaps, LTR/subfamily
-     figures, per-stage benchmarks, and the cross-family LINE/SINE/LTR plots. These
-     are NOT drawn here — they are produced by invoking the real analysis scripts
-     (run_line_sine_ltr_analysis.py, which itself drives every Stage-11 module per
-     family, and optionally run_stage11_all.py for a single worked example) on
-     genuine cluster inputs, writing into the paths the report reads (reports8/…).
-
-No figure is ever fabricated. Data figures require real loci/expression/genome
-inputs; when an input or a real generator is missing, the figure is reported as
-SKIPPED with the reason — never invented. A manifest at the end lists every report
-figure and whether it was produced.
+Produces the cross-family report data figures (fig_line_results etc.).
+All figures saved as PDFs to --reports-dir; writes measured_values.tex there too.
 
 Usage:
-    # schematics only (no cluster data needed):
-    python make_report_figures.py
-
-    # everything — schematics + all data figures (typical cluster run):
-    python make_report_figures.py --data \
-        --reports-dir reports8 --build mm10 --genome-fa ~/te_analysis/mm10.fa \
-        --l1mdt-expr L1Md_T_ultracombo.csv --b1mus2-expr B1_Mus2_ultracombo.csv \
-        --iapltr1-expr IAPLTR1_Mm_ultracombo.csv
-
-    # plus a single-family worked example (Stage-11 on one loci CSV):
-    python make_report_figures.py --data --family MT2_Mm --assembly mm10 \
-        --input mt2_mm_ultracombo.csv
+    python make_report_figures.py \
+        --l1mdt-expr  /path/L1Md_T_ultracombo.csv \
+        --b1mus2-expr /path/B1_Mus2_ultracombo.csv \
+        --iapltr1-expr /path/IAPLTR1_Mm_ultracombo.csv \
+        --reports-dir ./reports_line_sine_ltr \
+        [--genome-fa /path/mm10.fa] \
+        [--rmsk-dir ~/te_analysis/rmsk] \
+        [--source rmsk|dfam] \
+        [--build mm10] \
+        [--max-loci 5000]
 """
+
 import argparse
+import datetime
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import time
+import warnings
+from itertools import combinations
 from pathlib import Path
+
+warnings.filterwarnings("ignore")
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
-from matplotlib.lines import Line2D
-
-HERE = Path(__file__).resolve().parent
-
-# --------------------------------------------------------------------------- #
-# Palette (shared with make_nextflow_dag_fig.py so the manuscript reads as one)
-# --------------------------------------------------------------------------- #
-INPUT = "#555555"
-CORE  = "#2f6f8f"   # core query.py stages
-STAND = "#3f8f5f"   # Stage-11 standout modules
-GATH  = "#8f6f2f"   # gather / report
-ACCENT = "#8f3f6f"  # execution environment
-DELIV = "#b0413e"   # deliverables (primers + CRISPR reagents) — the payoff colour
-
-# The single worked-example TE used as the prototype throughout the manuscript
-# (AJM comment C33/C158: one named TE from database to reagents; the three-family
-# LINE/SINE/LTR set becomes supplementary). L1Md_T is the prototype because it is
-# the family the copy-resolved modules were actually run on, so every panel cites a
-# real measured number rather than a regenerated one. This must stay in step with
-# terra_report.tex, which walks L1Md_T (a LINE) throughout.
-PROTOTYPE_FAMILY = "L1Md_T"
-PROTOTYPE_CLASS = "LINE"
-PROTOTYPE_ASSEMBLY = "mm10"
-PROTOTYPE_DIR = "reports8/stage11_l1mdt"
-
-
-def apply_house_style():
-    """One brand for every figure (AJM comment C144: consistent colour + font).
-
-    Sets matplotlib rcParams shared by all schematics drawn here; the palette
-    constants above remain the single source of brand colour, and README.md
-    publishes the same hexes so the data-figure generators can match them.
-    """
-    plt.rcParams.update({
-        "font.family": "DejaVu Sans",
-        "font.size": 10,
-        "axes.titlesize": 12,
-        "axes.titleweight": "bold",
-        "axes.edgecolor": "#333333",
-        "axes.labelcolor": "#222222",
-        "text.color": "#222222",
-        "figure.facecolor": "white",
-        "savefig.facecolor": "white",
-        "savefig.dpi": 150,
-    })
-
-
-def _round_box(ax, x, y, w, h, text, color, fs=10, sub=None, lw=1.4, alpha="22"):
-    ax.add_patch(FancyBboxPatch(
-        (x, y), w, h,
-        boxstyle="round,pad=0.02,rounding_size=0.08",
-        linewidth=lw, edgecolor=color, facecolor=color + alpha))
-    if sub:
-        ax.text(x + w / 2, y + h * 0.63, text, ha="center", va="center",
-                fontsize=fs, weight="bold", color="black")
-        ax.text(x + w / 2, y + h * 0.27, sub, ha="center", va="center",
-                fontsize=fs - 2.5, style="italic", color="#333333")
-    else:
-        ax.text(x + w / 2, y + h / 2, text, ha="center", va="center",
-                fontsize=fs, weight="bold", color="black")
-
-
-def _arrow(ax, x1, y1, x2, y2, color="#444444", style="-|>", lw=1.6, ls="-"):
-    ax.add_patch(FancyArrowPatch(
-        (x1, y1), (x2, y2), arrowstyle=style, mutation_scale=14,
-        linewidth=lw, color=color, linestyle=ls, shrinkA=2, shrinkB=2))
-
-
-def _save(fig, out_dir, name):
-    png = os.path.join(out_dir, name + ".png")
-    pdf = os.path.join(out_dir, name + ".pdf")
-    fig.savefig(pdf, bbox_inches="tight")
-    fig.savefig(png, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print("wrote", png, "and", pdf)
-
-
-# --------------------------------------------------------------------------- #
-# 1. Pipeline flowchart
-# --------------------------------------------------------------------------- #
-def make_pipeline_flowchart(out_dir):
-    """End-to-end flowchart: input -> core stages -> Stage 11 -> report,
-    wrapped by the Nextflow/Singularity execution environment."""
-    W, H = 12.5, 7.6
-    fig, ax = plt.subplots(figsize=(W, H))
-    ax.set_xlim(0, W); ax.set_ylim(0, H); ax.axis("off")
-
-    # Execution-environment band behind everything.
-    ax.add_patch(FancyBboxPatch(
-        (0.15, 0.65), W - 0.30, H - 1.4,
-        boxstyle="round,pad=0.02,rounding_size=0.12",
-        linewidth=1.3, edgecolor=ACCENT, facecolor=ACCENT + "0d",
-        linestyle=(0, (6, 4))))
-    ax.text(W / 2, 0.95,
-            "Execution environment  ·  Nextflow DSL2 orchestration  ·  "
-            "Singularity container image  ·  LSF / SLURM",
-            ha="center", va="center", fontsize=9.5, weight="bold", color=ACCENT)
-
-    # Core stages (query.py Stages 1-7): a vertical stack in the middle band.
-    stages = [
-        ("1  Prep",       "loci · sequences · Kimura div."),
-        ("2  Clustering", "k-mers -> SVD -> UMAP -> HDBSCAN"),
-        ("3  Alignment",  "MAFFT + CIAlign consensus"),
-        ("4  Motif",      "JASPAR enrichment + Fisher"),
-        ("5  GO",         "mygene.info gene context"),
-        ("6  Expression", "per-cluster counts + Wilcoxon DE"),
-        ("7  Primers",    "k-mer candidates + genome-wide spec."),
-    ]
-    bx, bw, bh = 3.55, 3.55, 0.60
-    top = 5.55
-    gap = 0.12
-    ys = []
-    for i, (title, sub) in enumerate(stages):
-        y = top - i * (bh + gap)
-        ys.append(y)
-        _round_box(ax, bx, y, bw, bh, title, CORE, fs=9.5, sub=sub)
-        if i > 0:
-            _arrow(ax, bx + bw / 2, ys[i - 1], bx + bw / 2, y + bh,
-                   color=CORE, lw=1.3)
-    ax.text(bx + bw / 2, top + bh + 0.30, "Core pipeline  (query.py, Stages 1-7)",
-            ha="center", va="center", fontsize=10.5, weight="bold", color=CORE)
-
-    # Input (left, aligned with the middle of the stack).
-    mid_y = (ys[0] + ys[-1] + bh) / 2
-    _round_box(ax, 0.55, mid_y - 0.5, 2.35, 1.0, "Input", INPUT, fs=11,
-               sub="family + assembly")
-    _arrow(ax, 2.90, mid_y, bx, top + bh / 2, color=INPUT, lw=1.6)
-
-    # Stage 11 block (expands into the standout-analyses figure).
-    s11x, s11w = 7.75, 3.15
-    s11y, s11h = 1.75, 3.4
-    _round_box(ax, s11x, s11y, s11w, s11h, "Stage 11", STAND, fs=13,
-               sub="16 standout\nanalysis modules")
-    ax.text(s11x + s11w / 2, s11y - 0.28, "run in parallel  (see Fig. 2)",
-            ha="center", va="center", fontsize=8.5, style="italic", color=STAND)
-    # core pipeline feeds Stage 11.
-    _arrow(ax, bx + bw, mid_y, s11x, s11y + s11h / 2, color=CORE, lw=1.8)
-
-    # Report / output (top-right, above Stage 11).
-    ry = top + bh - 0.72
-    _round_box(ax, s11x, ry, s11w, 0.9, "Report + family folder", GATH, fs=10,
-               sub="LaTeX PDF · figures · macros")
-    _arrow(ax, s11x + s11w / 2, s11y + s11h, s11x + s11w / 2, ry,
-           color=GATH, lw=1.7)
-
-    legend = [
-        Line2D([0], [0], marker="s", color="w", markerfacecolor=CORE + "55",
-               markeredgecolor=CORE, markersize=11, label="core stage (query.py)"),
-        Line2D([0], [0], marker="s", color="w", markerfacecolor=STAND + "55",
-               markeredgecolor=STAND, markersize=11, label="Stage-11 standout modules"),
-        Line2D([0], [0], marker="s", color="w", markerfacecolor=GATH + "55",
-               markeredgecolor=GATH, markersize=11, label="gather / report"),
-    ]
-    ax.legend(handles=legend, loc="lower center", ncol=3, fontsize=8.6,
-              frameon=False, bbox_to_anchor=(0.5, -0.01))
-
-    fig.tight_layout(pad=0.4)
-    _save(fig, out_dir, "fig_pipeline_flowchart")
-
-
-# --------------------------------------------------------------------------- #
-# 2. Stage-11 standout-analysis overview
-# --------------------------------------------------------------------------- #
-def make_stage11_overview(out_dir):
-    """Grid of all 16 Stage-11 modules grouped by biological theme."""
-    # (theme, color, [(title, script), ...])
-    groups = [
-        ("Evolution & age", "#2f6f8f", [
-            ("Subfamily phylogenetics", "run_phylo_analysis.py"),
-            ("Repeat landscape / divergence", "run_divergence.py"),
-            ("Automatic subfamily resolution", "run_subfamily.py"),
-            ("Consensus distance", "plot_consensus_distance.py"),
-        ]),
-        ("Regulation", "#3f8f5f", [
-            ("Motif gain / turnover", "run_motif_gain.py"),
-            ("Antisense / bidirectional promoter", "run_antisense_promoter.py"),
-            ("CTCF sites & TAD boundaries", "run_ctcf_tad.py"),
-            ("Epigenetic / regulatory overlay", "run_epigenetic_overlay.py"),
-        ]),
-        ("Structure & engineering", "#8f6f2f", [
-            ("LTR structural annotation", "run_ltr_struct.py"),
-            ("Protein structure (ColabFold)", "run_fold_prediction.py"),
-            ("Allele-aware gRNA off-target", "run_grna_offtarget.py"),
-        ]),
-        ("Comparative & mobilization", "#8f3f6f", [
-            ("Orthologous-insertion calling", "run_ortholog_insertion.py"),
-            ("Multi-assembly liftover", "run_multiassembly_liftover.py"),
-            ("3' transduction lineages", "run_transduction.py"),
-        ]),
-        ("Expression & benchmark", "#6f4f8f", [
-            ("Differential expression (clusters)", "te_expression.py"),
-            ("Benchmark vs manual workflow", "run_benchmark.py"),
-        ]),
-    ]
-
-    ncol = len(groups)
-    W, H = 15.5, 7.2
-    fig, ax = plt.subplots(figsize=(W, H))
-    ax.set_xlim(0, W); ax.set_ylim(0, H); ax.axis("off")
-
-    ax.text(W / 2, H - 0.28,
-            "Stage 11 — standout analysis modules  (each a standalone run_*.py, "
-            "run in parallel as an independent Nextflow task)",
-            ha="center", va="center", fontsize=11, weight="bold", color="#222222")
-
-    col_w = W / ncol
-    pad = 0.30
-    card_w = col_w - 2 * pad
-    card_h = 0.92
-    card_gap = 0.24
-    top = H - 1.35
-
-    for c, (theme, color, mods) in enumerate(groups):
-        cx = c * col_w + pad
-        # column header
-        ax.add_patch(FancyBboxPatch(
-            (cx, top + 0.15), card_w, 0.5,
-            boxstyle="round,pad=0.02,rounding_size=0.08",
-            linewidth=0, facecolor=color + "33"))
-        ax.text(cx + card_w / 2, top + 0.40, theme, ha="center", va="center",
-                fontsize=9.8, weight="bold", color=color)
-        for i, (title, script) in enumerate(mods):
-            y = top - (i + 1) * (card_h + card_gap) + 0.15
-            ax.add_patch(FancyBboxPatch(
-                (cx, y), card_w, card_h,
-                boxstyle="round,pad=0.02,rounding_size=0.06",
-                linewidth=1.3, edgecolor=color, facecolor=color + "14"))
-            ax.text(cx + card_w / 2, y + card_h * 0.62, title,
-                    ha="center", va="center", fontsize=8.6, weight="bold",
-                    color="black", wrap=True)
-            ax.text(cx + card_w / 2, y + card_h * 0.22, script,
-                    ha="center", va="center", fontsize=7.2, style="italic",
-                    color="#444444", family="monospace")
-
-    ax.text(W / 2, 0.22,
-            "All modules consume the clustered loci + consensus from the core "
-            "pipeline and write their own figures and measured-value macros.",
-            ha="center", va="center", fontsize=8.6, style="italic", color="#666666")
-
-    fig.tight_layout(pad=0.4)
-    _save(fig, out_dir, "fig_stage11_analyses")
-
-
-# --------------------------------------------------------------------------- #
-# 3. Software architecture diagram
-# --------------------------------------------------------------------------- #
-def make_architecture(out_dir):
-    """Layered architecture: desktop/CLI front-end -> HPC client -> cluster."""
-    W, H = 11.0, 6.0
-    fig, ax = plt.subplots(figsize=(W, H))
-    ax.set_xlim(0, W); ax.set_ylim(0, H); ax.axis("off")
-
-    # Client layer.
-    _round_box(ax, 0.5, 4.55, 4.4, 1.1, "Client layer", INPUT, fs=11,
-               sub="Tauri desktop app  ·  query.py CLI")
-    # Orchestration.
-    _round_box(ax, 0.5, 3.05, 4.4, 1.1, "Orchestration", CORE, fs=11,
-               sub="hpc_client.py  (SSH / bsub, channel-per-command)")
-    # Core engine.
-    _round_box(ax, 0.5, 1.55, 4.4, 1.1, "Core engine", STAND, fs=11,
-               sub="query.py Stages 1-7 + Stage 11 modules")
-    # Shared resource.
-    _round_box(ax, 0.5, 0.35, 4.4, 0.85, "Shared genome cache", GATH, fs=10,
-               sub="GenomeCache (hg38 in RAM, pickled)")
-
-    for y1, y2 in [(4.55, 4.15), (3.05, 2.65), (1.55, 1.20)]:
-        _arrow(ax, 2.7, y1, 2.7, y2, color="#555555", lw=1.6, style="<|-|>")
-
-    # HPC side.
-    ax.add_patch(FancyBboxPatch(
-        (5.7, 0.35, ), 4.8, 5.3,
-        boxstyle="round,pad=0.02,rounding_size=0.10",
-        linewidth=1.3, edgecolor=ACCENT, facecolor=ACCENT + "0d",
-        linestyle=(0, (6, 4))))
-    ax.text(8.1, 5.35, "LSF / SLURM HPC cluster", ha="center", va="center",
-            fontsize=10.5, weight="bold", color=ACCENT)
-    hpc = [
-        ("Login node", "job submission · Nextflow"),
-        ("Compute nodes", "singularity exec image.sif"),
-        ("Genome / RMSK / JASPAR", "shared filesystem"),
-        ("ColabFold node", "GPU folding (separate)"),
-    ]
-    for i, (t, s) in enumerate(hpc):
-        y = 4.35 - i * 1.02
-        _round_box(ax, 6.0, y, 4.2, 0.82, t, ACCENT, fs=10, sub=s)
-
-    _arrow(ax, 4.9, 3.6, 6.0, 4.35 + 0.4, color="#555555", lw=1.8, style="-|>")
-    ax.text(5.45, 4.35, "SSH", ha="center", va="bottom", fontsize=8.5,
-            style="italic", color="#555555")
-
-    fig.tight_layout(pad=0.4)
-    _save(fig, out_dir, "fig_architecture")
-
-
-# --------------------------------------------------------------------------- #
-# 4. Nextflow DSL2 DAG (schematic; mirrors make_nextflow_dag_fig.py)
-# --------------------------------------------------------------------------- #
-def make_nextflow_dag(out_dir):
-    W, H = 11.0, 5.4
-    fig, ax = plt.subplots(figsize=(W, H))
-    ax.set_xlim(0, W); ax.set_ylim(0, H); ax.axis("off")
-
-    _round_box(ax, 0.25, 2.35, 1.7, 0.9, "samplesheet", INPUT, fs=9.5,
-               sub="family, assembly")
-    _arrow(ax, 1.95, 2.8, 2.55, 2.8)
-    _round_box(ax, 2.55, 2.25, 2.0, 1.1, "TERRA_CORE", CORE, fs=10.5,
-               sub="query.py  Stages 1-10")
-
-    ax.text(5.55, 4.95, "STANDOUT subworkflow  —  scatter / gather",
-            ha="center", va="center", fontsize=9.5, style="italic", color=STAND)
-    ax.add_patch(FancyBboxPatch(
-        (4.75, 0.55), 3.7, 4.15,
-        boxstyle="round,pad=0.02,rounding_size=0.08",
-        linewidth=1.1, edgecolor=STAND, facecolor="none", linestyle=(0, (5, 4))))
-
-    task_y = [3.75, 3.05, 2.35, 1.65, 0.95]
-    task_labels = ["run_phylo_analysis.py", "run_grna_offtarget.py",
-                   "run_divergence.py", "run_ltr_struct.py", "...  (16 modules)"]
-    for ty, tl in zip(task_y, task_labels):
-        _round_box(ax, 5.05, ty, 3.05, 0.55, tl, STAND, fs=8.2)
-        _arrow(ax, 4.55, 2.8, 5.05, ty + 0.27, color=STAND, lw=1.1)
-
-    _round_box(ax, 8.75, 2.25, 1.95, 1.1, "gather", GATH, fs=10.5,
-               sub="merge -> family folder")
-    for ty in task_y:
-        _arrow(ax, 8.10, ty + 0.27, 8.75, 2.8, color=GATH, lw=1.0)
-
-    ax.annotate("", xy=(8.62, 0.30), xytext=(2.5, 0.30),
-                arrowprops=dict(arrowstyle="-", color="#999999", lw=1.0))
-    ax.text(5.6, 0.08, "TERRA subworkflow  (include { TERRA })",
-            ha="center", va="center", fontsize=8.6, color="#666666")
-    ax.text(W / 2, 5.28,
-            "Nextflow DSL2  ·  profiles: lsf / slurm · singularity / docker · test",
-            ha="center", va="center", fontsize=9, weight="bold", color="#222222")
-
-    legend = [
-        Line2D([0], [0], marker="s", color="w", markerfacecolor=CORE + "55",
-               markeredgecolor=CORE, markersize=11, label="core engine (process_high)"),
-        Line2D([0], [0], marker="s", color="w", markerfacecolor=STAND + "55",
-               markeredgecolor=STAND, markersize=11, label="parallel module (process_medium)"),
-        Line2D([0], [0], marker="s", color="w", markerfacecolor=GATH + "55",
-               markeredgecolor=GATH, markersize=11, label="gather / collect (process_low)"),
-    ]
-    ax.legend(handles=legend, loc="lower right", fontsize=7.6, frameon=False,
-              bbox_to_anchor=(1.0, 0.16))
-
-    fig.tight_layout(pad=0.4)
-    _save(fig, out_dir, "fig_nextflow_dag")
-
-
-# --------------------------------------------------------------------------- #
-# 5. Prototype-TE journey: database numbers -> reagents  (AJM C158/C159/C33)
-# --------------------------------------------------------------------------- #
-def make_prototype_journey(out_dir):
-    """The deliverable-forward storyline for the L1Md_T prototype: start from
-    RepeatMasker/Dfam locus numbers, resolve which insertions matter, and end on
-    the reagents users actually want, namely family/locus primers and allele-aware
-    CRISPRa/i guides. Schematic only (no measured values are drawn here); the
-    real per-step panels are produced by the copy-resolved generators and listed in
-    the manifest under reports8/stage11_l1mdt/."""
-    W, H = 15.6, 4.6
-    fig, ax = plt.subplots(figsize=(W, H))
-    ax.set_xlim(0, W); ax.set_ylim(0, H); ax.axis("off")
-
-    ax.text(W / 2, H - 0.3,
-            f"Prototype walk-through: {PROTOTYPE_FAMILY} "
-            f"({PROTOTYPE_CLASS}, {PROTOTYPE_ASSEMBLY}), from database annotation "
-            "to ready-to-order reagents",
-            ha="center", va="center", fontsize=12, weight="bold", color="#222222")
-
-    # Five narrative steps, then a highlighted deliverables end-cap.
-    steps = [
-        ("RMSK / Dfam", "named family ->\nlocus coordinates", INPUT),
-        ("Sub-group", "alignment-free\nk-mer clustering", CORE),
-        ("Which matter", "expression filter:\nmeaningful vs inert", STAND),
-        ("Characterise", "per-group consensus\n+ motif enrichment", CORE),
-    ]
-    bw, bh = 2.35, 1.5
-    gap = 0.5
-    x = 0.35
-    y = 1.9
-    centres = []
-    for title, sub, col in steps:
-        _round_box(ax, x, y, bw, bh, title, col, fs=11, sub=sub)
-        centres.append((x, x + bw))
-        x += bw + gap
-
-    # Deliverables end-cap — emphasised (thicker border, filled, DELIV colour).
-    dx = x
-    dw = 3.1
-    ax.add_patch(FancyBboxPatch(
-        (dx, y - 0.18), dw, bh + 0.36,
-        boxstyle="round,pad=0.02,rounding_size=0.10",
-        linewidth=2.6, edgecolor=DELIV, facecolor=DELIV + "1f"))
-    ax.text(dx + dw / 2, y + bh - 0.28, "DELIVERABLES",
-            ha="center", va="center", fontsize=11.5, weight="bold", color=DELIV)
-    ax.text(dx + dw / 2, y + bh * 0.42, "family / locus-specific primers",
-            ha="center", va="center", fontsize=9.6, color="#222222")
-    ax.text(dx + dw / 2, y + bh * 0.14, "allele-aware CRISPRa/i guides",
-            ha="center", va="center", fontsize=9.6, weight="bold", color=DELIV)
-
-    # Arrows between steps and into the deliverables.
-    for (l, r), (nl, nr) in zip(centres, centres[1:] + [(dx, dx + dw)]):
-        _arrow(ax, r, y + bh / 2, nl, y + bh / 2, color="#666666", lw=1.8)
-
-    ax.text(W / 2, 0.9,
-            "Steps 1-4 are the tested core workflow; the CRISPR/primer reagents are "
-            "the payoff that makes the family analysis actionable.",
-            ha="center", va="center", fontsize=9, style="italic", color="#666666")
-    ax.text(W / 2, 0.5,
-            f"Schematic: measured panels for each step are in {PROTOTYPE_DIR}/ "
-            "(see README.md).",
-            ha="center", va="center", fontsize=8, style="italic", color="#999999")
-
-    fig.tight_layout(pad=0.4)
-    _save(fig, out_dir, "fig_prototype_journey")
-
-
-# --------------------------------------------------------------------------- #
-# 6. Why resolve copies: meaningful vs inert loci  (AJM C149/C107)
-# --------------------------------------------------------------------------- #
-def make_locus_filtering(out_dir):
-    """Conceptual contrast (AJM C149): lumping every copy of a family averages
-    real signal across meaningful, low-function and inert loci; TERRA instead
-    resolves copies by cluster + expression and distinguishes the expressed
-    consensus from the common consensus (C107). Diagram only, no numbers."""
-    W, H = 12.5, 5.2
-    fig, ax = plt.subplots(figsize=(W, H))
-    ax.set_xlim(0, W); ax.set_ylim(0, H); ax.axis("off")
-
-    ax.text(W / 2, H - 0.3,
-            "Resolving copies, not lumping them  —  a core conceptual choice",
-            ha="center", va="center", fontsize=12, weight="bold", color="#222222")
-
-    # Left panel: naive lumping.
-    ax.add_patch(FancyBboxPatch(
-        (0.3, 0.5), 5.4, H - 1.4, boxstyle="round,pad=0.02,rounding_size=0.08",
-        linewidth=1.3, edgecolor="#999999", facecolor="#9999990d"))
-    ax.text(3.0, H - 1.15, "Lump the whole family",
-            ha="center", va="center", fontsize=10.5, weight="bold", color="#777777")
-    # a bag of mixed loci — mostly inert grey, a few meaningful/low-function
-    ys = [3.3, 2.85, 2.4, 1.95]
-    palette_cycle = [STAND, "#aaaaaa", GATH, "#aaaaaa", "#aaaaaa", STAND, "#aaaaaa",
-                     "#aaaaaa", GATH, "#aaaaaa", "#aaaaaa", "#aaaaaa",
-                     "#aaaaaa", STAND, "#aaaaaa", "#aaaaaa"]
-    pc = iter(palette_cycle)
-    for row in ys:
-        for cx in [1.1, 2.1, 3.1, 4.1]:
-            col = next(pc, "#aaaaaa")
-            ax.add_patch(FancyBboxPatch(
-                (cx, row), 0.7, 0.32, boxstyle="round,pad=0.01,rounding_size=0.05",
-                linewidth=0, facecolor=col + "cc"))
-    _arrow(ax, 3.0, 1.85, 3.0, 1.25, color="#777777", lw=1.6)
-    ax.text(3.0, 0.95, "averaged signal:\nmeaningful copies diluted by inert ones",
-            ha="center", va="center", fontsize=8.8, style="italic", color="#777777")
-
-    # Right panel: GAMECA resolution.
-    ax.add_patch(FancyBboxPatch(
-        (6.8, 0.5), 5.4, H - 1.4, boxstyle="round,pad=0.02,rounding_size=0.08",
-        linewidth=1.4, edgecolor=STAND, facecolor=STAND + "0f"))
-    ax.text(9.5, H - 1.15, "TERRA: cluster + expression resolve copies",
-            ha="center", va="center", fontsize=10.5, weight="bold", color=STAND)
-    lanes = [
-        ("meaningful (expressed)", STAND),
-        ("low-function", GATH),
-        ("inert / relic", "#aaaaaa"),
-    ]
-    for i, (lbl, col) in enumerate(lanes):
-        ly = 3.15 - i * 0.72
-        ax.add_patch(FancyBboxPatch(
-            (7.1, ly), 4.6, 0.5, boxstyle="round,pad=0.02,rounding_size=0.06",
-            linewidth=1.3, edgecolor=col, facecolor=col + "22"))
-        ax.text(9.4, ly + 0.25, lbl, ha="center", va="center",
-                fontsize=9, weight="bold", color="#333333")
-    ax.text(9.5, 0.95,
-            "expressed consensus  ≠  common consensus\n"
-            "downstream analysis targets the copies that matter",
-            ha="center", va="center", fontsize=8.8, style="italic", color=STAND)
-
-    fig.tight_layout(pad=0.4)
-    _save(fig, out_dir, "fig_locus_filtering")
-
-
-# --------------------------------------------------------------------------- #
-# 7. CRISPR reagent design deliverable  (AJM C131/C157/C159)
-# --------------------------------------------------------------------------- #
-def make_crispr_deliverable(out_dir):
-    """Concept diagram for the allele-aware CRISPRa/i guide-design module — the
-    deliverable AJM wants surfaced prominently. Repetitive targets make guide
-    design hard: a guide hits many copies, so TERRA scores candidates against
-    the full copy landscape with seed-anchored, mismatch-tolerant matching and
-    reports the coverage-vs-off-target trade-off. Drawn as a labelled concept
-    diagram, NOT a data scatter — the measured Pareto front is
-    fig_grna_offtarget_pareto from run_grna_offtarget.py."""
-    W, H = 12.5, 5.4
-    fig, ax = plt.subplots(figsize=(W, H))
-    ax.set_xlim(0, W); ax.set_ylim(0, H); ax.axis("off")
-
-    ax.text(W / 2, H - 0.3,
-            "Allele-aware CRISPRa/i guide design for a repetitive family",
-            ha="center", va="center", fontsize=12, weight="bold", color=DELIV)
-
-    # Left: the design logic as a small flow.
-    _round_box(ax, 0.35, 3.6, 3.4, 0.95, "Candidate guides", CORE, fs=10,
-               sub="PAM-aware, from consensus\n& per-copy sequence")
-    _round_box(ax, 0.35, 2.15, 3.4, 0.95, "Score vs copy landscape", STAND, fs=10,
-               sub="seed-anchored,\nmismatch-tolerant match")
-    _round_box(ax, 0.35, 0.7, 3.4, 0.95, "Coverage vs off-target", DELIV, fs=10,
-               sub="on-family hits vs\noff-family hits per guide")
-    _arrow(ax, 2.05, 3.6, 2.05, 3.1, color="#666666", lw=1.6)
-    _arrow(ax, 2.05, 2.15, 2.05, 1.65, color="#666666", lw=1.6)
-
-    # Right: a clearly-labelled *schematic* trade-off axis (illustrative curve).
-    ox, oy = 5.0, 1.0            # axis origin
-    aw, ah = 6.6, 3.4           # axis extent
-    ax.add_patch(FancyArrowPatch((ox, oy), (ox, oy + ah), arrowstyle="-|>",
-                                 mutation_scale=14, color="#444444", lw=1.6))
-    ax.add_patch(FancyArrowPatch((ox, oy), (ox + aw, oy), arrowstyle="-|>",
-                                 mutation_scale=14, color="#444444", lw=1.6))
-    ax.text(ox - 0.15, oy + ah / 2, "on-family coverage", rotation=90,
-            ha="center", va="center", fontsize=9.5, color="#333333")
-    ax.text(ox + aw / 2, oy - 0.35, "off-target hits", ha="center", va="center",
-            fontsize=9.5, color="#333333")
-    # illustrative concave frontier (schematic — not measured points)
-    import numpy as np
-    t = np.linspace(0.08, 0.95, 40)
-    fx = ox + 0.4 + t * (aw - 0.9)
-    fy = oy + 0.4 + (ah - 0.9) * (1 - np.exp(-3.2 * t))
-    ax.plot(fx, fy, color=DELIV, lw=2.2, ls=(0, (5, 3)))
-    ax.scatter(fx[6::9], fy[6::9], s=42, color=DELIV, zorder=5,
-               edgecolor="white", linewidth=0.8)
-    ax.annotate("non-dominated guides\n(favourable trade-off)",
-                xy=(fx[6], fy[6]), xytext=(fx[6] + 1.6, fy[6] - 0.9),
-                fontsize=8.6, color=DELIV,
-                arrowprops=dict(arrowstyle="->", color=DELIV, lw=1.2))
-    ax.text(ox + aw / 2, oy + ah + 0.15,
-            "Coverage / off-target Pareto frontier  (schematic; measured version "
-            "= fig_grna_offtarget_pareto)",
-            ha="center", va="center", fontsize=8.4, style="italic", color="#888888")
-
-    fig.tight_layout(pad=0.4)
-    _save(fig, out_dir, "fig_crispr_deliverable")
-
-
-# --------------------------------------------------------------------------- #
-# Data-figure orchestration (invokes the real analysis scripts; no fabrication)
-# --------------------------------------------------------------------------- #
-
-# Every figure the report references, with how it is produced. `source` is either
-# "schematic" (drawn here) or the script that emits it. `path` is relative to the
-# report .tex directory and matches the \figorbox argument in gameca_report.tex.
-REPORT_FIGURES = [
-    # schematics (this script) — written to --out-dir
-    ("report_figs/fig_pipeline_flowchart", "schematic"),
-    ("report_figs/fig_stage11_analyses",   "schematic"),
-    ("report_figs/fig_architecture",       "schematic"),
-    ("report_figs/fig_nextflow_dag",       "schematic"),
-    # deliverable-forward schematics added for the AJM revision
-    ("report_figs/fig_prototype_journey",  "schematic"),
-    ("report_figs/fig_locus_filtering",    "schematic"),
-    ("report_figs/fig_crispr_deliverable", "schematic"),
-    # ------------------------------------------------------------------ #
-    # IAPLTR1_Mm PROTOTYPE — the real collaborator-style procedural outputs
-    # AJM comment C33 asks for: clusters, expression, consensus, alignment,
-    # motif, primers, guide off-targets. Each maps to a genuine generator; see
-    # README.md for the C33 coverage checklist. Nothing here is fabricated.
-    # ------------------------------------------------------------------ #
-    # -- clusters: see fig_ltr_results + fig_line_sine_ltr_clustering above --
-    # -- expression (per-cluster DE + expression panels) --
-    ("reports8/fig_de_iapltr1mm",                       "run_line_sine_ltr_analysis.py"),
-    ("reports8/expression_plots/stage_profile",         "run_stage11_all.py (te_expression.py)"),
-    ("reports8/expression_plots/chromosomal_heatmap",   "run_stage11_all.py (te_expression.py)"),
-    ("reports8/expression_plots/primer_expression",     "run_stage11_all.py (te_expression.py)"),
-    # -- new consensus sequences (per-cluster + global consensus distance) --
-    ("reports8/stage11_iapltr1/fig_cluster_consensus_distance", "run_stage11_all.py (plot_consensus_distance.py)"),
-    ("reports8/stage11_iapltr1/fig_global_consensus_distance",  "run_stage11_all.py (plot_consensus_distance.py)"),
-    # -- alignment-derived phylogeny / molecular-clock age --
-    ("reports8/stage11_iapltr1/fig_phylo_tree",          "run_stage11_all.py"),
-    ("reports8/stage11_iapltr1/fig_phylo_divergence",    "run_stage11_all.py"),
-    ("reports8/stage11_iapltr1/fig_phylo_master",        "run_stage11_all.py"),
-    # -- motif analysis (evolutionary motif gain / turnover) --
-    ("reports8/stage11_iapltr1/fig_motif_gains_bar",     "run_stage11_all.py"),
-    ("reports8/stage11_iapltr1/fig_motif_gains_heatmap", "run_stage11_all.py"),
-    # -- LTR structure (IAPLTR is an LTR/ERV) + subfamily consensus tree --
-    ("reports8/stage11_iapltr1/fig_ltr_struct",          "run_stage11_all.py"),
-    ("reports8/stage11_iapltr1/fig_subfamily_tree",      "run_stage11_all.py"),
-    ("reports8/stage11_iapltr1/fig_subfamily_divergence","run_stage11_all.py"),
-    # -- repeat landscape / divergence for the prototype --
-    ("reports8/stage11_iapltr1/fig_repeat_landscape",    "run_stage11_all.py"),
-    # -- regulation (antisense promoter, CTCF) --
-    ("reports8/stage11_iapltr1/fig_antisense_motifs",    "run_stage11_all.py"),
-    ("reports8/stage11_iapltr1/fig_antisense_expr",      "run_stage11_all.py"),
-    ("reports8/stage11_iapltr1/fig_ctcf_overlap",        "run_stage11_all.py"),
-    # -- CRISPR guide off-target: the headline deliverable (C131/C158) --
-    ("reports8/stage11_iapltr1/fig_grna_offtarget_pareto","run_stage11_all.py"),
-    ("reports8/stage11_iapltr1/fig_grna_offtarget_top",  "run_stage11_all.py"),
-    # -- 3' transduction lineages --
-    ("reports8/stage11_iapltr1/fig_transduction_groups", "run_stage11_all.py"),
-    # cross-family LINE/SINE/LTR (run_line_sine_ltr_analysis.py -> --reports-dir)
-    ("reports8/fig_line_sine_ltr_clustering", "run_line_sine_ltr_analysis.py"),
-    ("reports8/fig_line_results",             "run_line_sine_ltr_analysis.py"),
-    ("reports8/fig_sine_results",             "run_line_sine_ltr_analysis.py"),
-    ("reports8/fig_ltr_results",              "run_line_sine_ltr_analysis.py"),
-    ("reports8/fig_kimura_divergence",        "run_line_sine_ltr_analysis.py"),
-    ("reports8/fig_de_l1mdt",                 "run_line_sine_ltr_analysis.py"),
-    ("reports8/fig_de_b1mus2",                "run_line_sine_ltr_analysis.py"),
-    # per-family Stage-11 (driven per family into stage11_<fam>/ subdirs)
-    ("reports8/stage11_l1mdt/fig_phylo_tree",            "run_line_sine_ltr_analysis.py"),
-    ("reports8/stage11_l1mdt/fig_phylo_divergence",      "run_line_sine_ltr_analysis.py"),
-    ("reports8/stage11_l1mdt/fig_phylo_master",          "run_line_sine_ltr_analysis.py"),
-    ("reports8/stage11_l1mdt/fig_grna_offtarget_pareto", "run_line_sine_ltr_analysis.py"),
-    ("reports8/stage11_l1mdt/fig_transduction_groups",   "run_line_sine_ltr_analysis.py"),
-    ("reports8/stage11_l1mdt/fig_antisense_motifs",      "run_line_sine_ltr_analysis.py"),
-    ("reports8/stage11_l1mdt/fig_benchmark_steps",       "run_line_sine_ltr_analysis.py"),
-    # single-family figures the report reads from the root (from a Stage-11 run)
-    ("fig_ctcf_overlap",     "run_stage11_all.py"),
-    ("fig_repeat_landscape", "run_stage11_all.py"),
-    ("fig_ltr_struct",       "run_stage11_all.py"),
-    ("fig_subfamily_tree",   "run_stage11_all.py"),
-    ("fig_benchmark",        "run_stage11_all.py"),
-    # no automated generator in the repo — manual/conceptual figures
-    ("fig_mt2_results",       "manual"),
-    ("fig_bench_genomecache", "manual"),
-    ("fig_bench_cython",      "manual"),
+import matplotlib.patches as mpatches
+import numpy as np
+import pandas as pd
+
+# ─── configuration ────────────────────────────────────────────────────────────
+
+FAMILIES = {
+    "L1Md_T":    {"type": "LINE", "color": "#E8604C"},
+    "B1_Mus2":   {"type": "SINE", "color": "#4C9BE8"},
+    "IAPLTR1_Mm":{"type": "LTR",  "color": "#2ECC71"},
+}
+
+_PALETTE = [
+    "#4C9BE8","#E8604C","#2ECC71","#9B59B6","#F39C12",
+    "#1ABC9C","#E74C3C","#3498DB","#E67E22","#8E44AD",
 ]
 
-# figures with source == "manual" that genuinely have no generator
-NO_GENERATOR = {"fig_mt2_results", "fig_bench_genomecache", "fig_bench_cython"}
+_NON_EXPR = {
+    "chr","chromosome","chrom","#chrom","genoname","genostart","genoend",
+    "start","chromstart","stop","end","chromend","strand","te_name",
+    "repname","seq","cluster","cluster_id","umap_x","umap_y",
+    "pca_x","pca_y","tsne_x","tsne_y","length","gc_content",
+    "te_id","repclass","repfamily","swscore","millidiv","ucsc_url",
+    "name","score","locus","te_chromosome","te_start","te_end",
+    "te_length","te_strand","unnamed: 0","_total_expr",
+    # _read_expression_file() renames the coordinate columns (tx_start/chromStart
+    # /... -> expr_start, tx_stop/... -> expr_stop) BEFORE _auto_expr_cols() runs,
+    # so the pre-rename names above do not catch them. Without these two entries
+    # the genomic coordinates are treated as expression values: they dominate the
+    # per-cluster heatmap (values ~1e8 vs ~1e2 for real counts) and are tested for
+    # differential expression, manufacturing significant "stages" that only say the
+    # clusters sit at different genomic positions.
+    "expr_start","expr_stop",
+}
+
+# ─── Stage 11 module registry ─────────────────────────────────────────────────
+# Each module's *_values.tex, written last (after its figures). Single source of
+# truth for both skip-if-exists and meta collection: a module that died partway
+# leaves no .tex and correctly re-runs.
+_MODULE_TEX = {
+    "phylo":          "phylo_measured_values.tex",
+    "grna_offtarget": "grna_offtarget_measured_values.tex",
+    "transduction":   "transduction_measured_values.tex",
+    "antisense":      "antisense_measured_values.tex",
+    "ctcf_tad":       "ctcf_tad_measured_values.tex",
+    "epigenetic":     "epigenetic_measured_values.tex",
+    "ortholog":       "ortholog_measured_values.tex",
+    "multiassembly":  "multiassembly_measured_values.tex",
+    "fold":           "fold_measured_values.tex",
+    "divergence":     "repeat_landscape_values.tex",
+    "ltr_struct":     "ltr_struct_values.tex",
+    "subfamily":      "subfamily_values.tex",
+    "benchmark":      "benchmark_values.tex",
+    "motif_gain":     "motif_gain_values.tex",
+}
+
+# Mirrors query.py's _MODULES list exactly so the two code paths stay in sync.
+# primary_output: completion sentinel, filled in from _MODULE_TEX below.
+# needs_consensus: pass --consensus-fasta if all_cluster_consensuses.fa exists.
+_STAGE11_MODULES = [
+    dict(key="phylo",          runner="run_phylo_analysis.py",
+         extra=["--subst-rate", "2.2e-9", "--clock-divisor", "2",
+                "--intact-orf-aa", "100"],
+         needs_consensus=True),
+    dict(key="grna_offtarget", runner="run_grna_offtarget.py",
+         extra=["--cas", "SpCas9", "--max-mm", "2"],
+         needs_consensus=False),
+    dict(key="transduction",   runner="run_transduction.py",
+         extra=["--tail-bp", "150", "--min-shared", "3"],
+         needs_consensus=False),
+    dict(key="antisense",      runner="run_antisense_promoter.py",
+         extra=["--promoter-bp", "200"],
+         needs_consensus=False),
+    dict(key="ctcf_tad",       runner="run_ctcf_tad.py",
+         extra=["--motif-mismatch", "3"],
+         needs_consensus=False),
+    dict(key="epigenetic",     runner="run_epigenetic_overlay.py",
+         extra=[],          # --preset injected at runtime from --epigenetic-preset
+         needs_consensus=False),
+    dict(key="ortholog",       runner="run_ortholog_insertion.py",
+         extra=[],          # --species injected at runtime from --ortholog-species
+         needs_consensus=False),
+    dict(key="multiassembly",  runner="run_multiassembly_liftover.py",
+         extra=[],          # --source-assembly + --target-assemblies injected at runtime
+         needs_consensus=False),
+    dict(key="fold",           runner="run_fold_prediction.py",
+         extra=["--per-cluster", "--min-aa", "100", "--top-n", "5"],
+         needs_consensus=True),
+    dict(key="divergence",     runner="run_divergence.py",
+         extra=[],          # --assembly injected at runtime
+         needs_consensus=True),
+    dict(key="ltr_struct",     runner="run_ltr_struct.py",
+         extra=[],
+         needs_consensus=False),
+    dict(key="subfamily",      runner="run_subfamily.py",
+         extra=[],          # --assembly injected at runtime
+         needs_consensus=True),
+    dict(key="benchmark",      runner="run_benchmark.py",
+         extra=[],          # --assembly injected at runtime
+         needs_consensus=False),
+    dict(key="motif_gain",     runner="run_motif_gain.py",
+         extra=[],          # --assembly injected at runtime
+         needs_consensus=True),
+]
+
+# primary_output is the module's *_values.tex -- see _MODULE_TEX above.
+for _m in _STAGE11_MODULES:
+    _m["primary_output"] = _MODULE_TEX[_m["key"]]
+
+# Macro names to extract from each module's *_values.tex for report_numbers.txt.
+# Only headline numbers; full detail stays in the raw tex files in stage11_dir.
+_STAGE11_HEADLINE_MACROS = {
+    "phylo":         ["phyloNCopies", "phyloNIntact", "phyloMedianDiv",
+                      "phyloMedianAgeMyr", "phyloMasterName", "phyloMasterDiv"],
+    "grna_offtarget":["grnaOTNGuides", "grnaOTNCopies", "grnaOTNFrontier",
+                      "grnaOTBestGuide", "grnaOTBestCov", "grnaOTBestOff"],
+    "transduction":  ["transNLineages", "transLargestLineage", "transNInLineage",
+                      "transNPolyaSignal"],
+    "antisense":     ["antiNCopies", "antiNBidir", "antiMedBidir", "antiHasStranded"],
+    "ctcf_tad":      ["ctcfNCopies", "ctcfNMotif", "ctcfNChip", "ctcfNBoundaryProx"],
+    "epigenetic":    ["epiNCopies", "epiNTracks", "epiTrackList"],
+    "ortholog":      ["orthoNCopies", "orthoNSpecies", "orthoNLineageSpecific",
+                      "orthoSpeciesList"],
+    "multiassembly": ["masmNCopies", "masmNAssemblies", "masmBestAsm", "masmBestRate"],
+    "fold":          ["foldNOrfs", "foldNFolded", "foldBestName", "foldBestMeanPlddt"],
+    "divergence":    ["divNloci", "divNClusters", "divMedianAll", "divMeanAll",
+                      "divCpgOmega"],
+    "ltr_struct":    ["ltrNloci", "ltrNfull", "ltrNsolo", "ltrNpbs", "ltrNppt",
+                      "ltrPctFull"],
+    "subfamily":     ["subfamNClusters", "subfamNSubfamilies", "subfamMinDiv",
+                      "subfamMaxDiv"],
+    "benchmark":     ["benchNStages", "benchTotalMin", "benchGAMECAsteps",
+                      "benchManualSteps"],
+    "motif_gain":    ["motifGainNLoci", "motifGainNGained", "motifGainTopMotif"],
+}
 
 
-def _python():
-    return shutil.which("python3") or shutil.which("python") or sys.executable
+# ─── helpers ──────────────────────────────────────────────────────────────────
+
+def _pp(msg: str):
+    ts = datetime.datetime.now().strftime("%H:%M:%S")
+    print(f"[{ts}] {msg}", flush=True)
 
 
-def _subenv():
-    """Environment for the spawned analysis generators.
+def _exists(path: Path, force: bool) -> bool:
+    """Return True if path exists and --force was not passed (skip this step)."""
+    if not force and path.exists():
+        _pp(f"  [skip] {path.name} already exists (use --force to overwrite)")
+        return True
+    return False
 
-    On FIPS-enforcing clusters (e.g. pennhpc) the real crash is `import pysam`:
-    the libcrypto bundled in the pysam/htslib wheel fails its FIPS self-test and
-    calls abort() *at import time* (`crypto/fips/fips.c: FATAL FIPS SELFTEST
-    FAILURE`), a SIGABRT that te_prep's `try/except ImportError` cannot catch, so
-    the whole generator dies before any fetch. `TE_NO_PYSAM=1` makes te_prep skip
-    the pysam import and use its pure-Python FASTA fallback. (`OPENSSL_CONF` is set
-    too as a belt-and-suspenders for stdlib TLS, though it does not affect pysam's
-    bundled crypto.) User-set values are respected.
+
+def _auto_expr_cols(df: pd.DataFrame) -> list:
+    out = []
+    for c in df.columns:
+        if c.lower().strip() in _NON_EXPR:
+            continue
+        if pd.api.types.is_numeric_dtype(df[c]):
+            out.append(c)
+    return out
+
+
+def _norm_chrom(s: str) -> str:
+    s = str(s).strip()
+    return s if s.startswith("chr") else f"chr{s}"
+
+
+# ─── expression file parsing ──────────────────────────────────────────────────
+
+def _read_expression_file(path: str) -> pd.DataFrame:
+    """Read SQuIRE ultracombo CSV. Normalises column names for coordinate matching."""
+    df = pd.read_csv(path, sep=None, engine="python", comment=None)
+    df.columns = [str(c).strip() for c in df.columns]
+
+    # Normalise chromosome / start / end column names
+    for variant, target in [
+        (["#chrom","chrom","chromosome","genoname","te_chromosome","tx_chr"], "expr_chr"),
+        (["chromstart","start","genostart","chromStart","te_start","TE_start","tx_start"], "expr_start"),
+        (["chromend","end","genoend","chromEnd","te_end","stop","TE_end","tx_stop"],       "expr_stop"),
+    ]:
+        for v in variant:
+            for col in df.columns:
+                if col.lower() == v.lower():
+                    df.rename(columns={col: target}, inplace=True)
+                    break
+
+    if "expr_chr" not in df.columns:
+        raise ValueError(f"Expression file {path}: cannot find chromosome column. "
+                         f"Columns: {list(df.columns)[:10]}")
+    df["expr_chr"]   = df["expr_chr"].apply(_norm_chrom)
+    df["expr_start"] = pd.to_numeric(df["expr_start"], errors="coerce")
+    df["expr_stop"]  = pd.to_numeric(df["expr_stop"],  errors="coerce")
+    return df
+
+
+def match_expression(loci_df: pd.DataFrame, expr_path: str) -> pd.DataFrame:
+    """Merge per-locus expression data into loci_df by coordinate overlap.
+
+    Tries exact (chr, start, stop) match first; falls back to 1-bp tolerance,
+    then any overlap.
     """
-    env = os.environ.copy()
-    env.setdefault("TE_NO_PYSAM", "1")
-    env.setdefault("OPENSSL_CONF", os.devnull)
-    return env
+    _pp(f"  Matching expression file: {expr_path}")
+    expr_df = _read_expression_file(expr_path)
+    expr_cols = _auto_expr_cols(expr_df)
+    _pp(f"    Expression columns detected ({len(expr_cols)}): {expr_cols[:6]}...")
+
+    loci_df = loci_df.copy()
+    loci_df["_chr_norm"] = loci_df["Chromosome"].apply(_norm_chrom)
+
+    # Build expression lookup: chr -> list of (start, stop, {col: val})
+    from collections import defaultdict
+    expr_idx: dict = defaultdict(list)
+    for _, row in expr_df.iterrows():
+        ch = str(row["expr_chr"])
+        es = int(row["expr_start"]) if pd.notna(row["expr_start"]) else -1
+        ee = int(row["expr_stop"])  if pd.notna(row["expr_stop"])  else -1
+        vals = {c: row[c] for c in expr_cols if c in row and pd.notna(row[c])}
+        expr_idx[ch].append((es, ee, vals))
+
+    matched = 0
+    expr_records = []
+
+    for _, lrow in loci_df.iterrows():
+        ch   = lrow["_chr_norm"]
+        ls   = int(lrow["Start"])
+        le   = int(lrow["Stop"])
+        cands = expr_idx.get(ch, [])
+
+        best_vals = None
+        # 1. exact match
+        for es, ee, vals in cands:
+            if es == ls and ee == le:
+                best_vals = vals
+                break
+        # 2. ±1 bp tolerance
+        if best_vals is None:
+            for es, ee, vals in cands:
+                if abs(es - ls) <= 1 and abs(ee - le) <= 1:
+                    best_vals = vals
+                    break
+        # 3. any overlap
+        if best_vals is None:
+            for es, ee, vals in cands:
+                if es < le and ee > ls:
+                    best_vals = vals
+                    break
+
+        if best_vals is not None:
+            matched += 1
+        expr_records.append(best_vals or {})
+
+    pct = 100 * matched / max(len(loci_df), 1)
+    _pp(f"    Matched {matched}/{len(loci_df)} loci ({pct:.1f}%) to expression data")
+
+    # Merge expression columns into loci_df
+    expr_df_merged = pd.DataFrame(expr_records, index=loci_df.index)
+    for col in expr_cols:
+        if col in expr_df_merged.columns:
+            loci_df[col] = pd.to_numeric(expr_df_merged[col], errors="coerce").fillna(0.0)
+
+    loci_df.drop(columns=["_chr_norm"], inplace=True)
+    return loci_df, expr_cols, matched
 
 
-def run_cross_family(args):
-    """Drive run_line_sine_ltr_analysis.py — the master data-figure generator.
+# ─── adaptive clustering ──────────────────────────────────────────────────────
 
-    It clusters each LINE/SINE/LTR family and runs every Stage-11 module per
-    family into <reports-dir>/stage11_<family>/, plus the cross-family plots.
-    Passes inputs straight through; the script itself skips any figure whose
-    data (expression, genome) is absent rather than inventing it.
+def adaptive_clustering(df: pd.DataFrame, family: str, out_dir: Path,
+                        kmer: int = 6, n_neighbors_list=(15, 30),
+                        pca_dims: int = 50, n_epochs: int = 200,
+                        random_state: int = 42) -> tuple:
+    """Try min_cluster_size = n//5, n//6, ..., n//15 × n_neighbors 15,30.
+
+    Returns (clustered_df, labels, divisor_used, n_neighbors_used, n_clusters).
+    Stops at the first (divisor, n_neighbors) that yields ≥2 real clusters.
     """
-    script = HERE / "run_line_sine_ltr_analysis.py"
-    if not script.exists():
-        print(f"  SKIP cross-family: {script} not found")
-        return False
-    cmd = [_python(), str(script), "--reports-dir", args.reports_dir,
-           "--build", args.build, "--source", args.source]
-    for flag, val in [("--genome-fa", args.genome_fa),
-                      ("--rmsk-dir", args.rmsk_dir),
-                      ("--l1mdt-expr", args.l1mdt_expr),
-                      ("--b1mus2-expr", args.b1mus2_expr),
-                      ("--iapltr1-expr", args.iapltr1_expr)]:
-        if val:
-            cmd += [flag, val]
-    if args.max_loci:
-        cmd += ["--max-loci", str(args.max_loci)]
-    print("  RUN:", " ".join(cmd))
-    return subprocess.run(cmd, env=_subenv()).returncode == 0
+    from te_clustering import clustering_analysis
+
+    n = len(df)
+    _pp(f"  Adaptive clustering: n={n}, trying divisors 5..15, n_neighbors {list(n_neighbors_list)}")
+
+    for divisor in range(5, 16):
+        mcs = max(5, n // divisor)
+        for nn in n_neighbors_list:
+            _pp(f"    divisor={divisor} (mcs={mcs}), n_neighbors={nn}")
+            df_c, labels = clustering_analysis(
+                df,
+                kmer=kmer,
+                min_cluster_size=mcs,
+                n_neighbors=nn,
+                pca_dims=pca_dims,
+                n_epochs=n_epochs,
+                random_state=random_state,
+                out_dir=None,
+                family_name=family,
+                compute_tsne=False,
+            )
+            real_clusters = sorted(set(labels[labels >= 0]))
+            n_real = len(real_clusters)
+            _pp(f"      → {n_real} cluster(s) found")
+            if n_real >= 2:
+                _pp(f"  ✓ Accepted: divisor={divisor}, n_neighbors={nn}, clusters={n_real}")
+                return df_c, labels, divisor, nn, n_real
+
+    # Fallback: use n//15
+    _pp(f"  ⚠ No config gave ≥2 clusters; using divisor=15, n_neighbors={n_neighbors_list[-1]}")
+    mcs = max(5, n // 15)
+    df_c, labels = clustering_analysis(
+        df,
+        kmer=kmer,
+        min_cluster_size=mcs,
+        n_neighbors=n_neighbors_list[-1],
+        pca_dims=pca_dims,
+        n_epochs=n_epochs,
+        random_state=random_state,
+        out_dir=None,
+        family_name=family,
+        compute_tsne=False,
+    )
+    n_real = len(set(labels[labels >= 0]))
+    return df_c, labels, 15, n_neighbors_list[-1], n_real
 
 
-def _csv_has_column(path, col):
-    """True if CSV at `path` has column `col`. Reads only the header line."""
+# ─── Kimura / repeat landscape ────────────────────────────────────────────────
+
+def plot_kimura_divergence(family_frames: dict, out_path: Path):
+    """Stacked repeat-landscape (Kimura divergence) histograms for three families.
+
+    milliDiv from RMSK = Kimura divergence × 1000 (per mil); convert to %.
+    """
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5), sharey=False)
+    fig.suptitle("Repeat Landscape --- Kimura Substitution Level", fontsize=14,
+                 fontweight="bold", y=1.02)
+
+    for ax, (family, df) in zip(axes, family_frames.items()):
+        meta = FAMILIES[family]
+        div_vals = df["milliDiv"].dropna().values / 10.0  # → % divergence
+        age_label = "Kimura substitution level (%)"
+        color = meta["color"]
+
+        ax.hist(div_vals, bins=50, color=color, edgecolor="white",
+                linewidth=0.4, alpha=0.85)
+        ax.axvline(np.median(div_vals), color="black", linestyle="--",
+                   linewidth=1.2, label=f"Median {np.median(div_vals):.1f}%")
+        ax.set_xlabel(age_label, fontsize=10)
+        ax.set_ylabel("Locus count", fontsize=10)
+        ax.set_title(f"{family}\n({meta['type']})", fontweight="bold")
+        ax.legend(fontsize=8)
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.yaxis.grid(True, linestyle="--", alpha=0.35)
+        ax.set_axisbelow(True)
+
+    plt.tight_layout()
+    plt.savefig(out_path, bbox_inches="tight")
+    plt.close()
+    _pp(f"  Saved {out_path}")
+
+
+# ─── differential expression ─────────────────────────────────────────────────
+
+def differential_expression(df: pd.DataFrame, expr_cols: list) -> pd.DataFrame:
+    """Pairwise Wilcoxon rank-sum tests between HDBSCAN clusters, BH-corrected."""
     try:
-        with open(path) as fh:
-            return col in fh.readline().rstrip("\n").split(",")
-    except OSError:
-        return False
+        from scipy.stats import mannwhitneyu
+        from statsmodels.stats.multitest import multipletests
+    except ImportError:
+        _pp("  [DE] scipy/statsmodels not available --- skipping DE analysis")
+        return pd.DataFrame()
+
+    cluster_col = "Cluster" if "Cluster" in df.columns else "cluster"
+    clusters = sorted(c for c in df[cluster_col].unique() if c >= 0)
+    if len(clusters) < 2:
+        _pp("  [DE] fewer than 2 clusters --- skipping DE")
+        return pd.DataFrame()
+
+    rows = []
+    for c1, c2 in combinations(clusters, 2):
+        g1 = df[df[cluster_col] == c1]
+        g2 = df[df[cluster_col] == c2]
+        for col in expr_cols:
+            v1 = g1[col].dropna().values
+            v2 = g2[col].dropna().values
+            if len(v1) < 3 or len(v2) < 3:
+                continue
+            try:
+                stat, p = mannwhitneyu(v1, v2, alternative="two-sided")
+                rows.append({
+                    "cluster1": c1, "cluster2": c2, "stage": col,
+                    "n1": len(v1), "n2": len(v2),
+                    "mean1": float(np.mean(v1)), "mean2": float(np.mean(v2)),
+                    "stat": stat, "pval": p,
+                })
+            except Exception:
+                pass
+
+    if not rows:
+        return pd.DataFrame()
+
+    de_df = pd.DataFrame(rows)
+    _, padj, _, _ = multipletests(de_df["pval"].values, method="fdr_bh")
+    de_df["padj"] = padj
+    de_df["sig"] = de_df["padj"] < 0.05
+    n_sig = int(de_df["sig"].sum())
+    _pp(f"  [DE] {n_sig}/{len(de_df)} comparisons significant (BH-FDR < 0.05)")
+    return de_df
 
 
-def _clustered_csv_for(args):
-    """The clustered, sequence-bearing CSV the cross-family generator writes for
-    the prototype family — e.g. reports8/stage11_iapltr1mm/iapltr1_mm_clustered.csv
-    (dir uses family.lower() without underscores; file keeps underscores)."""
-    fam = args.family
-    sub = f"stage11_{fam.lower().replace('_', '')}"
-    name = f"{fam.lower().replace('-', '_')}_clustered.csv"
-    return Path(args.reports_dir) / sub / name
+def plot_de_heatmap(de_df: pd.DataFrame, family: str, out_path: Path):
+    """Plot -log10(padj) heatmap of DE results between cluster pairs."""
+    if de_df.empty:
+        _pp(f"  [DE] no results to plot for {family}")
+        return
+
+    pairs = [(r["cluster1"], r["cluster2"]) for _, r in de_df.drop_duplicates(
+        subset=["cluster1","cluster2"]).iterrows()]
+    stages = de_df["stage"].unique().tolist()
+
+    mat = np.zeros((len(pairs), len(stages)))
+    for i, (c1, c2) in enumerate(pairs):
+        for j, st in enumerate(stages):
+            sub = de_df[(de_df["cluster1"]==c1) & (de_df["cluster2"]==c2) & (de_df["stage"]==st)]
+            if not sub.empty:
+                mat[i, j] = -np.log10(max(sub["padj"].values[0], 1e-300))
+
+    fig, ax = plt.subplots(figsize=(max(6, len(stages)*0.9), max(3, len(pairs)*0.7 + 1.5)))
+    im = ax.imshow(mat, aspect="auto", cmap="OrRd")
+    ax.set_xticks(range(len(stages)))
+    ax.set_xticklabels(stages, rotation=30, ha="right", fontsize=9)
+    ax.set_yticks(range(len(pairs)))
+    ax.set_yticklabels([f"C{c1} vs C{c2}" for c1, c2 in pairs], fontsize=9)
+    plt.colorbar(im, ax=ax, label="-log10(BH-adjusted p)", shrink=0.8)
+    ax.set_title(f"{family} --- Cluster DE (Wilcoxon, BH-corrected)", fontweight="bold")
+    ax.axhline(0.5, color="white", linewidth=0.5)
+
+    # Mark significant cells
+    for i in range(len(pairs)):
+        for j in range(len(stages)):
+            c1, c2 = pairs[i]
+            sub = de_df[(de_df["cluster1"]==c1) & (de_df["cluster2"]==c2) & (de_df["stage"]==stages[j])]
+            if not sub.empty and sub["sig"].values[0]:
+                ax.text(j, i, "*", ha="center", va="center", fontsize=11, color="black")
+
+    plt.tight_layout()
+    plt.savefig(out_path, bbox_inches="tight")
+    plt.close()
+    _pp(f"  Saved {out_path}")
 
 
-def run_single_family(args):
-    """Worked example: run the full Stage-11 module set on the prototype family.
+# ─── per-family 3-panel result figure ────────────────────────────────────────
 
-    IMPORTANT: run_stage11_all.py needs a CLUSTERED, sequence-bearing CSV (with a
-    'Seq' column, and 'Cluster' for the per-cluster modules) — NOT a raw
-    *_ultracombo.csv, which holds only loci coordinates + per-stage expression and
-    has neither column. The core clustering + sequence fetch is done by
-    run_cross_family() first; it writes <reports-dir>/stage11_<fam>/<fam>_clustered.csv.
-    Prefer that. If no sequence-bearing CSV is available, skip with a clear message
-    instead of letting every sequence/cluster module fail with 'no Seq column'."""
-    script = HERE / "run_stage11_all.py"
-    if not script.exists():
-        print(f"  SKIP single-family: {script} not found")
-        return False
+def plot_family_results(df: pd.DataFrame, family: str, expr_cols: list,
+                        out_path: Path):
+    """Three-panel figure: UMAP clusters | expression heatmap | Kimura divergence."""
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    meta = FAMILIES[family]
+    color = meta["color"]
 
-    clustered = _clustered_csv_for(args)
-    if _csv_has_column(clustered, "Seq"):
-        input_csv = str(clustered)
-        print(f"  single-family: using clustered CSV from the core run ({clustered})")
-    elif args.input and _csv_has_column(args.input, "Seq"):
-        input_csv = args.input
+    cluster_col = "Cluster" if "Cluster" in df.columns else "cluster"
+    clusters = sorted(c for c in df[cluster_col].unique() if c >= 0)
+    cmap_vals = {c: i for i, c in enumerate(clusters + [-1])}
+
+    # ── Panel a: UMAP ──────────────────────────────────────────────────────────
+    ax = axes[0]
+    for cid in sorted(set(df[cluster_col].unique())):
+        sub = df[df[cluster_col] == cid]
+        label = f"Cluster {cid}" if cid >= 0 else "Noise"
+        c = _PALETTE[cid % len(_PALETTE)] if cid >= 0 else "#cccccc"
+        ax.scatter(sub["umap_x"], sub["umap_y"], s=6, c=c, alpha=0.7, label=label)
+    ax.legend(fontsize=7, markerscale=2)
+    ax.set_xlabel("UMAP 1"); ax.set_ylabel("UMAP 2")
+    ax.set_title(f"(a) {family} UMAP clustering\n({len(clusters)} clusters)", fontweight="bold")
+    ax.spines[["top","right"]].set_visible(False)
+
+    # ── Panel b: per-cluster expression heatmap ────────────────────────────────
+    ax = axes[1]
+    if expr_cols:
+        heat = np.array([
+            [np.log1p(df[df[cluster_col]==c][col].dropna().mean())
+             for col in expr_cols]
+            for c in clusters
+        ])
+        if heat.size:
+            im = ax.imshow(heat, aspect="auto", cmap="YlOrRd")
+            ax.set_xticks(range(len(expr_cols)))
+            ax.set_xticklabels(expr_cols, rotation=35, ha="right", fontsize=8)
+            ax.set_yticks(range(len(clusters)))
+            ax.set_yticklabels([f"Cluster {c}" for c in clusters], fontsize=9)
+            plt.colorbar(im, ax=ax, label="log1p(mean counts)", shrink=0.8)
+            ax.set_title(f"(b) Expression per cluster\n(log1p mean)", fontweight="bold")
     else:
-        print("  SKIP single-family: no sequence-bearing CSV available. "
-              "run_stage11_all.py needs a clustered CSV with a 'Seq' column "
-              "(produced by the core/cross-family run); the raw *_ultracombo.csv "
-              "(loci + expression only) cannot drive the sequence modules.")
-        return False
+        ax.text(0.5, 0.5, "No expression data", ha="center", va="center",
+                transform=ax.transAxes)
+        ax.set_title("(b) Expression (no data)")
 
-    out = args.single_reports_dir or "."
-    cmd = [_python(), str(script), "--input", input_csv,
-           "--family", args.family, "--assembly", args.assembly,
-           "--reports-dir", out]
-    # reuse the consensus FASTA the cross-family run emitted, if present
-    cons = args.consensus_fasta or str(clustered.parent / "all_cluster_consensuses.fa")
-    if cons and Path(cons).exists():
-        cmd += ["--consensus-fasta", cons]
-    print("  RUN:", " ".join(cmd))
-    return subprocess.run(cmd, env=_subenv()).returncode == 0
+    # ── Panel c: Kimura divergence ─────────────────────────────────────────────
+    ax = axes[2]
+    if "milliDiv" in df.columns:
+        div_vals = df["milliDiv"].dropna().values / 10.0
+        ax.hist(div_vals, bins=40, color=color, edgecolor="white",
+                linewidth=0.4, alpha=0.85)
+        ax.axvline(np.median(div_vals), color="black", linestyle="--",
+                   linewidth=1.2, label=f"Median {np.median(div_vals):.1f}%")
+        ax.set_xlabel("Kimura divergence (%)"); ax.set_ylabel("Locus count")
+        ax.legend(fontsize=8)
+    else:
+        ax.text(0.5, 0.5, "milliDiv not available", ha="center", va="center",
+                transform=ax.transAxes)
+    ax.set_title(f"(c) Repeat landscape\n({meta['type']})", fontweight="bold")
+    ax.spines[["top","right"]].set_visible(False)
+    ax.yaxis.grid(True, linestyle="--", alpha=0.35)
+    ax.set_axisbelow(True)
+
+    plt.suptitle(f"{family} ({meta['type']}): TERRA analysis",
+                 fontsize=13, fontweight="bold", y=1.02)
+    plt.tight_layout()
+    plt.savefig(out_path, bbox_inches="tight")
+    plt.close()
+    _pp(f"  Saved {out_path}")
 
 
-def print_manifest():
-    """Report the status of every figure the manuscript references."""
-    print("\n" + "=" * 68)
-    print("FIGURE MANIFEST  (relative to the report .tex directory)")
-    print("=" * 68)
-    made = missing = skipped = 0
-    for rel, source in REPORT_FIGURES:
-        base = os.path.basename(rel)
-        if source == "manual" and base not in NO_GENERATOR:
-            continue  # internal bookkeeping entry
-        pdf = HERE / (rel + ".pdf")
-        png = HERE / (rel + ".png")
-        exists = pdf.exists() or png.exists()
-        if base in NO_GENERATOR:
-            status = "MANUAL   (no automated generator — provide the figure by hand)"
-            skipped += 1
-        elif exists:
-            status = "MADE     [%s]" % source
-            made += 1
+# ─── combined cross-family figure ─────────────────────────────────────────────
+
+def plot_combined_kimura(family_frames: dict, out_path: Path):
+    """Single combined figure: Kimura divergence for LINE, SINE, LTR side-by-side."""
+    plot_kimura_divergence(family_frames, out_path)
+
+
+def plot_combined_clustering(family_results: dict, out_path: Path):
+    """UMAP panels for all three families in one figure."""
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    fig.suptitle("UMAP Clustering --- LINE, SINE, LTR TE Families", fontsize=14,
+                 fontweight="bold")
+
+    for ax, (family, (df, _)) in zip(axes, family_results.items()):
+        meta = FAMILIES[family]
+        cluster_col = "Cluster" if "Cluster" in df.columns else "cluster"
+        for cid in sorted(set(df[cluster_col].unique())):
+            sub = df[df[cluster_col] == cid]
+            label = f"C{cid}" if cid >= 0 else "Noise"
+            c = _PALETTE[cid % len(_PALETTE)] if cid >= 0 else "#cccccc"
+            ax.scatter(sub["umap_x"], sub["umap_y"], s=5, c=c, alpha=0.7, label=label)
+        ax.legend(fontsize=7, markerscale=2)
+        ax.set_title(f"{family}\n({meta['type']})", fontweight="bold")
+        ax.set_xlabel("UMAP 1"); ax.set_ylabel("UMAP 2")
+        ax.spines[["top","right"]].set_visible(False)
+
+    plt.tight_layout()
+    plt.savefig(out_path, bbox_inches="tight")
+    plt.close()
+    _pp(f"  Saved {out_path}")
+
+
+# ─── Stage 11 helpers ────────────────────────────────────────────────────────
+
+def _parse_tex_macros(tex_path: Path) -> dict:
+    r"""Read \newcommand / \providecommand macros from a tex file → {name: value}."""
+    macros: dict = {}
+    try:
+        for line in tex_path.read_text(errors="replace").splitlines():
+            m = re.match(
+                r'\\(?:new|provide)command\{\\(\w+)\}\{([^}]*)\}', line.strip()
+            )
+            if m:
+                macros[m.group(1)] = m.group(2)
+    except Exception:
+        pass
+    return macros
+
+
+def collect_stage11_meta(family: str, stage11_dir: Path) -> dict:
+    """Read the *_values.tex files written by each Stage 11 module and
+    return a dict of {module_key: {macro_name: value}} for report generation."""
+    tex_file_map = {k: stage11_dir / v for k, v in _MODULE_TEX.items()}
+    result: dict = {}
+    for mod, path in tex_file_map.items():
+        if path.exists():
+            result[mod] = _parse_tex_macros(path)
+            _pp(f"  [stage11/meta] {mod}: {len(result[mod])} macros parsed from {path.name}")
         else:
-            status = "MISSING  [%s — needs real inputs; not fabricated]" % source
-            missing += 1
-        print(f"  {rel:<48} {status}")
-    print("-" * 68)
-    print(f"  made={made}  missing={missing}  manual={skipped}")
-    print("=" * 68)
+            result[mod] = {}
+    return result
 
 
-def write_readme(out_dir):
-    """Write out_dir/README.md documenting every manuscript figure, the shared
-    brand, and the IAPLTR1_Mm prototype convention. Static text — regenerated on
-    each run so it travels with the figures (AJM comments C33/C131/C144/C159)."""
-    readme = f"""# GAMECA report figures
+def run_stage11(
+    family: str,
+    df_c: pd.DataFrame,
+    stage11_dir: Path,
+    build: str,
+    script_dir: Path,
+    python: str,
+    force: bool,
+    # optional user-supplied knobs (None → omit the flag; module uses its own default)
+    ortholog_species=None,
+    target_assemblies=None,
+    epigenetic_preset=None,
+    ctcf_preset=None,
+    tads_preset=None,
+    liftover_cmd=None,
+    colabfold_cmd=None,
+    cpg_omega=None,
+) -> dict:
+    """Run all Stage 11 standout modules for one family.
 
-This folder holds the schematic figures for `gameca_report.tex` and is the
-documented home of the figure pipeline. Every figure the manuscript references is
-built by `make_report_figures.py` — schematics directly, data figures by invoking
-the real analysis scripts. **No figure is ever fabricated:** a data figure that
-lacks real inputs is reported `MISSING` in the manifest, never invented
-(see the no-fabrication policy below).
+    Saves the clustered DataFrame to <stage11_dir>/<family_lower>_clustered.csv
+    so the runners can read it, then invokes each run_*.py script with the same
+    --input / --reports-dir / --family CLI the full query.py pipeline uses.
 
-## Prototype TE: {PROTOTYPE_FAMILY} ({PROTOTYPE_ASSEMBLY})
+    Returns the stage11 meta dict (see collect_stage11_meta).
+    """
+    stage11_dir.mkdir(parents=True, exist_ok=True)
 
-Per the review, the paper follows **one named TE as a prototype throughout**:
-`{PROTOTYPE_FAMILY}`, an LTR/endogenous-retrovirus family. It is the LTR family
-already carried in the cross-family results, so its real data is reused rather than
-regenerated. The three-family LINE/SINE/LTR set (L1Md_T, B1_Mus2, {PROTOTYPE_FAMILY})
-is intended as **supplementary** breadth; the main text should walk the reader
-through the single prototype from database annotation to ordered reagents. The
-prototype's measured Stage-11 panels are written to `{PROTOTYPE_DIR}/` by
-`run_stage11_all.py`.
+    # ── Save clustered CSV for runner scripts ──────────────────────────────
+    csv_path = stage11_dir / f"{family.lower().replace('-','_')}_clustered.csv"
+    if force or not csv_path.exists():
+        df_c.to_csv(csv_path, index=False)
+        _pp(f"  [stage11] clustered CSV → {csv_path.name}")
 
-## Deliverables come first
+    # Consensus FASTA may appear after run_phylo_analysis writes it; check each time.
+    cons_fa = stage11_dir / "all_cluster_consensuses.fa"
 
-The reagents are the payoff and should appear early and prominently:
-**family/locus-specific primers** and **allele-aware CRISPRa/i guides**. The
-CRISPR module is what moves the tool from "useful" to "necessary" for the field —
-`fig_prototype_journey` and `fig_crispr_deliverable` exist to make that case.
+    # ── Build runtime-injected extra args ──────────────────────────────────
+    _opt      = lambda flag, val: [flag, str(val)] if val else []
+    _opt_list = lambda flag, vals: ([flag] + list(vals)) if vals else []
 
-## Brand / house style (keep every figure consistent)
+    runtime_extra: dict = {
+        "epigenetic":    _opt("--preset", epigenetic_preset),
+        "ortholog":      _opt_list("--species", ortholog_species or [])
+                         + _opt("--liftover-cmd", liftover_cmd),
+        "multiassembly": ["--source-assembly", build]
+                         + _opt_list("--target-assemblies", target_assemblies or [])
+                         + _opt("--liftover-cmd", liftover_cmd),
+        "fold":          _opt("--colabfold-cmd", colabfold_cmd),
+        "divergence":    ["--assembly", build] + _opt("--cpg-omega", cpg_omega),
+        "subfamily":     ["--assembly", build] + _opt("--cpg-omega", cpg_omega),
+        "benchmark":     ["--assembly", build],
+        "motif_gain":    ["--assembly", build],
+    }
 
-All figures share one look. Match these when producing data figures too:
+    _pp(f"\n{'─'*60}")
+    _pp(f"  Stage 11 modules for {family}  ({len(_STAGE11_MODULES)} modules)")
+    _pp(f"  Input CSV:   {csv_path}")
+    _pp(f"  Reports dir: {stage11_dir}")
+    _pp(f"{'─'*60}")
 
-| Role | Hex |
-|------|-----|
-| Input / neutral | `{INPUT}` |
-| Core stage (query.py) | `{CORE}` |
-| Stage-11 standout module | `{STAND}` |
-| Gather / report | `{GATH}` |
-| Execution environment | `{ACCENT}` |
-| **Deliverables (primers + CRISPR)** | `{DELIV}` |
+    ok_count = fail_count = skip_count = 0
 
-Font: DejaVu Sans. Rounded boxes, thin arrows, PNG at 150 dpi + vector PDF.
-`apply_house_style()` sets these as matplotlib rcParams for the schematics.
+    for mod in _STAGE11_MODULES:
+        key     = mod["key"]
+        runner  = script_dir / mod["runner"]
+        primary = stage11_dir / mod["primary_output"]
 
-## Figures in this folder (schematics — always generated)
+        if not runner.exists():
+            _pp(f"  [{key}] SKIP — {mod['runner']} not found in {script_dir}")
+            skip_count += 1
+            continue
 
-- **fig_pipeline_flowchart** — end-to-end flow: input to core Stages 1-7 to
-  Stage 11 to report, inside the Nextflow/Singularity execution band.
-  *Section: Design/architecture.*
-- **fig_architecture** — three-layer software architecture (desktop/CLI to HPC
-  client to cluster). *Section: Design and architecture (Figure 1).*
-- **fig_stage11_analyses** — grid of the 16 Stage-11 copy-resolved modules by
-  theme. *Section: Copy-resolved analysis modules.*
-- **fig_nextflow_dag** — the Nextflow DSL2 scatter/gather DAG. *Section: HPC.*
-- **fig_prototype_journey** — NEW. The {PROTOTYPE_FAMILY} storyline: RMSK/Dfam
-  loci to clustering to expression filter (meaningful vs inert) to consensus+motif
-  to the highlighted **primers + CRISPRa/i deliverables**. Schematic spine of the
-  results narrative. *Should open the demonstration/results section.*
-- **fig_locus_filtering** — NEW. Why GAMECA resolves copies instead of lumping
-  them: lumping averages signal across meaningful, low-function and inert loci,
-  whereas cluster+expression resolution separates them; also expressed-consensus
-  vs common-consensus. Concept diagram (no numbers). *Frame this as a conceptual
-  contribution.*
-- **fig_crispr_deliverable** — NEW. Concept diagram of allele-aware CRISPRa/i
-  guide design for repetitive targets (seed-anchored, mismatch-tolerant coverage
-  vs off-target; Pareto trade-off). The measured version is
-  `fig_grna_offtarget_pareto`. *Section: deliverables / CRISPR.*
+        if _exists(primary, force):
+            skip_count += 1
+            continue
 
-## Prototype data panels (generated on the cluster into `{PROTOTYPE_DIR}/`)
+        extra = list(mod["extra"]) + runtime_extra.get(key, [])
 
-Produced by `python make_report_figures.py --data --input <{PROTOTYPE_FAMILY} loci
-csv> --iapltr1-expr <expr csv> ...`, which drives `run_stage11_all.py`. These are
-the *real* per-family outputs (the kind sent to collaborators):
+        # Add --consensus-fasta when the file is present
+        if mod["needs_consensus"] and cons_fa.exists():
+            extra += ["--consensus-fasta", str(cons_fa)]
 
-- **fig_phylo_tree / fig_phylo_divergence / fig_phylo_master** — subfamily
-  phylogeny, per-copy molecular-clock age, and the combined age/intactness master
-  panel.
-- **fig_grna_offtarget_pareto / fig_grna_offtarget_top** — measured guide
-  coverage-vs-off-target frontier and the top guides.
-- **fig_transduction_groups** — 3' transduction lineage groups.
-- **fig_antisense_motifs / fig_antisense_expr** — bidirectional-promoter core
-  motifs and antisense expression.
+        cmd = [python, str(runner),
+               "--input",       str(csv_path),
+               "--reports-dir", str(stage11_dir),
+               "--family",      family] + extra
 
-## C33 coverage checklist — the collaborator-style outputs
+        _pp(f"  [{key}] running {mod['runner']} ...")
+        t0 = time.time()
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        elapsed = time.time() - t0
 
-AJM (comment C33) asked for the real procedural graphs sent to Katie/Claire/Diego —
-clusters, expression, consensus, alignment, motif, primers, guide off-targets — for
-the prototype. Every one is produced by a genuine generator and registered in the
-manifest (`MADE` once real inputs run; `MISSING` otherwise — never fabricated):
+        # Always write per-module log regardless of outcome
+        log_path = stage11_dir / f"stage11_{key}.log"
+        log_path.write_text(
+            f"CMD: {' '.join(cmd)}\n"
+            f"EXIT: {proc.returncode}  ({elapsed:.0f}s)\n"
+            f"STDOUT:\n{proc.stdout}\n"
+            f"STDERR:\n{proc.stderr}\n"
+        )
 
-| C33 item | Figure(s) | Generator |
-|----------|-----------|-----------|
-| Clusters (UMAP/HDBSCAN) | `reports8/fig_ltr_results`, `reports8/fig_line_sine_ltr_clustering` | `run_line_sine_ltr_analysis.py` |
-| Expression (per-cluster DE) | `reports8/fig_de_iapltr1mm`, `reports8/expression_plots/stage_profile`, `.../chromosomal_heatmap` | cross-family + `te_expression.py` |
-| New consensus sequences | `.../fig_cluster_consensus_distance`, `.../fig_global_consensus_distance`, `.../fig_phylo_tree` | `plot_consensus_distance.py`, `run_phylo_analysis.py` |
-| Motif analysis (turnover) | `.../fig_motif_gains_bar`, `.../fig_motif_gains_heatmap` | `run_motif_gain.py` |
-| Guide off-targets (CRISPR) | `.../fig_grna_offtarget_pareto`, `.../fig_grna_offtarget_top` | `run_grna_offtarget.py` |
-| LTR structure (prototype is an LTR) | `.../fig_ltr_struct`, `.../fig_subfamily_tree` | `run_ltr_struct.py`, `run_subfamily.py` |
-| Regulation (antisense, CTCF) | `.../fig_antisense_motifs`, `.../fig_antisense_expr`, `.../fig_ctcf_overlap` | `run_antisense_promoter.py`, `run_ctcf_tad.py` |
-| 3' transduction | `.../fig_transduction_groups` | `run_transduction.py` |
+        if proc.returncode == 0:
+            _pp(f"  [{key}] OK ({elapsed:.0f}s)")
+            ok_count += 1
+        else:
+            _pp(f"  [{key}] FAILED rc={proc.returncode} ({elapsed:.0f}s) — see {log_path.name}")
+            fail_count += 1
 
-Three C33 items are deliberately **not** matplotlib figures — flagged here so they are
-not silently assumed:
+    _pp(f"  Stage 11 {family}: {ok_count} ok / {fail_count} failed / {skip_count} skipped")
+    return collect_stage11_meta(family, stage11_dir)
 
-- **Alignments** — the multiple alignment is cleaned/visualised by **CIAlign** (its own
-  PNG in the alignment output dir); the alignment-derived *figure* in the report is the
-  phylogeny/consensus panel (`fig_phylo_tree`).
-- **JASPAR motif *enrichment*** (`overall_top_motifs.png`, `enrichment_heatmap.png`) is a
-  **core `query.py` Stage-4** output, not produced by the two generators driven here; the
-  registered motif figure is the evolutionary motif-**turnover** (`fig_motif_gains_*`).
-  Include the enrichment panel from a core run or the collaborator report if the paper
-  needs it.
-- **Primers** are a CSV table (`06_primers/selected_primers_summary.csv`); the primer
-  *figure* is `expression_plots/primer_expression` (primers × expression).
 
-## Inputs: which CSV goes where (important)
+# ─── prep: RMSK / Dfam ───────────────────────────────────────────────────────
 
-The raw `*_ultracombo.csv` is loci coordinates + per-stage expression only — it has
-**no `Seq` and no `Cluster` column**. Two different consumers:
+def prep_family(family: str, build: str, source: str, rmsk_dir: str,
+                genome_fa: str, max_loci: int) -> pd.DataFrame:
+    """Fetch loci and sequences for a TE family. Wraps te_prep functions."""
+    import te_prep as _prep
 
-- `--iapltr1-expr {PROTOTYPE_FAMILY}_ultracombo.csv` — correct: the cross-family
-  generator fetches loci (RMSK) and sequences (genome/UCSC), clusters them, and
-  merges this expression. It writes a clustered CSV
-  `reports8/stage11_iapltr1mm/iapltr1_mm_clustered.csv`.
-- The Stage-11 worked example (`run_stage11_all.py`) then consumes **that clustered
-  CSV** (it needs `Seq`/`Cluster`). Passing the raw ultracombo straight to Stage 11
-  makes every sequence module fail with *"no Seq column"* — this script now detects
-  that and uses the clustered CSV instead (or skips cleanly).
+    std_chroms = _prep.STD_CHROMS_MOUSE if build.startswith("mm") else _prep.STD_CHROMS_HUMAN
 
-So a genome FASTA (or working UCSC access) is required to produce sequences; the raw
-expression CSV alone cannot drive the sequence/cluster modules.
+    _pp(f"  [{family}] fetching loci from {source.upper()}...")
+    if source == "dfam":
+        hits = _prep.parse_dfam_family(None, family, build=build, std_chroms=std_chroms)
+    else:
+        rmsk_path = _prep.get_rmsk_path(build, rmsk_dir)
+        hits = _prep.parse_rmsk_family(rmsk_path, family, std_chroms=std_chroms)
 
-## Regenerate (cluster)
+    if not hits:
+        _pp(f"  [{family}] FATAL: no loci found")
+        sys.exit(1)
 
-Run inside the container with `--cleanenv` so the host conda/OpenSSL environment does
-not leak in (a host-env leak triggers `FATAL FIPS SELFTEST FAILURE` on the first
-HTTPS call and kills the cross-family run):
+    df = pd.DataFrame(hits).sort_values(["Chromosome","Start"]).reset_index(drop=True)
+    if max_loci and len(df) > max_loci:
+        _pp(f"  [{family}] capping to {max_loci} loci (--max-loci)")
+        df = df.head(max_loci).reset_index(drop=True)
 
-```bash
-bsub -J gameca_figs -M 12000 -n 4 -o gameca_figs.%J.log \\
-  "cd ~/anmol/te-scraper-and-analysis && singularity exec --cleanenv \\
-   -B /home/amodz/anmol:/home/amodz/anmol gameca.sif \\
-   python make_report_figures.py --data \\
-     --iapltr1-expr /home/amodz/anmol/IAPLTR1_Mm_ultracombo.csv \\
-     --l1mdt-expr /home/amodz/anmol/L1Md_T_ultracombo.csv \\
-     --b1mus2-expr /home/amodz/anmol/B1_Mus2_ultracombo.csv \\
-     --genome-fa /home/amodz/anmol/mm10_genome/mm10.fa \\
-     --rmsk-dir /home/amodz/te_analysis/rmsk --build {PROTOTYPE_ASSEMBLY}"
-```
+    _pp(f"  [{family}] {len(df):,} loci across {df['Chromosome'].nunique()} chromosomes")
 
-`--genome-fa` + a populated `--rmsk-dir` keep the whole run offline (no UCSC/RMSK
-HTTPS), which also sidesteps the FIPS issue entirely. Drop `--genome-fa` only if
-UCSC access works from the node.
+    # Extract sequences
+    _pp(f"  [{family}] extracting sequences...")
+    if genome_fa and os.path.exists(genome_fa):
+        seqs = _prep.extract_sequences(genome_fa, df)
+    else:
+        _pp(f"  [{family}] no genome FASTA --- using UCSC API (build={build})")
+        seqs, _ = _prep.fetch_sequences_ucsc(df, assembly=build, n_workers=3)
 
-The run prints a **manifest** marking each figure `MADE`, `MISSING` (needs real
-inputs — not fabricated), or `MANUAL` (no automated generator).
+    df["Seq"] = seqs
+    df["chr"]   = df["Chromosome"]
+    df["start"] = df["Start"]
+    df["stop"]  = df["Stop"]
 
-## Troubleshooting
+    before = len(df)
+    df = df[df["Seq"].str.len() > 0].reset_index(drop=True)
+    if len(df) < before:
+        _pp(f"  [{family}] dropped {before - len(df)} empty sequences")
 
-- `ERROR: CSV must have a 'Seq' column` / `No Cluster column` — Stage 11 was handed
-  the raw ultracombo. Ensure the cross-family run produced
-  `reports8/stage11_iapltr1mm/iapltr1_mm_clustered.csv` first (needs genome/UCSC).
-- `FATAL FIPS SELFTEST FAILURE` (exit 134 / SIGABRT) — the root cause is
-  **`import pysam`**: on FIPS-enforcing hosts (pennhpc) the libcrypto bundled in the
-  pysam/htslib wheel fails its FIPS self-test and calls `abort()` at import, which
-  `try/except ImportError` cannot catch, so the generator dies before it fetches
-  anything. It is NOT a TLS/env-leak issue — `curl` and Python `ssl` work fine in the
-  container; `--cleanenv` and `OPENSSL_CONF` do not help because pysam's crypto
-  ignores them. **Fix:** `TE_NO_PYSAM=1`, which `_subenv()` sets for the spawned
-  generators — te_prep then skips pysam and uses its pure-Python FASTA extraction
-  (`extract_sequences_fasta`). Loci/sequence fetches still use `curl`, which works.
-  The `conda-libmamba-solver (libicui18n.so.75)` line is harmless container noise.
+    df["Length"] = df["Seq"].str.len()
+    df["GC_Content"] = df["Seq"].apply(
+        lambda s: (s.upper().count("G") + s.upper().count("C")) / len(s) if len(s) > 0 else 0
+    )
+    return df
 
-## No-fabrication policy
 
-Data figures require genuine loci/expression/genome inputs. When an input or a
-real generator is missing, the figure is reported `MISSING` with the reason and
-left unbuilt. Numbers, plots and measured panels are never invented.
-"""
-    path = os.path.join(out_dir, "README.md")
-    with open(path, "w") as fh:
-        fh.write(readme)
-    print("wrote", path)
+# ─── measured values / text report ───────────────────────────────────────────
 
+def write_measured_values(results: dict, reports_dir: Path,
+                          stage11_meta: dict | None = None):
+    """Write measured_values.tex (LaTeX macros) and report_numbers.txt (human-readable).
+
+    stage11_meta: optional {family: {module_key: {macro_name: value}}} from
+                  collect_stage11_meta().  When present, prefixed Stage 11 macros
+                  are added to the tex file and full Stage 11 detail is appended
+                  to report_numbers.txt.
+    """
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    lines_tex = [
+        "% Auto-generated by run_line_sine_ltr_analysis.py",
+        f"% {ts}",
+        "",
+        "% ─── existing MT2_Mm macros (placeholders --- run full pipeline to fill) ───",
+        r"\providecommand{\mtTwoLoci}{(pending run)}",
+        r"\providecommand{\mtTwoClusters}{(pending run)}",
+        r"\providecommand{\mtTwoExprLoci}{(pending run)}",
+        r"\providecommand{\genomecacheSpeedup}{(pending run)}",
+        r"\providecommand{\genomecacheReads}{(pending run)}",
+        r"\providecommand{\cythonSpeedupGC}{(pending run)}",
+        r"\providecommand{\cythonSpeedupKmer}{(pending run)}",
+        "",
+        "% ─── LINE / SINE / LTR core analysis macros ─────────────────────────────",
+    ]
+    lines_txt = [
+        "=" * 60,
+        "GAMECA LINE / SINE / LTR Cross-Family Analysis --- Measured Values",
+        f"Generated: {ts}",
+        "=" * 60,
+    ]
+
+    macro_prefix = {
+        "L1Md_T":     "lOneT",
+        "B1_Mus2":    "bOneMT",
+        "IAPLTR1_Mm": "iapltrOne",
+    }
+
+    for family, res in results.items():
+        pfx = macro_prefix[family]
+        n_loci   = res.get("n_loci",    0)
+        n_clust  = res.get("n_clusters", 0)
+        n_expr   = res.get("n_expr",     0)
+        divisor  = res.get("divisor",    "---")
+        n_neigh  = res.get("n_neighbors","---")
+        n_de_sig = res.get("n_de_sig",   0)
+        med_div  = res.get("median_div", 0.0)
+        mcs      = res.get("min_cluster_size", "---")
+
+        lines_tex += [
+            f"% {family} ({FAMILIES[family]['type']}) — core",
+            rf"\providecommand{{\{pfx}Loci}}{{{n_loci:,}}}",
+            rf"\providecommand{{\{pfx}Clusters}}{{{n_clust}}}",
+            rf"\providecommand{{\{pfx}ExprLoci}}{{{n_expr:,}}}",
+            rf"\providecommand{{\{pfx}Divisor}}{{{divisor}}}",
+            rf"\providecommand{{\{pfx}Neighbors}}{{{n_neigh}}}",
+            rf"\providecommand{{\{pfx}MinClusterSize}}{{{mcs}}}",
+            rf"\providecommand{{\{pfx}DeSig}}{{{n_de_sig}}}",
+            rf"\providecommand{{\{pfx}MedianDiv}}{{{med_div:.1f}}}",
+        ]
+
+        # ── Stage 11 prefixed macros ───────────────────────────────────────
+        if stage11_meta and family in stage11_meta:
+            fam_s11 = stage11_meta[family]
+            lines_tex.append(f"% {family} — Stage 11")
+            for mod_key, headline_names in _STAGE11_HEADLINE_MACROS.items():
+                mod_macros = fam_s11.get(mod_key, {})
+                for macro_name in headline_names:
+                    val = mod_macros.get(macro_name, "(pending run)")
+                    # Capitalise first letter of macro_name for the prefixed version
+                    cap = macro_name[0].upper() + macro_name[1:]
+                    lines_tex.append(
+                        rf"\providecommand{{\{pfx}{cap}}}{{{val}}}"
+                    )
+
+        lines_tex.append("")
+
+        lines_txt += [
+            "",
+            f"{'─'*60}",
+            f"{family}  ({FAMILIES[family]['type']})",
+            f"{'─'*60}",
+            f"  Loci:               {n_loci:,}",
+            f"  Clusters:           {n_clust}",
+            f"  Expression loci:    {n_expr:,}",
+            f"  Clustering divisor: n/{divisor}  (min_cluster_size={mcs})",
+            f"  UMAP n_neighbors:   {n_neigh}",
+            f"  Median Kimura div.: {med_div:.1f}%",
+            f"  DE sig comparisons: {n_de_sig} (BH-FDR < 0.05)",
+        ]
+
+        if stage11_meta and family in stage11_meta:
+            fam_s11 = stage11_meta[family]
+            lines_txt.append("  ── Stage 11 ──")
+            for mod_key in _STAGE11_HEADLINE_MACROS:
+                mod_macros = fam_s11.get(mod_key, {})
+                if not mod_macros:
+                    lines_txt.append(f"    {mod_key:<18} (not run / no output)")
+                    continue
+                headline_names = _STAGE11_HEADLINE_MACROS[mod_key]
+                vals = "  ".join(
+                    f"{n}={mod_macros[n]}" for n in headline_names if n in mod_macros
+                )
+                lines_txt.append(f"    {mod_key:<18} {vals}")
+
+    # Write
+    tex_path = reports_dir / "measured_values.tex"
+    tex_path.write_text("\n".join(lines_tex) + "\n")
+    _pp(f"  Written: {tex_path}")
+
+    txt_path = reports_dir / "report_numbers.txt"
+    txt_path.write_text("\n".join(lines_txt) + "\n")
+    _pp(f"  Written: {txt_path}")
+
+    return tex_path, txt_path
+
+
+# ─── argument parsing ─────────────────────────────────────────────────────────
+
+def parse_args():
+    p = argparse.ArgumentParser(
+        description="LINE/SINE/LTR TE family analysis --- batch mode",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    p.add_argument("--l1mdt-expr",  default="",
+                   help="Path to L1Md_T_ultracombo.csv on cluster (optional --- skips DE/expression plots if absent)")
+    p.add_argument("--b1mus2-expr", default="",
+                   help="Path to B1_Mus2_ultracombo.csv on cluster (optional --- skips DE/expression plots if absent)")
+    p.add_argument("--iapltr1-expr",default="",
+                   help="Path to IAPLTR1_Mm_ultracombo.csv on cluster (optional --- skips DE/expression plots if absent)")
+    p.add_argument("--reports-dir", default="reports_line_sine_ltr",
+                   help="Directory to save figures and measured_values.tex "
+                        "(default: ./reports_line_sine_ltr)")
+    p.add_argument("--genome-fa",   default="",
+                   help="Path to mm10.fa on cluster (optional; UCSC API fallback)")
+    p.add_argument("--rmsk-dir",    default=os.path.expanduser("~/te_analysis/rmsk"),
+                   help="Directory for cached RMSK gz files")
+    p.add_argument("--source",      choices=["rmsk","dfam"], default="rmsk",
+                   help="Annotation source (default: rmsk)")
+    p.add_argument("--build",       default="mm10",
+                   help="Genome build (default: mm10)")
+    p.add_argument("--max-loci",    type=int, default=None,
+                   help="Cap number of loci per family (for testing)")
+    p.add_argument("--kmer",        type=int, default=6)
+    p.add_argument("--pca-dims",    type=int, default=50)
+    p.add_argument("--n-epochs",    type=int, default=200)
+    p.add_argument("--random-state",type=int, default=42)
+    p.add_argument("--force", action="store_true",
+                   help="Ignore all cached outputs and rerun every step")
+
+    # ── Stage 11 options ──────────────────────────────────────────────────────
+    p.add_argument("--skip-stage11", action="store_true",
+                   help="Skip Stage 11 standout-analysis modules entirely")
+    p.add_argument("--script-dir", default=None,
+                   help="Directory containing run_*.py Stage 11 runner scripts "
+                        "(default: same directory as this script)")
+    p.add_argument("--epigenetic-preset", default=None,
+                   help="Cell-line preset passed to run_epigenetic_overlay.py "
+                        "(e.g. K562, GM12878, HepG2)")
+    p.add_argument("--ctcf-preset", default=None,
+                   help="Cell-line preset passed to run_ctcf_tad.py "
+                        "(e.g. GM12878, K562)")
+    p.add_argument("--tads-preset", default=None,
+                   help="Hi-C / TAD preset passed to run_ctcf_tad.py "
+                        "(e.g. GM12878, K562)")
+    p.add_argument("--ortholog-species", nargs="+", default=None,
+                   metavar="SPECIES",
+                   help="One or more genome assembly IDs for ortholog liftover "
+                        "(e.g. panTro6 rheMac10).  Passed to run_ortholog_insertion.py.")
+    p.add_argument("--target-assemblies", nargs="+", default=None,
+                   metavar="ASM",
+                   help="Additional assemblies for multi-assembly liftover "
+                        "(e.g. t2t mm39).  Passed to run_multiassembly_liftover.py.")
+    p.add_argument("--liftover-cmd", default=None,
+                   help="Path to the UCSC liftOver binary "
+                        "(default: searches PATH)")
+    p.add_argument("--colabfold-cmd", default=None,
+                   help="Path to colabfold_batch binary for fold prediction "
+                        "(default: searches PATH)")
+    p.add_argument("--cpg-omega", type=float, default=None,
+                   help="CpG correction factor omega for divergence / subfamily "
+                        "modules (default: module default)")
+
+    return p.parse_args()
+
+
+# ─── main ────────────────────────────────────────────────────────────────────
 
 def main():
-    ap = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--out-dir", default="report_figs",
-                    help="Output directory for schematic figures (default: report_figs).")
-    ap.add_argument("--data", action="store_true",
-                    help="Also produce the data figures by running the real analysis "
-                         "scripts (needs genuine cluster inputs).")
-    # cross-family (run_line_sine_ltr_analysis.py) pass-through
-    ap.add_argument("--reports-dir", default="reports8",
-                    help="Where the data figures are written; must match the report's "
-                         "graphicspath (default: reports8).")
-    ap.add_argument("--build", default="mm10", help="Genome build (default: mm10).")
-    ap.add_argument("--source", choices=["rmsk", "dfam"], default="rmsk")
-    ap.add_argument("--genome-fa", default="", help="Path to genome FASTA (optional).")
-    ap.add_argument("--rmsk-dir", default=os.path.expanduser("~/te_analysis/rmsk"))
-    ap.add_argument("--l1mdt-expr", default="")
-    ap.add_argument("--b1mus2-expr", default="")
-    ap.add_argument("--iapltr1-expr", default="")
-    ap.add_argument("--max-loci", type=int, default=None)
-    # optional single-family worked example (run_stage11_all.py)
-    ap.add_argument("--input", default="",
-                    help="Loci CSV for a single-family Stage-11 worked example.")
-    ap.add_argument("--family", default=PROTOTYPE_FAMILY,
-                    help=f"Prototype/worked-example family (default: {PROTOTYPE_FAMILY}).")
-    ap.add_argument("--assembly", default=PROTOTYPE_ASSEMBLY)
-    ap.add_argument("--consensus-fasta", default="")
-    ap.add_argument("--single-reports-dir", default=PROTOTYPE_DIR,
-                    help=f"Output dir for the single-family prototype run "
-                         f"(default: {PROTOTYPE_DIR}).")
-    args = ap.parse_args()
+    args = parse_args()
 
-    # Phase 1 — schematics (always).
-    apply_house_style()
-    os.makedirs(args.out_dir, exist_ok=True)
-    print("Phase 1: schematic figures ->", os.path.abspath(args.out_dir))
-    make_pipeline_flowchart(args.out_dir)
-    make_stage11_overview(args.out_dir)
-    make_architecture(args.out_dir)
-    make_nextflow_dag(args.out_dir)
-    make_prototype_journey(args.out_dir)
-    make_locus_filtering(args.out_dir)
-    make_crispr_deliverable(args.out_dir)
-    write_readme(args.out_dir)
+    reports_dir = Path(args.reports_dir)
+    reports_dir.mkdir(parents=True, exist_ok=True)
 
-    # Phase 2 — data figures (opt-in; invokes the real generators).
-    if args.data:
-        print("\nPhase 2: data figures (real analysis scripts)")
-        run_cross_family(args)
-        # The worked example consumes the clustered CSV the cross-family run just
-        # wrote (not --input), so attempt it whenever --data is set; it self-skips
-        # cleanly if no sequence-bearing CSV exists.
-        run_single_family(args)
+    expr_paths = {
+        "L1Md_T":     args.l1mdt_expr,
+        "B1_Mus2":    args.b1mus2_expr,
+        "IAPLTR1_Mm": args.iapltr1_expr,
+    }
+
+    script_dir = (
+        Path(args.script_dir).resolve()
+        if args.script_dir
+        else Path(__file__).resolve().parent
+    )
+    python = shutil.which("python3") or shutil.which("python") or sys.executable
+
+    _pp("=" * 60)
+    _pp("GAMECA --- LINE / SINE / LTR Cross-Family Analysis")
+    _pp(f"  Build:        {args.build}")
+    _pp(f"  Source:       {args.source}")
+    _pp(f"  Genome FA:    {args.genome_fa or '(none --- UCSC API)'}")
+    _pp(f"  Reports dir:  {reports_dir}")
+    _pp(f"  Script dir:   {script_dir}")
+    _pp(f"  Force rerun:  {args.force}")
+    _pp(f"  Skip Stage11: {args.skip_stage11}")
+    _pp("=" * 60)
+
+    family_loci: dict = {}
+    family_results: dict = {}
+    analysis_meta: dict = {}
+    stage11_all_meta: dict = {}  # {family: {mod_key: {macro: value}}}
+
+    # ─── Step 1: Prep, expression match, and cluster each family ───────────────
+    for family, expr_path in expr_paths.items():
+        _pp(f"\n{'='*60}")
+        _pp(f"FAMILY: {family}  ({FAMILIES[family]['type']})")
+        _pp(f"{'='*60}")
+
+        # --max-loci is part of the cache identity: a capped run and a full run
+        # are different datasets, and reusing one for the other silently feeds
+        # the wrong row count downstream.
+        cap = f"_max{args.max_loci}" if args.max_loci else ""
+        loci_cache   = reports_dir / f"cache_{family.lower()}{cap}_loci.pkl"
+        clust_cache  = reports_dir / f"cache_{family.lower()}{cap}_clustered.pkl"
+        labels_cache = reports_dir / f"cache_{family.lower()}{cap}_labels.npy"
+        meta_cache   = reports_dir / f"cache_{family.lower()}{cap}_meta.json"
+        de_path      = reports_dir / f"de_{family.lower()}.csv"
+
+        # ── 1a. Loci + sequences ──────────────────────────────────────────────
+        if not args.force and loci_cache.exists():
+            _pp(f"  [cache] loading loci from {loci_cache.name}")
+            df = pd.read_pickle(loci_cache)
+        else:
+            df = prep_family(
+                family, args.build, args.source, args.rmsk_dir,
+                args.genome_fa, args.max_loci,
+            )
+            df.to_pickle(loci_cache)
+            _pp(f"  [cache] saved loci → {loci_cache.name}")
+
+        n_loci  = len(df)
+        med_div = float(df["milliDiv"].median()) / 10.0 if "milliDiv" in df.columns else 0.0
+        family_loci[family] = df.copy()
+
+        # ── 1b + 1c. Expression match + clustering ────────────────────────────
+        # All three cluster artefacts must exist together to be a valid cache hit.
+        clust_cached = (
+            not args.force
+            and clust_cache.exists()
+            and labels_cache.exists()
+            and meta_cache.exists()
+        )
+        if clust_cached:
+            _pp(f"  [cache] loading clustered data from {clust_cache.name}")
+            df_c        = pd.read_pickle(clust_cache)
+            labels      = np.load(labels_cache)
+            cached_meta = json.loads(meta_cache.read_text())
+            divisor     = cached_meta["divisor"]
+            nn          = cached_meta["n_neighbors"]
+            n_clusters  = cached_meta["n_clusters"]
+            expr_cols   = cached_meta.get("expr_cols", [])
+            n_expr      = cached_meta.get("n_expr", 0)
+        else:
+            # Need expression-matched df before clustering
+            if os.path.exists(expr_path):
+                df, expr_cols, n_expr = match_expression(df, expr_path)
+            else:
+                _pp(f"  WARNING: expression file not found: {expr_path}")
+                expr_cols, n_expr = [], 0
+
+            df_c, labels, divisor, nn, n_clusters = adaptive_clustering(
+                df, family, reports_dir,
+                kmer=args.kmer,
+                pca_dims=args.pca_dims,
+                n_epochs=args.n_epochs,
+                random_state=args.random_state,
+            )
+            df_c.to_pickle(clust_cache)
+            np.save(labels_cache, labels)
+            _pp(f"  [cache] saved clustering → {clust_cache.name}")
+
+        family_results[family] = (df_c, labels)
+        mcs = max(5, n_loci // divisor)
+
+        # ── 1d. Differential expression ───────────────────────────────────────
+        if not args.force and de_path.exists():
+            _pp(f"  [cache] loading DE results from {de_path.name}")
+            de_df    = pd.read_csv(de_path)
+            n_de_sig = int(de_df["sig"].sum()) if "sig" in de_df else 0
+        else:
+            de_df    = differential_expression(df_c, expr_cols)
+            n_de_sig = int(de_df["sig"].sum()) if not de_df.empty and "sig" in de_df else 0
+            if not de_df.empty:
+                de_df.to_csv(de_path, index=False)
+                _pp(f"  DE results → {de_path}")
+
+        # ── 1e. DE heatmap ────────────────────────────────────────────────────
+        de_fig_path = reports_dir / f"fig_de_{family.lower().replace('_','')}.pdf"
+        if not _exists(de_fig_path, args.force):
+            plot_de_heatmap(de_df, family, de_fig_path)
+
+        # ── 1f. Per-family results figure ─────────────────────────────────────
+        fig_path = reports_dir / f"fig_{family.lower().replace('_','')}_results.pdf"
+        if not _exists(fig_path, args.force):
+            plot_family_results(df_c, family, expr_cols, fig_path)
+
+        # ── Save per-family meta cache ─────────────────────────────────────────
+        analysis_meta[family] = {
+            "n_loci":           n_loci,
+            "n_clusters":       n_clusters,
+            "n_expr":           n_expr,
+            "divisor":          divisor,
+            "n_neighbors":      nn,
+            "min_cluster_size": mcs,
+            "n_de_sig":         n_de_sig,
+            "median_div":       round(med_div, 2),
+        }
+        if args.force or not meta_cache.exists():
+            meta_to_save = dict(analysis_meta[family])
+            meta_to_save["expr_cols"] = expr_cols
+            meta_cache.write_text(json.dumps(meta_to_save, indent=2))
+            _pp(f"  [cache] saved meta → {meta_cache.name}")
+
+        _pp(f"  [{family}] DONE: {n_loci:,} loci, {n_clusters} clusters, "
+            f"divisor=n/{divisor}, nn={nn}, {n_expr} expr loci")
+
+    # ─── Step 2: Combined / multi-family figures ───────────────────────────────
+    _pp(f"\n{'='*60}")
+    _pp("Generating combined figures...")
+    _pp(f"{'='*60}")
+
+    kimura_path = reports_dir / "fig_kimura_divergence.pdf"
+    if not _exists(kimura_path, args.force):
+        plot_combined_kimura(family_loci, kimura_path)
+
+    clustering_path = reports_dir / "fig_line_sine_ltr_clustering.pdf"
+    if not _exists(clustering_path, args.force):
+        plot_combined_clustering(family_results, clustering_path)
+
+    # ─── Step 3: Named figures matching the report ─────────────────────────────
+    for family, out_name in [
+        ("L1Md_T",     "fig_line_results"),
+        ("B1_Mus2",    "fig_sine_results"),
+        ("IAPLTR1_Mm", "fig_ltr_results"),
+    ]:
+        src = reports_dir / f"fig_{family.lower().replace('_','')}_results.pdf"
+        dst = reports_dir / f"{out_name}.pdf"
+        if src.exists() and src != dst:
+            if not _exists(dst, args.force):
+                shutil.copy(src, dst)
+                _pp(f"  Copied {src.name} → {dst.name}")
+
+    # ─── Step 4: Stage 11 standout modules ────────────────────────────────────
+    if args.skip_stage11:
+        _pp("\n[Stage 11] skipped (--skip-stage11)")
     else:
-        print("\nPhase 2 skipped (pass --data with real inputs to generate the "
-              "data figures).")
+        _pp(f"\n{'='*60}")
+        _pp("Stage 11 --- Standout Analysis")
+        _pp(f"{'='*60}")
+        for family in FAMILIES:
+            df_c, _ = family_results[family]
+            stage11_dir = reports_dir / f"stage11_{family.lower().replace('_', '')}"
+            s11_meta_cache = stage11_dir / "stage11_meta.json"
 
-    print_manifest()
+            # Cache hit only if at least one module actually produced output.
+            # An all-empty meta means runners were not found last time — re-run.
+            _cached_meta = {}
+            if not args.force and s11_meta_cache.exists() and stage11_dir.exists():
+                _cached_meta = json.loads(s11_meta_cache.read_text())
+            _s11_has_output = any(bool(v) for v in _cached_meta.values())
+
+            if _s11_has_output:
+                _pp(f"  [{family}] Stage 11 cache hit — loading {s11_meta_cache.name}")
+                stage11_all_meta[family] = _cached_meta
+            else:
+                if not _s11_has_output and _cached_meta:
+                    _pp(f"  [{family}] Stage 11 cache was all-empty (runners missing last time) — re-running")
+                meta = run_stage11(
+                    family       = family,
+                    df_c         = df_c,
+                    stage11_dir  = stage11_dir,
+                    build        = args.build,
+                    script_dir   = script_dir,
+                    python       = python,
+                    force        = args.force,
+                    ortholog_species    = args.ortholog_species,
+                    target_assemblies   = args.target_assemblies,
+                    epigenetic_preset   = args.epigenetic_preset,
+                    ctcf_preset         = args.ctcf_preset,
+                    tads_preset         = args.tads_preset,
+                    liftover_cmd        = args.liftover_cmd,
+                    colabfold_cmd       = args.colabfold_cmd,
+                    cpg_omega           = args.cpg_omega,
+                )
+                stage11_all_meta[family] = meta
+                # Cache the parsed meta so next run skips Stage 11
+                stage11_dir.mkdir(parents=True, exist_ok=True)
+                s11_meta_cache.write_text(json.dumps(meta, indent=2))
+                _pp(f"  [{family}] Stage 11 meta cached → {s11_meta_cache.name}")
+
+    # ─── Step 5: Write measured values ─────────────────────────────────────────
+    tex_path = reports_dir / "measured_values.tex"
+    txt_path = reports_dir / "report_numbers.txt"
+    if not args.force and tex_path.exists() and txt_path.exists():
+        _pp(f"  [skip] measured_values.tex and report_numbers.txt already exist")
+    else:
+        _pp(f"\n{'='*60}")
+        _pp("Writing measured values...")
+        tex_path, txt_path = write_measured_values(
+            analysis_meta, reports_dir,
+            stage11_meta=stage11_all_meta if stage11_all_meta else None,
+        )
+
+    _pp(f"\n{'='*60}")
+    _pp("ALL DONE")
+    _pp(f"  Figures:           {reports_dir}")
+    _pp(f"  measured_values:   {tex_path}")
+    _pp(f"  report_numbers:    {txt_path}")
+    _pp(f"{'='*60}")
+
+    print("\n" + "=" * 60)
+    print("TEXT REPORT (copy-paste into GAMECA report):")
+    print("=" * 60)
+    print(txt_path.read_text())
 
 
 if __name__ == "__main__":

@@ -75,7 +75,7 @@ _UPDATABLE_SCRIPTS = [
     "run_ortholog_insertion.py", "run_multiassembly_liftover.py",
     "run_motif_gain.py", "te_motif_gain.py",
     "run_stage11_all.py", "run_divergence.py", "run_ltr_struct.py",
-    "run_subfamily.py", "run_benchmark.py", "run_line_sine_ltr_analysis.py",
+    "run_subfamily.py", "run_benchmark.py", "make_report_figures.py",
     # ── shared libs + infra ──
     "te_moods_scan.py", "te_divergence.py", "te_ltr_struct.py",
     "te_subfamily.py", "te_overlay.py", "te_scheduler.py", "te_provenance.py",

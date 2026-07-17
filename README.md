@@ -136,8 +136,7 @@ submitter. `run_stage11_all.py` runs them together for one family.
 | `run_ctcf_tad.py`, `run_epigenetic_overlay.py` | CTCF-site / TAD-boundary proximity and epigenetic/regulatory-track overlay |
 | `run_ortholog_insertion.py`, `run_multiassembly_liftover.py` | Orthologous-insertion calling and liftover across `hg38` / T2T-CHM13 / `mm10` / `mm39` |
 | `run_fold_prediction.py`, `run_subfamily.py` | ColabFold structure prediction of consensus ORFs; subfamily dendrogram of cluster consensuses |
-| `run_line_sine_ltr_analysis.py` | Cross-family LINE/SINE/LTR batch analysis (clusters, expression, DE, per-family figures) |
-| `run_cluster_search.py`, `run_cluster_validation.py`, `run_cluster_crosscheck.py` | Search for an N-cluster configuration at minimal noise; measure partition stability (ARI); cross-check clusters against the consensus alignments |
+| `make_report_figures.py` | Cross-family LINE/SINE/LTR batch analysis (clusters, expression, DE, per-family report figures) |
 
 ## Supported assemblies
 
@@ -180,14 +179,15 @@ setup_cython.py           Build script: python setup_cython.py build_ext --inpla
 run_*.py                  Copy-resolved analysis modules run after the core pipeline
                           (see "Copy-resolved analysis modules" below): phylogeny,
                           allele-aware gRNA, transduction, antisense, divergence,
-                          cross-family, and the cluster search/validation tools
+                          LTR structure, CTCF/TAD, epigenetic, ortholog/liftover, etc.
 run_stage11_all.py        Orchestrates the copy-resolved modules for one family
-make_report_figures.py    Single entry point for every manuscript figure — schematics
-                          always; `--data` drives the real data-figure generators
+make_report_figures.py    Cross-family LINE/SINE/LTR batch analysis; emits the per-family
+                          report data figures (clusters, expression, DE, divergence)
+generate_latex_report.py  Builds the per-family LaTeX report (exercised by test_gameca.sh)
 
 requirements.txt          Python dependencies (pinned ranges)
 
-test_gameca.sh            End-to-end pipeline smoke test (multi-stage, cluster or local)
+test_gameca.sh            Comprehensive end-to-end pipeline test (multi-stage, cluster or local)
 backend/tests/            IPC protocol + HPC file-sync integration tests
 ```
 
