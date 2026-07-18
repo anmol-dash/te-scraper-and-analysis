@@ -12,8 +12,8 @@
 #
 # Prereqs (one-time):
 #   pip install -U "huggingface_hub[cli]"
-#   huggingface-cli login          # paste a WRITE token from hf.co/settings/tokens
-#   huggingface-cli repo create <hf-username>/<space-name> --repo-type space --space_sdk docker
+#   hf auth login          # paste a WRITE token from hf.co/settings/tokens
+#   hf repos create <hf-username>/<space-name> --type space --space-sdk docker
 #
 # Re-run this script any time to redeploy; HF rebuilds the container on push.
 set -euo pipefail
@@ -26,7 +26,7 @@ trap 'rm -rf "$STAGE"' EXIT
 echo ">> assembling Space in $STAGE"
 git -C "$STAGE" clone "https://huggingface.co/spaces/$SPACE" . 2>/dev/null \
   || { echo "!! could not clone https://huggingface.co/spaces/$SPACE"; \
-       echo "   create it first: huggingface-cli repo create $SPACE --repo-type space --space_sdk docker"; \
+       echo "   create it first: hf repos create $SPACE --type space --space-sdk docker"; \
        exit 1; }
 
 # Root Dockerfile for the Space = the web Dockerfile (build context is the Space
