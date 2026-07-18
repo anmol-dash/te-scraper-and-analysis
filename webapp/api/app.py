@@ -47,6 +47,7 @@ import pandas as pd  # noqa: E402
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import FileResponse, JSONResponse  # noqa: E402
+from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 # Pipeline modules (imported, never modified) --------------------------------
 import te_clustering  # noqa: E402
@@ -767,8 +768,18 @@ def job_file(job_id: str, name: str):
     return resp
 
 
-@app.get("/")
-def root():
-    return {"service": "TERRA Web API", "docs": "/docs",
-            "endpoints": ["/api/health", "/api/inspect", "/api/cluster",
-                          "/api/guides", "/api/jobs/{id}", "/api/files/{id}/{name}"]}
+# ── Serve the static front-end from the same origin (single-container deploy) ─
+# webapp/api/app.py → webapp/frontend is one level up + /frontend. When present
+# (Docker image copies it in, or a full checkout), the UI is served at "/" and
+# the front-end talks to /api/* on the same origin — no API-URL config needed.
+# When absent (API-only deploy) we fall back to a JSON service descriptor.
+_FRONTEND_DIR = Path(__file__).resolve().parents[1] / "frontend"
+
+if _FRONTEND_DIR.is_dir():
+    app.mount("/", StaticFiles(directory=str(_FRONTEND_DIR), html=True), name="frontend")
+else:
+    @app.get("/")
+    def root():
+        return {"service": "TERRA Web API", "docs": "/docs",
+                "endpoints": ["/api/health", "/api/inspect", "/api/cluster",
+                              "/api/guides", "/api/jobs/{id}", "/api/files/{id}/{name}"]}
