@@ -1,0 +1,17 @@
+# Cloud Build config: build the combined TERRA web image (backend + bundled
+# front-end) from webapp/api/Dockerfile. Run from the repo root so the build
+# context is the repository (the Dockerfile COPYs pipeline modules from root).
+#
+#   gcloud builds submit --config webapp/gcp/cloudbuild.yaml \
+#       --substitutions _IMAGE=<region>-docker.pkg.dev/<project>/terra/terra:latest .
+#
+# The default `gcloud run deploy --source .` can't be used here because it builds
+# the repo-root Dockerfile (the heavy HPC/.sif image); this points at the lean
+# web Dockerfile explicitly.
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: ['build', '-f', 'webapp/api/Dockerfile', '-t', '${_IMAGE}', '.']
+images:
+  - '${_IMAGE}'
+options:
+  logging: CLOUD_LOGGING_ONLY
