@@ -443,95 +443,122 @@ def greedy_grna_set(df_cands: pd.DataFrame, df: pd.DataFrame,
 
 def fig_grna_coverage(df_cands: pd.DataFrame, df: pd.DataFrame,
                       top_grna_seq: str, top_grna_expr: str,
-                      family: str, out_path: Path):
-    """4-panel main results figure."""
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    fig.suptitle(f"{family} --- gRNA Coverage Analysis", fontsize=14, fontweight="bold")
+                      family: str, out_path: Path,
+                      grna_len: int = 20, has_expression: bool = True):
+    """Main results figure.
 
-    # ── Panel a: seq coverage distribution ───────────────────────────────────
-    ax = axes[0, 0]
-    ax.hist(df_cands["pct_seq_cov"], bins=60, color="#4C9BE8",
-            edgecolor="white", linewidth=0.4, alpha=0.85)
-    top_val = df_cands["pct_seq_cov"].max()
-    ax.axvline(top_val, color="#E8604C", linestyle="--", linewidth=1.5,
-               label=f"Best: {top_val:.1f}%")
-    ax.set_xlabel("Sequence coverage (%)")
-    ax.set_ylabel("Number of gRNA candidates")
-    ax.set_title("(a) Sequence coverage distribution", fontweight="bold")
-    ax.legend(fontsize=9)
-    ax.spines[["top","right"]].set_visible(False)
+    With expression → 2×2 panels:
+        (a) sequence-coverage distribution, (b) sequence-vs-expression scatter,
+        (c) mismatch tolerance of the best guide, (d) per-cluster heatmap.
+    Without expression → only the two panels that don't depend on expression,
+        (a) mismatch tolerance and (b) per-cluster heatmap. Panels comparing
+        sequence-vs-expression coverage are omitted (they'd be degenerate).
 
-    # ── Panel b: seq coverage vs expression coverage scatter ─────────────────
-    ax = axes[0, 1]
-    x = df_cands["pct_seq_cov"].values
-    y = df_cands["pct_expr_cov"].values
-    ax.scatter(x, y, s=3, alpha=0.3, color="#9B59B6", rasterized=True)
-    # Highlight top by each metric
-    best_seq  = df_cands.loc[df_cands["pct_seq_cov"].idxmax()]
-    best_expr = df_cands.loc[df_cands["pct_expr_cov"].idxmax()]
-    ax.scatter(best_seq["pct_seq_cov"], best_seq["pct_expr_cov"],
-               s=80, color="#E8604C", zorder=5, label="Best by seq. cov.")
-    ax.scatter(best_expr["pct_seq_cov"], best_expr["pct_expr_cov"],
-               s=80, color="#2ECC71", zorder=5, label="Best by expr. cov.")
-    corr = np.corrcoef(x, y)[0, 1]
-    ax.set_xlabel("Sequence coverage (%)")
-    ax.set_ylabel("Expression coverage (%)")
-    ax.set_title(f"(b) Seq. vs expr. coverage  (r = {corr:.3f})", fontweight="bold")
-    ax.legend(fontsize=8)
-    ax.spines[["top","right"]].set_visible(False)
-
-    # ── Panel c: mismatch tolerance curve for top gRNA ────────────────────────
-    ax = axes[1, 0]
-    _pp("  Computing mismatch tolerance curve (may take ~30s)...")
-    kmer_idx = build_kmer_index_20(df.head(min(len(df), 1000)))  # subsample for speed
-    top_g = best_expr["grna"]
-    total_expr_sum = df["_total_expr"].sum()
-    mm_results = []
-    for mm in range(4):
-        rows = coverage_with_mismatches(top_g, kmer_idx, max_mm=mm)
-        cov_pct  = 100 * len(rows) / max(len(df), 1)
-        expr_sum = df["_total_expr"].iloc[list(rows)].sum() if rows else 0.0
-        expr_pct = 100 * expr_sum / max(total_expr_sum, 1e-9)
-        mm_results.append({"mm": mm, "cov_pct": cov_pct, "expr_pct": expr_pct})
-    mm_df = pd.DataFrame(mm_results)
-    ax.plot(mm_df["mm"], mm_df["cov_pct"], "o-", color="#4C9BE8",
-            linewidth=2, markersize=7, label="Seq. coverage")
-    ax.plot(mm_df["mm"], mm_df["expr_pct"], "s-", color="#E8604C",
-            linewidth=2, markersize=7, label="Expr. coverage")
-    ax.set_xlabel("Allowed mismatches (non-seed region)")
-    ax.set_ylabel("Coverage (%)")
-    ax.set_title("(c) Mismatch tolerance --- best EWC gRNA", fontweight="bold")
-    ax.legend(fontsize=9)
-    ax.set_xticks([0, 1, 2, 3])
-    ax.spines[["top","right"]].set_visible(False)
-    ax.yaxis.grid(True, linestyle="--", alpha=0.35)
-
-    # ── Panel d: per-cluster coverage heatmap ────────────────────────────────
-    ax = axes[1, 1]
+    Returns (corr, mm_df); corr is NaN when there is no expression.
+    """
     cluster_col = "Cluster" if "Cluster" in df.columns else "cluster"
-    clusters = sorted(c for c in df[cluster_col].unique() if c >= 0)
-    top5_grnas = df_cands.head(5)["grna"].tolist()
 
-    heat = np.zeros((len(top5_grnas), len(clusters)))
-    for gi, g in enumerate(top5_grnas):
-        rows_g = set(df_cands.loc[df_cands["grna"] == g, "rows_exact"].values[0])
-        for ci, cl in enumerate(clusters):
-            cl_rows = set(df[df[cluster_col] == cl].index.tolist())
-            if cl_rows:
-                heat[gi, ci] = 100 * len(rows_g & cl_rows) / len(cl_rows)
+    # ── Panel: sequence-coverage distribution (expression case only) ──────────
+    def _panel_seq_dist(ax):
+        ax.hist(df_cands["pct_seq_cov"], bins=60, color="#4C9BE8",
+                edgecolor="white", linewidth=0.4, alpha=0.85)
+        top_val = df_cands["pct_seq_cov"].max()
+        ax.axvline(top_val, color="#E8604C", linestyle="--", linewidth=1.5,
+                   label=f"Best: {top_val:.1f}%")
+        ax.set_xlabel("Sequence coverage (%)")
+        ax.set_ylabel("Number of gRNA candidates")
+        ax.set_title("(a) Sequence coverage distribution", fontweight="bold")
+        ax.legend(fontsize=9)
+        ax.spines[["top", "right"]].set_visible(False)
 
-    im = ax.imshow(heat, aspect="auto", cmap="Blues", vmin=0, vmax=100)
-    ax.set_xticks(range(len(clusters)))
-    ax.set_xticklabels([f"C{c}" for c in clusters], fontsize=9)
-    ax.set_yticks(range(len(top5_grnas)))
-    ax.set_yticklabels([f"{g[:12]}…" for g in top5_grnas], fontsize=8,
-                       fontfamily="monospace")
-    plt.colorbar(im, ax=ax, label="% cluster loci covered", shrink=0.85)
-    ax.set_title("(d) Top-5 gRNAs × cluster coverage (%)", fontweight="bold")
-    for gi in range(len(top5_grnas)):
-        for ci in range(len(clusters)):
-            ax.text(ci, gi, f"{heat[gi,ci]:.0f}", ha="center", va="center",
-                    fontsize=7, color="black" if heat[gi,ci] < 60 else "white")
+    # ── Panel: sequence vs expression scatter (expression case only) ──────────
+    def _panel_seq_vs_expr(ax):
+        x = df_cands["pct_seq_cov"].values
+        y = df_cands["pct_expr_cov"].values
+        ax.scatter(x, y, s=3, alpha=0.3, color="#9B59B6", rasterized=True)
+        best_seq  = df_cands.loc[df_cands["pct_seq_cov"].idxmax()]
+        best_expr = df_cands.loc[df_cands["pct_expr_cov"].idxmax()]
+        ax.scatter(best_seq["pct_seq_cov"], best_seq["pct_expr_cov"],
+                   s=80, color="#E8604C", zorder=5, label="Best by seq. cov.")
+        ax.scatter(best_expr["pct_seq_cov"], best_expr["pct_expr_cov"],
+                   s=80, color="#2ECC71", zorder=5, label="Best by expr. cov.")
+        c = float(np.corrcoef(x, y)[0, 1])
+        ax.set_xlabel("Sequence coverage (%)")
+        ax.set_ylabel("Expression coverage (%)")
+        ax.set_title(f"(b) Seq. vs expr. coverage  (r = {c:.3f})", fontweight="bold")
+        ax.legend(fontsize=8)
+        ax.spines[["top", "right"]].set_visible(False)
+        return c
+
+    # ── Panel: mismatch tolerance of the best guide ───────────────────────────
+    def _panel_mismatch(ax, letter):
+        _pp("  Computing mismatch tolerance curve (may take ~30s)...")
+        # Index k-mers at the ACTUAL guide length (was hard-coded to 20, which
+        # returned an empty curve for any grna_len != 20).
+        kmer_idx = build_kmer_index_20(df.head(min(len(df), 1000)), grna_len=grna_len)
+        rank_col = "pct_expr_cov" if has_expression else "pct_seq_cov"
+        top_g = df_cands.loc[df_cands[rank_col].idxmax(), "grna"]
+        total_expr_sum = df["_total_expr"].sum()
+        recs = []
+        for mm in range(4):
+            rows = coverage_with_mismatches(top_g, kmer_idx, max_mm=mm)
+            cov_pct = 100 * len(rows) / max(len(df), 1)
+            expr_sum = df["_total_expr"].iloc[list(rows)].sum() if rows else 0.0
+            expr_pct = 100 * expr_sum / max(total_expr_sum, 1e-9)
+            recs.append({"mm": mm, "cov_pct": cov_pct, "expr_pct": expr_pct})
+        mmdf = pd.DataFrame(recs)
+        ax.plot(mmdf["mm"], mmdf["cov_pct"], "o-", color="#4C9BE8", linewidth=2,
+                markersize=7, label=("Seq. coverage" if has_expression else "Coverage"))
+        if has_expression:
+            ax.plot(mmdf["mm"], mmdf["expr_pct"], "s-", color="#E8604C",
+                    linewidth=2, markersize=7, label="Expr. coverage")
+        ax.set_xlabel("Allowed mismatches (non-seed region)")
+        ax.set_ylabel("Coverage (%)")
+        ttl = "best EWC gRNA" if has_expression else "best gRNA"
+        ax.set_title(f"({letter}) Mismatch tolerance --- {ttl}", fontweight="bold")
+        ax.legend(fontsize=9)
+        ax.set_xticks([0, 1, 2, 3])
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.yaxis.grid(True, linestyle="--", alpha=0.35)
+        return mmdf
+
+    # ── Panel: per-cluster coverage heatmap ───────────────────────────────────
+    def _panel_cluster_heat(ax, letter):
+        clusters = sorted(c for c in df[cluster_col].unique() if c >= 0)
+        top5 = df_cands.head(5)["grna"].tolist()
+        heat = np.zeros((len(top5), len(clusters)))
+        for gi, g in enumerate(top5):
+            rows_g = set(df_cands.loc[df_cands["grna"] == g, "rows_exact"].values[0])
+            for ci, cl in enumerate(clusters):
+                cl_rows = set(df[df[cluster_col] == cl].index.tolist())
+                if cl_rows:
+                    heat[gi, ci] = 100 * len(rows_g & cl_rows) / len(cl_rows)
+        im = ax.imshow(heat, aspect="auto", cmap="Blues", vmin=0, vmax=100)
+        ax.set_xticks(range(len(clusters)))
+        ax.set_xticklabels([f"C{c}" for c in clusters], fontsize=9)
+        ax.set_yticks(range(len(top5)))
+        ax.set_yticklabels([f"{g[:12]}…" for g in top5], fontsize=8,
+                           fontfamily="monospace")
+        plt.colorbar(im, ax=ax, label="% cluster loci covered", shrink=0.85)
+        ax.set_title(f"({letter}) Top-5 gRNAs × cluster coverage (%)", fontweight="bold")
+        for gi in range(len(top5)):
+            for ci in range(len(clusters)):
+                ax.text(ci, gi, f"{heat[gi, ci]:.0f}", ha="center", va="center",
+                        fontsize=7, color="black" if heat[gi, ci] < 60 else "white")
+
+    if has_expression:
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        fig.suptitle(f"{family} --- gRNA Coverage Analysis", fontsize=14, fontweight="bold")
+        _panel_seq_dist(axes[0, 0])
+        corr = _panel_seq_vs_expr(axes[0, 1])
+        mm_df = _panel_mismatch(axes[1, 0], "c")
+        _panel_cluster_heat(axes[1, 1], "d")
+    else:
+        fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+        fig.suptitle(f"{family} --- gRNA Coverage Analysis", fontsize=14, fontweight="bold")
+        corr = float("nan")
+        mm_df = _panel_mismatch(axes[0], "a")
+        _panel_cluster_heat(axes[1], "b")
 
     plt.tight_layout()
     plt.savefig(out_path, bbox_inches="tight")
@@ -583,20 +610,32 @@ def fig_grna_positional(df: pd.DataFrame, grna_len=20, cas="SpCas9",
     return len(positions_fwd) + len(positions_rev)
 
 
-def fig_grna_candidates(df_cands: pd.DataFrame, family: str, out_path: Path):
-    """Dual-ranked barplot: top 10 by sequence coverage vs top 10 by expression coverage."""
-    top_seq  = df_cands.nlargest(10, "pct_seq_cov")
-    top_expr = df_cands.nlargest(10, "pct_expr_cov")
+def fig_grna_candidates(df_cands: pd.DataFrame, family: str, out_path: Path,
+                        has_expression: bool = True):
+    """Top gRNA candidates ranked. With expression: two panels (by sequence
+    coverage and by expression coverage). Without expression: a single panel
+    ranked by sequence coverage (the expression ranking would be identical)."""
+    top_seq = df_cands.nlargest(10, "pct_seq_cov")
 
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    if has_expression:
+        top_expr = df_cands.nlargest(10, "pct_expr_cov")
+        fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+        panels = [
+            (axes[0], top_seq,  "pct_seq_cov",  "#4C9BE8",
+             "(a) Ranked by sequence coverage", "Sequence coverage (%)"),
+            (axes[1], top_expr, "pct_expr_cov", "#E8604C",
+             "(b) Ranked by expression coverage", "Expression coverage (%)"),
+        ]
+    else:
+        fig, ax0 = plt.subplots(1, 1, figsize=(9, 6))
+        panels = [
+            (ax0, top_seq, "pct_seq_cov", "#4C9BE8",
+             "Ranked by sequence coverage", "Sequence coverage (%)"),
+        ]
+
     fig.suptitle(f"{family} --- Top gRNA Candidates", fontsize=14, fontweight="bold")
 
-    for ax, df_top, metric, color, title, col in [
-        (axes[0], top_seq,  "pct_seq_cov",  "#4C9BE8",
-         "(a) Ranked by sequence coverage", "Sequence coverage (%)"),
-        (axes[1], top_expr, "pct_expr_cov", "#E8604C",
-         "(b) Ranked by expression coverage", "Expression coverage (%)"),
-    ]:
+    for ax, df_top, metric, color, title, col in panels:
         seqs_short = [f"{g[:14]}…" for g in df_top["grna"]]
         vals = df_top[metric].values
         bars = ax.barh(seqs_short[::-1], vals[::-1], color=color, alpha=0.85,
@@ -627,8 +666,8 @@ def _grna_rows(df_cands, grna):
 
 
 def fig_grna_embedding_coverage(df, df_cands, greedy_df, family, out_path,
-                                covered_csv=None):
-    """Highlight, on the UMAP and t-SNE embeddings, every locus that the optimal
+                                covered_csv=None, embeddings=None):
+    """Highlight, on the requested embedding(s), every locus that the optimal
     multi-guide panel (greedy set) can hit by exact protospacer match.
 
     Two top panels: the full greedy combo, with each locus coloured by the
@@ -638,12 +677,20 @@ def fig_grna_embedding_coverage(df, df_cands, greedy_df, family, out_path,
 
     Coverage is EXACT protospacer match (the honest, PAM-aware metric); nothing
     here is mismatch-extrapolated.
+
+    ``embeddings`` selects which projections to draw as columns, any of
+    ("umap", "tsne", "pca"). Default (None) keeps the historical UMAP+t-SNE view.
     """
-    has_umap = {"umap_x", "umap_y"}.issubset(df.columns)
-    has_tsne = {"tsne_x", "tsne_y"}.issubset(df.columns)
-    if not (has_umap or has_tsne):
-        _pp("  [embedding-coverage] no umap_x/umap_y or tsne_x/tsne_y columns "
-            "in input — skipping embedding coverage figure")
+    _EMB_SPECS = [("umap", "UMAP", "umap_x", "umap_y"),
+                  ("tsne", "t-SNE", "tsne_x", "tsne_y"),
+                  ("pca", "PCA", "pca_x", "pca_y")]
+    want = tuple(embeddings) if embeddings else ("umap", "tsne")
+    available = {key: (name, xc, yc) for key, name, xc, yc in _EMB_SPECS
+                 if {xc, yc}.issubset(df.columns)}
+    selected = [k for k in want if k in available]
+    if not selected:
+        _pp("  [embedding-coverage] no requested embedding columns "
+            f"({', '.join(want)}) in input — skipping embedding coverage figure")
         return None
     if greedy_df is None or len(greedy_df) == 0:
         _pp("  [embedding-coverage] empty greedy set — skipping")
@@ -686,10 +733,9 @@ def fig_grna_embedding_coverage(df, df_cands, greedy_df, family, out_path,
         _pp(f"  Saved {covered_csv}")
 
     embeds = []
-    if has_umap:
-        embeds.append(("UMAP", df["umap_x"].values, df["umap_y"].values))
-    if has_tsne:
-        embeds.append(("t-SNE", df["tsne_x"].values, df["tsne_y"].values))
+    for key in selected:
+        name, xc, yc = available[key]
+        embeds.append((name, df[xc].values, df[yc].values))
 
     n_cov = int(any_covered.sum())
     pct_cov = 100.0 * n_cov / max(n_loci, 1)
@@ -853,8 +899,11 @@ def main():
     _pp(f"  {len(df):,} rows, {len(df.columns)} columns")
 
     expr_cols = _auto_expr_cols(df)
+    has_expression = bool(expr_cols)
     _pp(f"  Expression columns ({len(expr_cols)}): {expr_cols}")
-    df["_total_expr"] = df[expr_cols].sum(axis=1) if expr_cols else 0.0
+    # No expression → weight every locus equally so coverage == sequence coverage
+    # (previously 0.0, which made every expression metric degenerate).
+    df["_total_expr"] = df[expr_cols].sum(axis=1) if has_expression else 1.0
 
     # ── Build global 20-mer index (mm1 columns only; OOM-prone, so optional) ──
     want_index = (args.global_mm_index == "on" or
@@ -887,8 +936,13 @@ def main():
     if args.max_candidates:
         df_cands = df_cands.head(args.max_candidates)
 
-    # Save full candidate table
+    # Save full candidate table. Drop the expression columns when there is no
+    # expression data, so the table doesn't carry meaningless duplicate columns.
     cand_out = df_cands.drop(columns=["rows_exact"]).copy()
+    if not has_expression:
+        cand_out = cand_out.drop(columns=[c for c in
+                    ("exact_expr_cov", "mm1_expr_cov", "pct_expr_cov")
+                    if c in cand_out.columns])
     cand_out.to_csv(reports_dir / "grna_candidates.csv", index=False)
     _pp(f"  Saved grna_candidates.csv ({len(cand_out):,} candidates)")
 
@@ -899,8 +953,9 @@ def main():
     _pp(f"  Best by expression coverage: {best_expr['grna']}  ({best_expr['pct_expr_cov']:.1f}%)")
 
     # ── Greedy set-cover ──────────────────────────────────────────────────────
-    _pp(f"Running greedy {args.n_greedy}-guide set-cover (expression mode)...")
-    greedy_df = greedy_grna_set(df_cands, df, n_guides=args.n_greedy, mode="expression")
+    greedy_mode = "expression" if has_expression else "sequence"
+    _pp(f"Running greedy {args.n_greedy}-guide set-cover ({greedy_mode} mode)...")
+    greedy_df = greedy_grna_set(df_cands, df, n_guides=args.n_greedy, mode=greedy_mode)
     greedy_df.to_csv(reports_dir / "grna_greedy_set.csv", index=False)
     _pp(f"  Greedy {len(greedy_df)} guides:")
     for _, row in greedy_df.iterrows():
@@ -919,6 +974,7 @@ def main():
         top_grna_expr=best_expr["grna"],
         family=args.family,
         out_path=reports_dir / "fig_grna_coverage.pdf",
+        grna_len=args.grna_len, has_expression=has_expression,
     )
 
     n_pam = fig_grna_positional(
@@ -928,7 +984,8 @@ def main():
     )
 
     fig_grna_candidates(df_cands, args.family,
-                        out_path=reports_dir / "fig_grna_candidates.pdf")
+                        out_path=reports_dir / "fig_grna_candidates.pdf",
+                        has_expression=has_expression)
 
     # The reagent-design centrepiece: where the optimal guide panel lands on the
     # UMAP / t-SNE embeddings (requires umap_x/umap_y / tsne_x/tsne_y in input).

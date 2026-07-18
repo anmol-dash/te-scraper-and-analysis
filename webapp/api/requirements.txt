@@ -1,0 +1,15 @@
+# TERRA Web API — HTTP layer + the pipeline's own scientific stack.
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+
+# Pipeline dependencies (imported from the repo's existing modules).
+numpy>=1.24,<2.0
+pandas>=2.0
+scikit-learn>=1.3
+umap-learn>=0.5.5
+hdbscan>=0.8.36
+numba>=0.58
+matplotlib>=3.7
+plotly>=5.9
+openpyxl>=3.1

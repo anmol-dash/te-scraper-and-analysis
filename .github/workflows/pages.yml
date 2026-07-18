@@ -1,0 +1,39 @@
+name: Deploy web UI to GitHub Pages
+
+# Publishes the static site in webapp/frontend to GitHub Pages.
+# The site is buildless (plain HTML/CSS/JS), so we just upload the folder.
+# The Python pipeline API (webapp/api) is deployed separately; users point the
+# UI at it via the in-app ⚙︎ settings.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "webapp/frontend/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow one concurrent deployment; don't cancel an in-progress run.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: webapp/frontend
+      - id: deployment
+        uses: actions/deploy-pages@v4

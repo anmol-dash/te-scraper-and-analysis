@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TERRA — TE Clustering &amp; Guide Design</title>
+  <meta name="description" content="Cluster transposable-element families and design expression-weighted CRISPR guides." />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%A7%AC%3C/text%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="wrap topbar-inner">
+      <div class="brand">
+        <span class="brand-mark">🧬</span>
+        <div>
+          <div class="brand-name">TERRA</div>
+          <div class="brand-sub">TE clustering &amp; guide design</div>
+        </div>
+      </div>
+      <nav class="tabs" role="tablist">
+        <button class="tab is-active" data-tab="cluster" role="tab">Cluster</button>
+        <button class="tab" data-tab="guides" role="tab">Guides</button>
+        <button class="tab" data-tab="about" role="tab">About</button>
+      </nav>
+      <div class="topbar-tools">
+        <span id="apiStatus" class="api-status" title="Backend status">
+          <span class="dot"></span><span class="api-status-text">checking…</span>
+        </span>
+        <button id="btnSettings" class="icon-btn" title="API settings">⚙︎</button>
+        <button id="btnTheme" class="icon-btn" title="Toggle theme">◐</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- API settings drawer -->
+  <div id="settings" class="settings hidden">
+    <div class="wrap settings-inner">
+      <label for="apiUrl">Backend API URL</label>
+      <div class="row">
+        <input id="apiUrl" type="text" placeholder="https://your-backend.onrender.com" />
+        <button id="btnSaveApi" class="btn">Save &amp; test</button>
+      </div>
+      <p class="hint">
+        This static site runs on GitHub Pages; the heavy clustering / guide-design
+        pipeline runs on a separate Python API. Deploy <code>webapp/api</code> and
+        paste its URL here (stored in your browser only).
+      </p>
+    </div>
+  </div>
+
+  <main class="wrap">
+
+    <!-- ══════════════════════ CLUSTER TAB ══════════════════════ -->
+    <section id="panel-cluster" class="panel is-active">
+      <h1>Cluster a TE family</h1>
+      <p class="lead">Group elements by sequence similarity (k-mer → SVD → UMAP/t-SNE → HDBSCAN).</p>
+
+      <div class="card">
+        <h2>1 · Input</h2>
+        <div class="segmented" id="clInputMode">
+          <button class="seg is-active" data-mode="upload">Upload CSV / XLSX</button>
+          <button class="seg" data-mode="family">Family + assembly</button>
+        </div>
+
+        <!-- Upload -->
+        <div class="mode-panel is-active" data-mode="upload">
+          <label class="file-drop" for="clFile">
+            <input id="clFile" type="file" accept=".csv,.xlsx,.xls" hidden />
+            <span class="file-drop-label">Choose a CSV or XLSX file…</span>
+            <span id="clFileName" class="file-name"></span>
+          </label>
+          <div id="clInspect" class="inspect hidden">
+            <p class="muted"><span id="clRowCount"></span> — confirm which columns to use:</p>
+            <div class="preview-wrap"><table id="clPreview" class="preview"></table></div>
+            <div id="clMapping" class="mapping"></div>
+          </div>
+        </div>
+
+        <!-- Family -->
+        <div class="mode-panel" data-mode="family">
+          <div class="grid">
+            <label>Family name
+              <input id="clFamily" type="text" placeholder="e.g. IAPLTR1_Mm" />
+            </label>
+            <label>Assembly
+              <select id="clAssembly"></select>
+            </label>
+            <label>Source
+              <select id="clSource">
+                <option value="rmsk">RepeatMasker (UCSC)</option>
+                <option value="dfam">Dfam (lighter for hosted use)</option>
+              </select>
+            </label>
+            <label>Max loci <span class="opt">(0 = all)</span>
+              <input id="clMaxLoci" type="number" value="0" min="0" step="50" />
+            </label>
+          </div>
+          <p class="hint">Sequences are pulled live from UCSC / Dfam — rate-limited, so cap loci for a quick run.</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <details>
+          <summary><h2 class="inline">2 · Parameters</h2><span class="muted">advanced — defaults are sensible</span></summary>
+          <div class="grid">
+            <label>k-mer length <input id="clKmer" type="number" value="10" min="3" max="16" /></label>
+            <label>Min cluster size <input id="clMinCluster" type="number" value="100" min="2" /></label>
+            <label>UMAP n_neighbors <input id="clNeighbors" type="number" value="30" min="2" /></label>
+            <label>UMAP min_dist <input id="clMinDist" type="number" value="0.0" min="0" max="1" step="0.05" /></label>
+            <label>HDBSCAN min_samples <input id="clMinSamples" type="number" value="5" min="1" /></label>
+            <label class="check"><input id="clTsne" type="checkbox" checked /> Compute t-SNE</label>
+          </div>
+        </details>
+      </div>
+
+      <div class="actions">
+        <button id="btnCluster" class="btn btn-primary">Run clustering</button>
+      </div>
+
+      <div id="clJob" class="job hidden"></div>
+      <div id="clResults" class="results hidden"></div>
+    </section>
+
+    <!-- ══════════════════════ GUIDES TAB ══════════════════════ -->
+    <section id="panel-guides" class="panel">
+      <h1>Design optimal guides</h1>
+      <p class="lead">PAM-aware candidate generation, expression-weighted coverage, and figures showing <em>why</em> each guide is optimal.</p>
+
+      <div class="card">
+        <h2>1 · Sequences</h2>
+        <div class="segmented" id="guInputMode">
+          <button class="seg is-active" data-mode="job">Use clustering result</button>
+          <button class="seg" data-mode="upload">Upload clustered CSV</button>
+        </div>
+
+        <div class="mode-panel is-active" data-mode="job">
+          <div id="guLinked" class="linked">
+            <p class="muted">No clustering result yet. Run the <strong>Cluster</strong> tab first, or switch to upload.</p>
+          </div>
+        </div>
+
+        <div class="mode-panel" data-mode="upload">
+          <label class="file-drop" for="guFile">
+            <input id="guFile" type="file" accept=".csv,.xlsx,.xls" hidden />
+            <span class="file-drop-label">Choose a clustered CSV / XLSX…</span>
+            <span id="guFileName" class="file-name"></span>
+          </label>
+          <div id="guInspect" class="inspect hidden">
+            <p class="muted"><span id="guRowCount"></span> — confirm columns (Cluster &amp; expression optional):</p>
+            <div class="preview-wrap"><table id="guPreview" class="preview"></table></div>
+            <div id="guMapping" class="mapping"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>2 · Guide design</h2>
+        <div class="grid">
+          <label>Family label <input id="guFamily" type="text" placeholder="FAMILY" /></label>
+          <label>Cas / PAM
+            <select id="guCas">
+              <option value="SpCas9">SpCas9 (NGG)</option>
+              <option value="SaCas9">SaCas9 (NNGRRT)</option>
+              <option value="Cas12a">Cas12a (TTTV)</option>
+              <option value="SpRY">SpRY (NRN)</option>
+            </select>
+          </label>
+          <label>Guide length <input id="guLen" type="number" value="20" min="16" max="24" /></label>
+          <label>Best grouping of…
+            <select id="guGreedy">
+              <option value="1">1 guide</option>
+              <option value="2">2 guides</option>
+              <option value="3">3 guides</option>
+              <option value="4">4 guides</option>
+              <option value="5" selected>5 guides</option>
+              <option value="6">6 guides</option>
+              <option value="7">7 guides</option>
+              <option value="8">8 guides</option>
+              <option value="10">10 guides</option>
+              <option value="12">12 guides</option>
+            </select>
+          </label>
+        </div>
+        <details>
+          <summary><span class="muted">advanced</span></summary>
+          <div class="grid">
+            <label>Extraction workers <input id="guWorkers" type="number" value="2" min="1" max="8" /></label>
+            <label>Mismatch index
+              <select id="guMm">
+                <option value="auto">auto</option>
+                <option value="on">on</option>
+                <option value="off">off</option>
+              </select>
+            </label>
+          </div>
+        </details>
+      </div>
+
+      <div class="actions">
+        <button id="btnGuides" class="btn btn-primary">Design guides</button>
+      </div>
+
+      <div id="guJob" class="job hidden"></div>
+      <div id="guResults" class="results hidden"></div>
+    </section>
+
+    <!-- ══════════════════════ ABOUT TAB ══════════════════════ -->
+    <section id="panel-about" class="panel">
+      <h1>About</h1>
+      <div class="card prose">
+        <p><strong>TERRA</strong> clusters transposable-element (TE) families and designs
+        expression-weighted CRISPR guides against them. This page is a thin UI over the
+        project's existing analysis pipeline.</p>
+        <h3>How it works</h3>
+        <ul>
+          <li><strong>Cluster</strong> — <code>te_clustering.clustering_analysis()</code>:
+          k-mer counts → TruncatedSVD → UMAP / t-SNE → HDBSCAN.</li>
+          <li><strong>Family + assembly</strong> — <code>te_prep.py</code> pulls loci from
+          RepeatMasker / Dfam and sequences from UCSC.</li>
+          <li><strong>Guides</strong> — <code>run_grna_analysis.py</code>: PAM-aware candidate
+          generation, on-target scoring, and greedy expression-weighted set-cover.</li>
+        </ul>
+        <h3>Architecture</h3>
+        <p>GitHub Pages serves this static page; a separate Python API (<code>webapp/api</code>)
+        runs the real pipeline. Set its URL with the ⚙︎ button.</p>
+        <h3>Input formats</h3>
+        <p>Upload a CSV/XLSX and map its columns (a <em>Sequence</em> column is required;
+        <em>Name</em>, <em>Start</em>, <em>Stop</em>, <em>Strand</em> and one or more
+        <em>expression</em> columns are optional and identified after upload), or enter a
+        family name + assembly to fetch sequences automatically.</p>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="foot">
+    <div class="wrap">TERRA · static UI on GitHub Pages + Python pipeline API</div>
+  </footer>
+
+  <script src="js/config.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
