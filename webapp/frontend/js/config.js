@@ -4,12 +4,17 @@
   const KEY = "terra_api_url";
 
   function defaultBase() {
-    // If served from the API host itself (local dev), use same origin.
+    // Local dev: the API runs on :8000 alongside the static server.
     const h = location.hostname;
     if (h === "localhost" || h === "127.0.0.1") {
       return location.port === "8000" ? location.origin : "http://localhost:8000";
     }
-    return ""; // on GitHub Pages there is no default — the user must set it.
+    // Deployed: default to the current origin. When the frontend is bundled
+    // with the API (Cloud Run / HF Docker Space) this is exactly right and the
+    // app "just works" with no configuration. If the frontend is hosted apart
+    // from the API (e.g. GitHub Pages), same-origin /api simply reports offline
+    // and the ⚙︎ settings panel still lets the user point at the real backend.
+    return location.origin;
   }
 
   window.TERRA = {
