@@ -3810,13 +3810,58 @@ exit $EXIT_CODE
 
     # --- Resend (active email provider) ---------------------------------------
     # The cluster sends completion mail via a single HTTPS POST to Resend, which
-    # rides the same proxy your downloads use. The API key is embedded on purpose
-    # (per user request). From-address uses the verified anmol-dash.com domain, so
-    # notifications can be delivered to ANY recipient (not just the Resend account
-    # email). If you ever switch domains, verify it at resend.com/domains and set
-    # _RESEND_FROM to an address on it.
-    _RESEND_API_KEY = "re_VNAgkap7_KFTasPNHnQeMu3QuED4iDDtW"
-    _RESEND_FROM    = "GAMECA <no-reply@anmol-dash.com>"
+    # rides the same proxy your downloads use. From-address uses the verified
+    # anmol-dash.com domain, so notifications can be delivered to ANY recipient.
+    # If you switch domains, verify it at resend.com/domains and set _RESEND_FROM.
+    #
+    # The API key is NEVER stored in this file. This repository is public, and an
+    # embedded key is scraped and abused within minutes of a push. Resolution
+    # order is env var -> local state file -> 0600 key file; see _resend_api_key.
+    _RESEND_FROM = "GAMECA <no-reply@anmol-dash.com>"
+    _RESEND_KEY_STATE_KEY = "resend_api_key"
+    _RESEND_KEY_FILE = Path.home() / ".gameca" / "resend_key"
+    _REMOTE_KEY_FILE = "~/.gameca/resend_key"
+
+    def _resend_api_key(self) -> str:
+        """Resolve the Resend API key from outside version control.
+
+        Order: GAMECA_RESEND_API_KEY env var, then ~/.hpc_te_state.json, then
+        ~/.gameca/resend_key. Returns "" if unconfigured (email becomes a no-op).
+        """
+        key = os.environ.get("GAMECA_RESEND_API_KEY", "").strip()
+        if key:
+            return key
+        key = str(self._state.get(self._RESEND_KEY_STATE_KEY, "")).strip()
+        if key:
+            return key
+        try:
+            if self._RESEND_KEY_FILE.exists():
+                return self._RESEND_KEY_FILE.read_text(errors="ignore").strip()
+        except OSError:
+            pass
+        return ""
+
+    def _provision_remote_resend_key(self) -> bool:
+        """Copy the API key to the cluster as a 0600 file, once per session.
+
+        Written via a heredoc on stdin rather than as a command argument: argv is
+        visible to every user on a shared cluster through `ps` and scheduler job
+        records, so the key must never appear on a command line.
+        """
+        if getattr(self, "_resend_key_provisioned", False):
+            return True
+        key = self._resend_api_key()
+        if not key:
+            return False
+        cmd = (
+            "mkdir -p ~/.gameca && chmod 700 ~/.gameca && "
+            f"umask 077 && cat > {self._REMOTE_KEY_FILE} <<'GAMECA_KEY_EOF'\n"
+            f"{key}\nGAMECA_KEY_EOF\n"
+            f"chmod 600 {self._REMOTE_KEY_FILE}"
+        )
+        _, _, code = self.run_command(cmd)
+        self._resend_key_provisioned = (code == 0)
+        return self._resend_key_provisioned
 
     # "gmail.send" lets the cluster send on your behalf; "userinfo.email" lets us
     # record which address authorized (used as the From: header).
@@ -4017,10 +4062,13 @@ exit $EXIT_CODE
         (GAMECA_MAIL_TO / GAMECA_MAIL_SUBJECT / GAMECA_MAIL_BODY) so the same
         script serves both static tests and the pipeline's dynamic status mail.
         """
-        key    = self._RESEND_API_KEY.strip()
         sender = self._RESEND_FROM.strip()
-        if not key:
+        if not self._resend_api_key():
             return ""
+        # Provision the credential out-of-band as a 0600 file; the generated
+        # script reads it at run time so the key is never embedded in source,
+        # in the job script, or in argv.
+        self._provision_remote_resend_key()
         rp = repr(result_path) if result_path else "None"
         # NOTE: subject/body/recipient come from the environment at run time.
         return f'''import os, json, urllib.request, urllib.error
@@ -4066,7 +4114,19 @@ _proxy = _detect_proxy()
 _handler = urllib.request.ProxyHandler({{"http": _proxy, "https": _proxy}}) if _proxy else urllib.request.ProxyHandler({{}})
 _opener = urllib.request.build_opener(_handler)
 
-_API_KEY = {key!r}
+def _load_key():
+    k = os.environ.get("GAMECA_RESEND_API_KEY", "").strip()
+    if k:
+        return k
+    p = Path.home() / ".gameca" / "resend_key"
+    try:
+        if p.exists():
+            return p.read_text(errors="ignore").strip()
+    except OSError:
+        pass
+    return ""
+
+_API_KEY = _load_key()
 _FROM    = {sender!r}
 _TO      = os.environ.get("GAMECA_MAIL_TO", "")
 _SUBJECT = os.environ.get("GAMECA_MAIL_SUBJECT", "GAMECA notification")
@@ -4075,6 +4135,8 @@ _BODY    = os.environ.get("GAMECA_MAIL_BODY", "")
 def _send():
     if not _TO:
         raise RuntimeError("GAMECA_MAIL_TO is empty")
+    if not _API_KEY:
+        raise RuntimeError("no Resend key at ~/.gameca/resend_key or GAMECA_RESEND_API_KEY")
     payload = json.dumps({{
         "from": _FROM, "to": [_TO], "subject": _SUBJECT, "text": _BODY,
     }}).encode("utf-8")
@@ -4560,8 +4622,9 @@ if _rp:
             return
 
         # Step 1 — confirm Resend is configured (API key is embedded in the app).
-        if not self._RESEND_API_KEY.strip():
-            print("\n  No Resend API key set (_RESEND_API_KEY in hpc_client.py). Aborting.")
+        if not self._resend_api_key():
+            print("\n  No Resend API key found. Set GAMECA_RESEND_API_KEY, or run")
+            print("  `python hpc_client.py --set-resend-key` to store it locally. Aborting.")
             return
         print(f"  Sending via Resend, From: {self._RESEND_FROM}")
         print("  (anmol-dash.com is verified, so delivery to any recipient is allowed.)")
@@ -4815,6 +4878,10 @@ Examples:
         help="Show email (Resend) notification status, then exit",
     )
     parser.add_argument(
+        "--set-resend-key", action="store_true",
+        help="Store the Resend API key locally (prompted, not echoed), then exit",
+    )
+    parser.add_argument(
         "--scheduler", choices=["lsf", "slurm"],
         help="Force scheduler type (lsf or slurm). Auto-detected from PATH if omitted.",
     )
@@ -4827,15 +4894,32 @@ Examples:
 
     client = HPCClient()
 
+    if args.set_resend_key:
+        import getpass
+        key = getpass.getpass("\n  Resend API key (input hidden): ").strip()
+        if not key:
+            print("  No key entered — nothing stored.")
+            sys.exit(1)
+        client._RESEND_KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(client._RESEND_KEY_FILE.parent, 0o700)
+        # Create with 0600 before writing so the secret is never briefly world-readable.
+        fd = os.open(client._RESEND_KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(key + "\n")
+        print(f"  Stored in {client._RESEND_KEY_FILE} (mode 0600).")
+        print("  It will be copied to the cluster as ~/.gameca/resend_key on next use.")
+        sys.exit(0)
+
     if args.setup_email:
-        if client._RESEND_API_KEY.strip():
+        if client._resend_api_key():
             print("\n  Email notifications use Resend (HTTPS) — no setup required.")
             print(f"  From: {client._RESEND_FROM}")
             print("  Set NOTIFY_EMAIL to your recipient, then use menu option to send a")
             print("  test once connected. Sender domain anmol-dash.com is verified, so any")
             print("  recipient address is allowed.")
         else:
-            print("\n  No Resend API key configured (_RESEND_API_KEY in hpc_client.py).")
+            print("\n  No Resend API key configured. Set GAMECA_RESEND_API_KEY, or run")
+            print("  `python hpc_client.py --set-resend-key` to store it locally.")
         sys.exit(0)
 
     state = client._state

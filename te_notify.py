@@ -12,8 +12,29 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-_API_KEY = "re_VNAgkap7_KFTasPNHnQeMu3QuED4iDDtW"
-_FROM    = "GAMECA <no-reply@anmol-dash.com>"
+_FROM = "GAMECA <no-reply@anmol-dash.com>"
+
+# Where the cluster-side credential lives. hpc_client provisions this file over
+# SSH with mode 0600; it is never committed and never passed on a command line
+# (argv is world-readable via `ps` on a shared cluster).
+_KEY_FILE = Path.home() / ".gameca" / "resend_key"
+
+
+def _load_api_key() -> str:
+    """Resolve the Resend API key at call time: env var, then the 0600 key file.
+
+    Returns "" when nothing is configured, which makes email a no-op rather
+    than an error.
+    """
+    key = os.environ.get("GAMECA_RESEND_API_KEY", "").strip()
+    if key:
+        return key
+    try:
+        if _KEY_FILE.exists():
+            return _KEY_FILE.read_text(errors="ignore").strip()
+    except OSError:
+        pass
+    return ""
 
 
 def _detect_proxy() -> str | None:
@@ -70,7 +91,8 @@ def send_completion_email(
 
     No-op (with a printed warning) if `to` is empty or the API key is missing.
     """
-    if not to or not _API_KEY:
+    api_key = _load_api_key()
+    if not to or not api_key:
         return
 
     subject = f"GAMECA complete: {script_name}"
@@ -103,7 +125,7 @@ def send_completion_email(
         data=payload,
         method="POST",
         headers={
-            "Authorization": "Bearer " + _API_KEY,
+            "Authorization": "Bearer " + api_key,
             "Content-Type": "application/json",
             "User-Agent": (
                 "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "

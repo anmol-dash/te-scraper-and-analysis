@@ -1,3 +1,11 @@
+# ── Secrets (never commit; this repo is public) ──────────────────────────
+.env
+.env.*
+*.key
+*_secret*
+.gameca/
+resend_key
+
 # ── Python ───────────────────────────────────────────────────────────────
 __pycache__/
 .DS_Store
