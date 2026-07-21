@@ -2,14 +2,34 @@
 
 GAMECA is a modular transposable-element (TE) analysis pipeline — prepare → cluster → align → motif → GO → expression → primers — with integrated **LSF** and **Slurm** HPC support. This repository ships the Python tooling plus a **Tauri** desktop shell that wraps the workflow in a native UI and communicates with a bundled Python sidecar over newline-delimited JSON (NDJSON) IPC.
 
-Current version: **v0.4.42**
+Current version: **v0.4.44**
 
 ## Download
 
 Installers are published on GitHub Releases:
 
 - **Latest release:** https://github.com/anmol-dash/te-scraper-and-analysis/releases
-- Pick the `.dmg` (macOS) artifact matching your architecture (`aarch64` for Apple Silicon, `x86_64` for Intel).
+- macOS: `GAMECA_<version>_universal.dmg` — a single universal build covering both Apple Silicon and Intel.
+- Windows: `GAMECA_<version>_x64-setup.exe`.
+
+### macOS: "Apple could not verify GAMECA is free of malware"
+
+Expected on first launch. The installers are unsigned — the release pipeline has no Apple
+Developer certificate — so macOS quarantines anything downloaded through a browser. The app
+is fine; Gatekeeper just has no signature to check. To open it:
+
+1. Drag **GAMECA** from the `.dmg` into Applications.
+2. **Right-click** (or Control-click) GAMECA in Applications and choose **Open**.
+3. Click **Open** in the dialog.
+
+Only needed once — macOS remembers the exception. Double-clicking without this first step will
+keep showing the warning with no way past it.
+
+Alternatively, download with the GitHub CLI, which doesn't set the quarantine flag at all:
+
+```bash
+gh release download --repo anmol-dash/te-scraper-and-analysis --pattern "*.dmg"
+```
 
 ## Features
 
@@ -27,7 +47,7 @@ Installers are published on GitHub Releases:
 
 ## Quick start
 
-1. Download and install `GAMECA_<version>_aarch64.dmg` from Releases.
+1. Download and install `GAMECA_<version>_universal.dmg` from Releases (see [Download](#download) if macOS blocks it).
 2. Launch GAMECA — first launch installs Python dependencies automatically (~2–3 min).
 3. Connect to your HPC cluster (SSH credentials) or run locally with **Local Pipeline**.
 4. Choose a pipeline step from the sidebar and hit **Run on Cluster**.
