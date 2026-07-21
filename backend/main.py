@@ -52,6 +52,13 @@ _SCRIPTS_DIR       = _GAMECA_DIR / "scripts"
 # Pipeline sources use PEP 604 unions (`str | None`) evaluated at import time,
 # so anything below 3.10 dies on `import hpc_client`. pyproject asks for 3.11.
 _MIN_PY = (3, 11)
+# requirements.txt pins numpy<2.0, which has no wheels above 3.12 and will not
+# build from source there. Prefer an interpreter inside [_MIN_PY, _MAX_PY];
+# newer is only used as a last resort.
+_MAX_PY = (3, 12)
+# Without these the pipeline cannot run at all, so their absence is a hard
+# setup failure even when other packages install cleanly.
+_CORE_PACKAGES = ("paramiko", "numpy", "pandas")
 _SETUP_DONE_SENTINEL = _GAMECA_DIR / ".setup_done"
 _LAST_COMMIT_FILE  = _GAMECA_DIR / "last_commit"
 _CONFIG_FILE       = _GAMECA_DIR / "config.json"
@@ -130,7 +137,10 @@ def _find_python() -> tuple[str | None, list[str]]:
     Returns (interpreter, rejected) where `rejected` describes what was too old,
     so the setup panel can say *why* nothing suitable was found.
     """
-    names = [f"python3.{m}" for m in range(20, _MIN_PY[1] - 1, -1)] + ["python3", "python"]
+    # Preferred band first (3.12 → 3.11), then anything newer as a fallback.
+    preferred = [f"python3.{m}" for m in range(_MAX_PY[1], _MIN_PY[1] - 1, -1)]
+    newer = [f"python3.{m}" for m in range(20, _MAX_PY[1], -1)]
+    names = preferred + ["python3", "python"] + newer
     prefixes = [
         Path("/opt/homebrew/bin"), Path("/usr/local/bin"), Path("/usr/bin"),
         Path("/Library/Frameworks/Python.framework/Versions"),
@@ -150,6 +160,7 @@ def _find_python() -> tuple[str | None, list[str]]:
 
     rejected: list[str] = []
     seen: set[str] = set()
+    usable: list[tuple[tuple[int, ...], str]] = []
     for exe in candidates:
         if exe in seen or not Path(exe).exists():
             continue
@@ -157,9 +168,18 @@ def _find_python() -> tuple[str | None, list[str]]:
         ver = _python_version(exe)
         if ver is None:
             continue
-        if ver >= _MIN_PY:
-            return exe, rejected
-        rejected.append(f"{exe} ({'.'.join(str(p) for p in ver)})")
+        if ver < _MIN_PY:
+            rejected.append(f"{exe} ({'.'.join(str(p) for p in ver)})")
+            continue
+        usable.append((ver, exe))
+
+    # Highest version inside the supported band wins; only if the band is empty
+    # do we accept something newer, which may fail to build pinned wheels.
+    in_band = [(v, e) for v, e in usable if v <= _MAX_PY]
+    if in_band:
+        return max(in_band)[1], rejected
+    if usable:
+        return min(usable)[1], rejected
     return None, rejected
 
 
@@ -259,15 +279,22 @@ def _run_setup_background() -> None:
             _VENV_PATH / ("Scripts" if sys.platform == "win32" else "bin") / "pip"
         )
 
-        # Upgrade pip and log its output.
-        _setup_log("Upgrading pip…")
+        # Upgrade pip and log its output. setuptools and wheel are seeded
+        # explicitly: 3.12+ venvs no longer ship setuptools, and any dependency
+        # still using the legacy build backend then dies with
+        # "Cannot import 'setuptools.build_meta'", taking the whole install
+        # down — which surfaces later as a missing paramiko.
+        _setup_log("Upgrading pip, setuptools, wheel…")
         pip_up = subprocess.run(
-            [pip, "install", "--upgrade", "pip"],
+            [pip, "install", "--upgrade", "pip", "setuptools", "wheel"],
             capture_output=True, text=True,
         )
         for ln in (pip_up.stdout + pip_up.stderr).splitlines():
             if ln.strip():
                 _setup_log(ln)
+        if pip_up.returncode != 0:
+            _setup_log(f"Build-backend bootstrap failed (exit {pip_up.returncode}); "
+                       "package installs may fail.")
 
         req_lines = [
             ln for ln in req.read_text().splitlines()
@@ -280,35 +307,53 @@ def _run_setup_background() -> None:
         _emit({"type": "setup", "phase": "installing", "fraction": 0.05,
                "message": f"Installing {total} packages…"})
 
-        proc = subprocess.Popen(
-            [pip, "install", "--no-cache-dir", "-r", str(req)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            line = line.rstrip()
-            if not line:
-                continue
-            # Every line goes to the log panel.
-            _setup_log(line)
-            # Progress bar advances on package-level milestones.
-            if any(kw in line for kw in
-                   ("Collecting", "Downloading", "Installing collected",
-                    "Successfully installed")):
-                done += 1
-                frac = min(0.95, 0.05 + 0.90 * done / total)
-                _emit({"type": "setup", "phase": "installing",
-                       "fraction": frac, "message": line})
+        # Install one package at a time. requirements.txt is not satisfiable as a
+        # single resolve (colabfold wants numpy>=2.0.2 while the pins cap it below
+        # 2.0), and `pip install -r` aborts the whole run on that conflict — so a
+        # single unsatisfiable extra used to leave the venv completely empty and
+        # the app reporting a missing paramiko.
+        failed_pkgs: list[str] = []
+        for spec in req_lines:
+            proc = subprocess.Popen(
+                [pip, "install", "--no-cache-dir", spec],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                line = line.rstrip()
+                if line:
+                    _setup_log(line)
+            proc.wait()
 
-        proc.wait()
-        if proc.returncode != 0:
-            _setup_log(f"pip exited with code {proc.returncode}")
+            done += 1
+            frac = min(0.95, 0.05 + 0.90 * done / total)
+            if proc.returncode != 0:
+                failed_pkgs.append(spec)
+                _setup_log(f"Skipped {spec} (pip exit {proc.returncode})")
+            _emit({"type": "setup", "phase": "installing", "fraction": frac,
+                   "message": f"{done}/{total} — {spec}"})
+
+        # Optional extras are allowed to fail; the core set is not.
+        vpy = str(_venv_python())
+        missing_core = [
+            p for p in _CORE_PACKAGES
+            if subprocess.run([vpy, "-c", f"import {p}"],
+                              capture_output=True).returncode != 0
+        ]
+        if missing_core:
+            _setup_log(f"Core packages missing after install: {', '.join(missing_core)}")
             _emit({"type": "setup", "phase": "error",
-                   "message": "Package installation failed — check logs for details."})
+                   "message": f"Setup failed — could not install: {', '.join(missing_core)}. "
+                              "See the log for the pip error."})
             return
+        if failed_pkgs:
+            _setup_log(
+                f"{len(failed_pkgs)} optional package(s) unavailable: "
+                f"{', '.join(failed_pkgs)}. Core environment is usable."
+            )
 
         _SETUP_DONE_SENTINEL.touch()
         _setup_log("Setup complete. Sentinel written.")
