@@ -456,6 +456,20 @@ def _run_update_check() -> None:
     if scripts_str not in sys.path:
         sys.path.insert(0, scripts_str)
 
+    # Only claim this commit once every script actually landed. Recording it
+    # after a partial download leaves a cache that mixes files from two commits
+    # yet reports itself up to date, so the next launch never retries.
+    if failed:
+        _update_log(
+            f"{len(failed)} file(s) failed; keeping last_commit at "
+            f"{stored_sha[:7] or '(none)'} so the next launch retries."
+        )
+        _emit({"type": "update", "phase": "partial",
+               "message": f"Updated {len(updated)} file(s), {len(failed)} failed — "
+                          f"will retry on next launch.",
+               "sha": short_sha, "updated": updated, "failed": failed})
+        return
+
     _LAST_COMMIT_FILE.write_text(latest_sha)
 
     if updated:
