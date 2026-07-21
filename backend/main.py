@@ -592,12 +592,7 @@ def _check_release_update(repo: str) -> None:
 
     try:
         url = f"https://api.github.com/repos/{repo}/releases/latest"
-        req = urllib.request.Request(
-            url,
-            headers={"User-Agent": "GAMECA-updater/1.0",
-                     "Accept": "application/vnd.github.v3+json"},
-        )
-        with urllib.request.urlopen(req, timeout=6) as resp:
+        with _urlopen(url) as resp:
             data = json.loads(resp.read())
     except Exception as exc:
         _update_log(f"Release check failed: {exc}")
