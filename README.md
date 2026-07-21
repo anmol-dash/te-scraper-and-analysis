@@ -2,7 +2,7 @@
 
 GAMECA is a modular transposable-element (TE) analysis pipeline — prepare → cluster → align → motif → GO → expression → primers — with integrated **LSF** and **Slurm** HPC support. This repository ships the Python tooling plus a **Tauri** desktop shell that wraps the workflow in a native UI and communicates with a bundled Python sidecar over newline-delimited JSON (NDJSON) IPC.
 
-Current version: **v0.4.44**
+Current version: **v0.4.43**
 
 ## Download
 
