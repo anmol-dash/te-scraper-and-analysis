@@ -49,6 +49,9 @@ else:
 
 _VENV_PATH         = _GAMECA_DIR / "venv"
 _SCRIPTS_DIR       = _GAMECA_DIR / "scripts"
+# Pipeline sources use PEP 604 unions (`str | None`) evaluated at import time,
+# so anything below 3.10 dies on `import hpc_client`. pyproject asks for 3.11.
+_MIN_PY = (3, 11)
 _SETUP_DONE_SENTINEL = _GAMECA_DIR / ".setup_done"
 _LAST_COMMIT_FILE  = _GAMECA_DIR / "last_commit"
 _CONFIG_FILE       = _GAMECA_DIR / "config.json"
@@ -100,8 +103,88 @@ def _find_requirements() -> Path | None:
     return None
 
 
+def _python_version(exe: str) -> tuple[int, ...] | None:
+    """Version of the interpreter at `exe`, or None if it won't run."""
+    try:
+        r = subprocess.run(
+            [exe, "-c", "import sys; print('%d.%d' % sys.version_info[:2])"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        return tuple(int(p) for p in r.stdout.strip().split("."))
+    except ValueError:
+        return None
+
+
+def _find_python() -> tuple[str | None, list[str]]:
+    """Locate an interpreter that is at least _MIN_PY.
+
+    A GUI-launched app inherits a minimal PATH, so a bare `python3` lookup finds
+    macOS system Python 3.9 and builds a venv the pipeline cannot import. Probe
+    version-qualified names and the usual install prefixes before falling back.
+
+    Returns (interpreter, rejected) where `rejected` describes what was too old,
+    so the setup panel can say *why* nothing suitable was found.
+    """
+    names = [f"python3.{m}" for m in range(20, _MIN_PY[1] - 1, -1)] + ["python3", "python"]
+    prefixes = [
+        Path("/opt/homebrew/bin"), Path("/usr/local/bin"), Path("/usr/bin"),
+        Path("/Library/Frameworks/Python.framework/Versions"),
+    ]
+
+    candidates: list[str] = []
+    for n in names:
+        found = shutil.which(n)
+        if found:
+            candidates.append(found)
+    for prefix in prefixes:
+        if prefix.name == "Versions" and prefix.is_dir():
+            for ver in sorted(prefix.iterdir(), reverse=True):
+                candidates.append(str(ver / "bin" / "python3"))
+        else:
+            candidates.extend(str(prefix / n) for n in names)
+
+    rejected: list[str] = []
+    seen: set[str] = set()
+    for exe in candidates:
+        if exe in seen or not Path(exe).exists():
+            continue
+        seen.add(exe)
+        ver = _python_version(exe)
+        if ver is None:
+            continue
+        if ver >= _MIN_PY:
+            return exe, rejected
+        rejected.append(f"{exe} ({'.'.join(str(p) for p in ver)})")
+    return None, rejected
+
+
+def _venv_python() -> Path:
+    if sys.platform == "win32":
+        return _VENV_PATH / "Scripts" / "python.exe"
+    return _VENV_PATH / "bin" / "python"
+
+
 def _is_setup_done() -> bool:
-    return _SETUP_DONE_SENTINEL.exists() and (_VENV_PATH / "pyvenv.cfg").exists()
+    if not (_SETUP_DONE_SENTINEL.exists() and (_VENV_PATH / "pyvenv.cfg").exists()):
+        return False
+    # A venv built by an older build may sit on 3.9 and fail every pipeline
+    # import. Treat that as unfinished setup so it gets rebuilt rather than
+    # surfacing later as a bogus "paramiko is required".
+    ver = _python_version(str(_venv_python()))
+    if ver is None or ver < _MIN_PY:
+        _setup_log(
+            f"Existing venv is Python {'.'.join(str(p) for p in ver) if ver else 'unusable'}; "
+            f"rebuilding on {'.'.join(str(p) for p in _MIN_PY)}+."
+        )
+        shutil.rmtree(_VENV_PATH, ignore_errors=True)
+        _SETUP_DONE_SENTINEL.unlink(missing_ok=True)
+        return False
+    return True
 
 
 def _setup_log(msg: str) -> None:
@@ -136,12 +219,19 @@ def _run_setup_background() -> None:
             return
         _setup_log(f"Requirements file: {req}")
 
-        py = shutil.which("python3") or shutil.which("python")
+        want = ".".join(str(p) for p in _MIN_PY)
+        py, rejected = _find_python()
         if py is None:
+            for r in rejected:
+                _setup_log(f"Too old, skipped: {r}")
+            detail = (f" Found {rejected[0]}, but {want}+ is required."
+                      if rejected else "")
             _emit({"type": "setup", "phase": "error",
-                   "message": "Python 3 not found on this system. "
-                               "Install Python 3.11+ and relaunch."})
+                   "message": f"No Python {want}+ found on this system.{detail} "
+                              f"Install Python {want}+ and relaunch."})
             return
+        for r in rejected:
+            _setup_log(f"Too old, skipped: {r}")
 
         # Log the Python interpreter that will be used.
         _setup_log(f"Python interpreter: {py}")
