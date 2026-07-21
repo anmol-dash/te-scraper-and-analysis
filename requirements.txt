@@ -1,7 +1,12 @@
 # GAMECA Python dependencies
 
 # Core data processing
-numpy>=1.24,<2.0
+# Ceiling dropped so colabfold (needs numpy>=2.0.2) can resolve. The prebuilt
+# te_fast Cython extension is ABI-bound to numpy 1.x and raises ImportError
+# under 2.x; query.py catches that and falls back to the numpy path, so this
+# costs the speedup, not correctness. Rebuild te_fast via setup_cython.py to
+# restore it.
+numpy>=1.24
 pandas>=2.0,<3.0
 scipy>=1.10,<2.0
 statsmodels>=0.14,<1.0

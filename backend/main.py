@@ -11,6 +11,7 @@ import inspect
 import json
 import logging
 import queue
+import re
 import shutil
 import socket
 import subprocess
@@ -296,10 +297,14 @@ def _run_setup_background() -> None:
             _setup_log(f"Build-backend bootstrap failed (exit {pip_up.returncode}); "
                        "package installs may fail.")
 
-        req_lines = [
-            ln for ln in req.read_text().splitlines()
-            if ln.strip() and not ln.startswith("#")
-        ]
+        # Strip inline comments too: `pip install -r` does this itself, but we
+        # install per-spec, and passing "pkg>=1.0  # why" straight to
+        # `pip install` is a parse error that looks like an unavailable package.
+        req_lines = []
+        for raw in req.read_text().splitlines():
+            spec = re.sub(r"(?:^|\s)#.*$", "", raw).strip()
+            if spec:
+                req_lines.append(spec)
         total = max(1, len(req_lines))
         done = 0
 
