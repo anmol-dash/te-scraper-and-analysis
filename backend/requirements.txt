@@ -1,6 +1,10 @@
 # Build / packaging
 pyinstaller==6.13.0
 
+# Bundled into the frozen app so the self-updater has a CA trust store
+# (fixes CERTIFICATE_VERIFY_FAILED on every GitHub call).
+certifi>=2024.2.2
+
 # --- Paste dependencies from your existing CLI project below ---
 # Tip: paste the output of `pip freeze`, or copy `[project].dependencies`
 # entries from another pyproject/requirements lockfile you're already using.

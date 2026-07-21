@@ -3,12 +3,18 @@
 
 import os
 
+from PyInstaller.utils.hooks import collect_data_files
+
 # Auto list: extend if you add submodules under backend/yourtool/.
 # Kept explicit so a third-party `yourtool` on sys.path cannot replace this package in the bundle.
 _hidden_auto = [
     "yourtool",
     "yourtool.cli",
     "yourtool.__main__",
+    # certifi supplies the CA bundle the self-updater needs; without it the
+    # frozen interpreter has no trust store and every GitHub HTTPS call fails
+    # with CERTIFICATE_VERIFY_FAILED.
+    "certifi",
 ]
 
 hiddenimports: list[str] = [
@@ -16,6 +22,9 @@ hiddenimports: list[str] = [
 ]
 
 hiddenimports = sorted(set(hiddenimports) | set(_hidden_auto))
+
+# Ship certifi's cacert.pem inside the bundle so certifi.where() resolves.
+_certifi_datas = collect_data_files("certifi")
 
 _repo_root = os.path.abspath(os.path.join(SPECPATH, os.pardir))
 _pipeline_datas = [
@@ -70,6 +79,7 @@ _pipeline_datas = [
     ]
     if os.path.exists(os.path.join(_repo_root, name))
 ]
+_pipeline_datas += _certifi_datas
 
 block_cipher = None
 

@@ -10,9 +10,11 @@ os.environ.setdefault("CRYPTOGRAPHY_OPENSSL_NO_LEGACY", "1")
 import inspect
 import json
 import logging
+import hashlib
 import queue
 import re
 import shutil
+import ssl
 import socket
 import subprocess
 import sys
@@ -62,6 +64,7 @@ _MAX_PY = (3, 12)
 _CORE_PACKAGES = ("paramiko", "numpy", "pandas")
 _SETUP_DONE_SENTINEL = _GAMECA_DIR / ".setup_done"
 _LAST_COMMIT_FILE  = _GAMECA_DIR / "last_commit"
+_REQ_HASH_FILE     = _GAMECA_DIR / "requirements.hash"
 _CONFIG_FILE       = _GAMECA_DIR / "config.json"
 _setup_lock   = threading.Lock()
 _setup_running = False
@@ -96,6 +99,11 @@ _UPDATABLE_SCRIPTS = [
 
 
 def _find_requirements() -> Path | None:
+    # The synced copy from repo HEAD wins, so a self-updated requirements.txt
+    # drives the venv rebuild rather than the stale bundled one.
+    synced = _SCRIPTS_DIR / "requirements.txt"
+    if synced.exists():
+        return synced
     if getattr(sys, "frozen", False):
         # PyInstaller bundles requirements.txt into _MEIPASS
         candidate = Path(sys._MEIPASS) / "requirements.txt"  # type: ignore[attr-defined]
@@ -202,10 +210,27 @@ def _is_setup_done() -> bool:
             f"Existing venv is Python {'.'.join(str(p) for p in ver) if ver else 'unusable'}; "
             f"rebuilding on {'.'.join(str(p) for p in _MIN_PY)}+."
         )
-        shutil.rmtree(_VENV_PATH, ignore_errors=True)
-        _SETUP_DONE_SENTINEL.unlink(missing_ok=True)
+        _wipe_venv()
+        return False
+    # A changed requirements.txt (self-updated from repo HEAD) means the venv is
+    # stale even though it exists and is the right Python. Rebuild it. This is
+    # the automatic force-reinstall: the heavy rebuild fires only when the
+    # dependency set actually changed, not on every script push.
+    want = _requirements_hash(_find_requirements())
+    have = _REQ_HASH_FILE.read_text().strip() if _REQ_HASH_FILE.exists() else ""
+    if want and want != have:
+        _setup_log(
+            f"requirements.txt changed ({have[:12] or 'none'} → {want[:12]}); "
+            "rebuilding the environment."
+        )
+        _wipe_venv()
         return False
     return True
+
+
+def _wipe_venv() -> None:
+    shutil.rmtree(_VENV_PATH, ignore_errors=True)
+    _SETUP_DONE_SENTINEL.unlink(missing_ok=True)
 
 
 def _setup_log(msg: str) -> None:
@@ -361,6 +386,9 @@ def _run_setup_background() -> None:
             )
 
         _SETUP_DONE_SENTINEL.touch()
+        # Record which requirements this venv was built from, so the next launch
+        # rebuilds only if the file changed.
+        _REQ_HASH_FILE.write_text(_requirements_hash(req))
         _setup_log("Setup complete. Sentinel written.")
         _emit({"type": "setup", "phase": "done", "fraction": 1.0,
                "message": "Environment ready!"})
@@ -401,6 +429,44 @@ def _read_update_config() -> tuple[str, str]:
     return _DEFAULT_REPO, _DEFAULT_BRANCH
 
 
+def _ssl_context() -> ssl.SSLContext | None:
+    """An SSL context backed by certifi's CA bundle, or None to use the default.
+
+    The frozen binary ships no system trust store, so urllib's default context
+    fails every GitHub handshake with CERTIFICATE_VERIFY_FAILED and the whole
+    self-update path silently gives up. certifi is bundled for exactly this. In
+    a dev run certifi may be absent — fall back to the default context, which
+    finds the OS certs there.
+    """
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return None
+
+
+def _urlopen(url: str, timeout: float = 6.0):
+    """urlopen with a certifi-backed context and the GitHub UA/Accept headers."""
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "GAMECA-updater/1.0",
+                 "Accept": "application/vnd.github.v3+json"},
+    )
+    ctx = _ssl_context()
+    if ctx is not None:
+        return urllib.request.urlopen(req, timeout=timeout, context=ctx)
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
+def _requirements_hash(req: Path | None) -> str:
+    if req is None:
+        return ""
+    try:
+        return hashlib.sha256(req.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
 def _has_internet(timeout: float = 3.0) -> bool:
     try:
         socket.setdefaulttimeout(timeout)
@@ -426,12 +492,7 @@ def _run_update_check() -> None:
     try:
         url = (f"https://api.github.com/repos/{repo}/commits/{branch}"
                f"?per_page=1")
-        req = urllib.request.Request(
-            url,
-            headers={"User-Agent": "GAMECA-updater/1.0",
-                     "Accept": "application/vnd.github.v3+json"},
-        )
-        with urllib.request.urlopen(req, timeout=6) as resp:
+        with _urlopen(url) as resp:
             data = json.loads(resp.read())
         latest_sha: str = data["sha"]
         short_sha = latest_sha[:7]
@@ -460,10 +521,7 @@ def _run_update_check() -> None:
         raw_url = (f"https://raw.githubusercontent.com"
                    f"/{repo}/{latest_sha}/{script}")
         try:
-            req = urllib.request.Request(
-                raw_url, headers={"User-Agent": "GAMECA-updater/1.0"}
-            )
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with _urlopen(raw_url, timeout=10) as resp:
                 content: bytes = resp.read()
             dest = _SCRIPTS_DIR / script
             if not dest.exists() or dest.read_bytes() != content:
@@ -482,24 +540,13 @@ def _run_update_check() -> None:
             failed.append(script)
             _update_log(f"Failed {script}: {exc}")
 
-    # Re-run pip install if requirements changed.
-    if "requirements.txt" in updated and _is_setup_done():
-        _update_log("requirements.txt changed — installing new dependencies…")
-        pip = str(
-            _VENV_PATH / ("Scripts" if sys.platform == "win32" else "bin") / "pip"
-        )
-        proc = subprocess.Popen(
-            [pip, "install", "--no-cache-dir", "-r",
-             str(_SCRIPTS_DIR / "requirements.txt")],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1,
-        )
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            line = line.rstrip()
-            if line:
-                _update_log(line)
-        proc.wait()
+    # A changed requirements.txt is not patched in place here — that path used a
+    # single-shot `pip install -r`, which aborts on the unsatisfiable pins. The
+    # venv is instead rebuilt by _run_setup_background(), whose requirements-hash
+    # gate (see _is_setup_done) fires because update runs before setup at
+    # startup and the freshly-synced file now hashes differently.
+    if "requirements.txt" in updated:
+        _update_log("requirements.txt changed — venv will be rebuilt during setup.")
 
     # Ensure new scripts shadow bundled ones immediately (for this session).
     scripts_str = str(_SCRIPTS_DIR)
@@ -597,8 +644,12 @@ def _startup_sequence() -> None:
         f"  REPO_ROOT={_REPO_ROOT}"
         f"  scripts_dir={_GAMECA_DIR / 'scripts'}"
     )
-    _run_setup_background()
+    # Update first: pull the latest scripts + requirements.txt from repo HEAD so
+    # setup builds the venv from the current dependency set and its hash gate can
+    # fire in this same launch. On first run or offline, the sync is a no-op and
+    # setup falls back to the bundled requirements.
     _run_update_check()
+    _run_setup_background()
     if _has_internet():
         repo, _ = _read_update_config()
         _check_release_update(repo)
