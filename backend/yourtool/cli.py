@@ -656,6 +656,7 @@ def _cmd_download_update(args: argparse.Namespace, cancel_event: Event | None) -
     """Download a release DMG to ~/Downloads with progress, then open it."""
     import urllib.request
     import urllib.error
+    import ssl
 
     url      = args.url
     filename = args.filename.strip() or url.split("?")[0].split("/")[-1] or "GAMECA_update.dmg"
@@ -665,24 +666,41 @@ def _cmd_download_update(args: argparse.Namespace, cancel_event: Event | None) -
 
     print(f"Downloading {filename}…", flush=True)
 
-    total_bytes = 0
-    downloaded  = 0
-
-    def _reporthook(count: int, block: int, total: int) -> None:
-        nonlocal downloaded, total_bytes
-        total_bytes = total
-        downloaded  = min(total, count * block)
-        if total > 0:
-            pct   = int(downloaded * 100 / total)
-            mb_d  = downloaded / 1_048_576
-            mb_t  = total      / 1_048_576
-            print(f"  {mb_d:.0f} / {mb_t:.0f} MB ({pct}%)", flush=True)
-        if cancel_event and cancel_event.is_set():
-            raise InterruptedError("cancelled")
-
+    # The frozen app has no system trust store, so the default SSL context fails
+    # every GitHub HTTPS handshake with CERTIFICATE_VERIFY_FAILED — which is why
+    # the old urlretrieve() download died even though the release *check* (which
+    # uses a certifi context) succeeded. Verify against certifi's bundle here too.
     try:
-        urllib.request.urlretrieve(url, str(dest), _reporthook)
+        import certifi
+        ctx: ssl.SSLContext | None = ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        ctx = None
+
+    req = urllib.request.Request(url, headers={"User-Agent": "GAMECA-updater/1.0"})
+    try:
+        with urllib.request.urlopen(req, context=ctx, timeout=30) as r, open(dest, "wb") as f:
+            total = int(r.headers.get("Content-Length", 0) or 0)
+            downloaded = 0
+            last_pct = -1
+            while True:
+                if cancel_event and cancel_event.is_set():
+                    raise InterruptedError("cancelled")
+                buf = r.read(262144)
+                if not buf:
+                    break
+                f.write(buf)
+                downloaded += len(buf)
+                if total > 0:
+                    pct = int(downloaded * 100 / total)
+                    if pct != last_pct:            # throttle: one line per percent
+                        last_pct = pct
+                        print(f"  {downloaded/1_048_576:.0f} / {total/1_048_576:.0f} MB ({pct}%)",
+                              flush=True)
     except InterruptedError:
+        try:
+            dest.unlink(missing_ok=True)
+        except OSError:
+            pass
         return {"ok": False, "error": "download cancelled", "exit_code": 130}
     except Exception as exc:
         return {"ok": False, "error": str(exc), "exit_code": 1}

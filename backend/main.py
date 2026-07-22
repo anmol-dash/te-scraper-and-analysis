@@ -43,6 +43,18 @@ _REAL_STDOUT: TextIO = sys.__stdout__
 
 _emit_lock = threading.Lock()
 
+# Point OpenSSL at certifi's CA bundle for the whole process. The frozen app ships
+# no system trust store, so any TLS call on the default context (e.g. the updater's
+# download, or a child process) fails CERTIFICATE_VERIFY_FAILED. Explicit calls go
+# through _urlopen with a certifi context; this env is the catch-all for the rest.
+try:
+    import certifi as _certifi
+    _ca = _certifi.where()
+    os.environ.setdefault("SSL_CERT_FILE", _ca)
+    os.environ.setdefault("REQUESTS_CA_BUNDLE", _ca)
+except Exception:
+    pass
+
 # ── Venv setup ─────────────────────────────────────────────────────────────────
 
 if sys.platform == "win32":
