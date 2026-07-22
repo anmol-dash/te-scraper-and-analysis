@@ -9,6 +9,36 @@ mkdir -p "${DEST}"
 
 cd "${BACKEND}"
 PY="${PYTHON:-python3}"
+
+# Install the app's bundle deps (certifi, paramiko + crypto stack). These must be
+# importable at build time for PyInstaller to collect them; certifi previously
+# rode on the runner's ambient install, but paramiko is not ambient.
+"${PY}" -m pip install -r requirements.txt
+
+# universal2: cryptography and cffi install arch-specific (arm64-only on Apple
+# Silicon runners), which would leave the x86_64 slice of the fat sidecar unable
+# to import them. Force their universal2 wheels over the site-packages copies.
+# bcrypt/pynacl already ship universal2, so they need no override.
+if [[ "${PYINSTALLER_TARGET_ARCH:-}" == "universal2" ]]; then
+  SITE="$("${PY}" -c 'import site; print(site.getsitepackages()[0])')"
+  "${PY}" -m pip install --force-reinstall --no-deps --only-binary=:all: --upgrade \
+    --platform macosx_10_12_universal2 --target "${SITE}" \
+    cryptography cffi
+
+  # Gate: the sidecar is onefile, so its embedded .so's can't be lipo-checked
+  # after the build. Assert the crypto extensions are fat *before* PyInstaller
+  # embeds them — an arm64-only crypto lib would crash the x86_64 slice at
+  # `import paramiko`, and that's exactly the failure we're fixing.
+  bad=0
+  while IFS= read -r so; do
+    a="$(lipo -archs "${so}" 2>/dev/null || echo '?')"
+    echo "  bundled: ${a}  $(basename "${so}")"
+    [[ "${a}" == *x86_64* && "${a}" == *arm64* ]] || { echo "error: ${so} is not universal2 (${a})" >&2; bad=1; }
+  done < <(find "${SITE}" -path '*cryptography*_rust*.so' -o -path '*_cffi_backend*.so' \
+                          -o -path '*bcrypt*_bcrypt*.so' -o -path '*nacl*_sodium*.so')
+  [[ "${bad}" -eq 0 ]] || { echo "error: crypto stack is not fully universal2; Intel slice would crash on import." >&2; exit 1; }
+fi
+
 "${PY}" -m PyInstaller --noconfirm pyinstaller.spec
 
 # macOS universal build: PyInstaller (with target_arch=universal2) emits one fat

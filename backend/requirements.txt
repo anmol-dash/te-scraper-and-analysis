@@ -5,6 +5,12 @@ pyinstaller==6.13.0
 # (fixes CERTIFICATE_VERIFY_FAILED on every GitHub call).
 certifi>=2024.2.2
 
+# Bundled into the frozen app because the local SSH client (HPCClient in
+# hpc_client.py) is imported and run in-process by the sidecar — not in the
+# venv. Without this the app dies on connect with "paramiko is required".
+# Pulls cryptography, bcrypt, pynacl, cffi.
+paramiko>=3.4
+
 # --- Paste dependencies from your existing CLI project below ---
 # Tip: paste the output of `pip freeze`, or copy `[project].dependencies`
 # entries from another pyproject/requirements lockfile you're already using.

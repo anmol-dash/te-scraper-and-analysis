@@ -13,6 +13,10 @@ if (-not $triple) {
 New-Item -ItemType Directory -Force -Path $Dest | Out-Null
 Push-Location $Backend
 try {
+  # Install bundle deps (certifi, paramiko + crypto stack) so PyInstaller can
+  # collect them. Windows is single-arch (win_amd64 wheels) — no universal2
+  # handling needed.
+  python -m pip install -r requirements.txt
   python -m PyInstaller --noconfirm pyinstaller.spec
   $exe = Join-Path "dist" "pytool.exe"
   if (Test-Path $exe) {

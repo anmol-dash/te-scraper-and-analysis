@@ -15,6 +15,10 @@ _hidden_auto = [
     # frozen interpreter has no trust store and every GitHub HTTPS call fails
     # with CERTIFICATE_VERIFY_FAILED.
     "certifi",
+    # paramiko is the local SSH client, imported in-process by yourtool.cli
+    # (HPCClient). Its compiled deps (cryptography, bcrypt, nacl, cffi) are
+    # collected by PyInstaller-hooks-contrib.
+    "paramiko",
 ]
 
 hiddenimports: list[str] = [
