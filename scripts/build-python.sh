@@ -15,20 +15,39 @@ PY="${PYTHON:-python3}"
 # rode on the runner's ambient install, but paramiko is not ambient.
 "${PY}" -m pip install -r requirements.txt
 
-# universal2: cryptography and cffi install arch-specific (arm64-only on Apple
-# Silicon runners), which would leave the x86_64 slice of the fat sidecar unable
-# to import them. Force their universal2 wheels over the site-packages copies.
-# bcrypt/pynacl already ship universal2, so they need no override.
+# universal2: paramiko's compiled deps install arch-specific on Apple Silicon
+# runners, which would leave the x86_64 slice of the fat sidecar unable to
+# import them. Make every crypto extension fat before PyInstaller embeds it.
+#   - cryptography still ships a universal2 wheel  -> force it.
+#   - cffi 2.x dropped universal2 wheels           -> lipo a fat _cffi_backend
+#                                                     from the two per-arch wheels.
+#   - bcrypt / pynacl already ship universal2       -> nothing to do.
+# (pynacl imports cffi's _cffi_backend at runtime, so cffi genuinely must be fat.)
 if [[ "${PYINSTALLER_TARGET_ARCH:-}" == "universal2" ]]; then
   SITE="$("${PY}" -c 'import site; print(site.getsitepackages()[0])')"
+
   "${PY}" -m pip install --force-reinstall --no-deps --only-binary=:all: --upgrade \
-    --platform macosx_10_12_universal2 --target "${SITE}" \
-    cryptography cffi
+    --platform macosx_11_0_universal2 --target "${SITE}" cryptography
+
+  # Fat cffi: download both per-arch wheels, lipo their _cffi_backend together,
+  # and overwrite the arch-specific copy pip installed into site-packages.
+  CFFI_TMP="$(mktemp -d)"
+  "${PY}" -m pip download --no-deps --only-binary=:all: --python-version 311 --implementation cp \
+    --platform macosx_11_0_arm64  -d "${CFFI_TMP}/arm64" cffi
+  "${PY}" -m pip download --no-deps --only-binary=:all: --python-version 311 --implementation cp \
+    --platform macosx_10_15_x86_64 -d "${CFFI_TMP}/x86_64" cffi
+  ( cd "${CFFI_TMP}/arm64"  && unzip -oq cffi-*.whl -d ../a )
+  ( cd "${CFFI_TMP}/x86_64" && unzip -oq cffi-*.whl -d ../x )
+  arm_so="$(find "${CFFI_TMP}/a" -name '_cffi_backend*.so' | head -1)"
+  x86_so="$(find "${CFFI_TMP}/x" -name '_cffi_backend*.so' | head -1)"
+  dest_so="${SITE}/$(basename "${arm_so}")"
+  lipo -create "${arm_so}" "${x86_so}" -output "${dest_so}"
+  echo "Built fat cffi: $(lipo -archs "${dest_so}") -> ${dest_so}"
 
   # Gate: the sidecar is onefile, so its embedded .so's can't be lipo-checked
-  # after the build. Assert the crypto extensions are fat *before* PyInstaller
-  # embeds them — an arm64-only crypto lib would crash the x86_64 slice at
-  # `import paramiko`, and that's exactly the failure we're fixing.
+  # after the build. Assert every crypto extension is fat *before* PyInstaller
+  # embeds it — an arm64-only lib crashes the x86_64 slice at `import paramiko`,
+  # exactly the failure this release fixes.
   bad=0
   while IFS= read -r so; do
     a="$(lipo -archs "${so}" 2>/dev/null || echo '?')"
