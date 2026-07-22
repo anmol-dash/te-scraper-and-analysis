@@ -80,9 +80,23 @@ export default function NotificationsModal() {
         </div>
 
         <p className="mt-2 text-xs text-[var(--app-muted)]">
-          Receive an email when any pipeline step completes. Uses Gmail with an
-          App Password — your regular password is never stored.
+          Get an email when a pipeline step finishes. Messages are sent through the{" "}
+          <span className="font-medium text-[var(--app-text)]">Resend</span> email API —
+          nothing to set up here for that. Just enter the recipient address in the{" "}
+          <span className="font-medium text-[var(--app-text)]">Notify email</span> field
+          when you launch a run. The Gmail option below is an optional legacy fallback.
         </p>
+
+        {/* Security warning: the API key is copied to hosts you connect to. */}
+        <div className="mt-3 flex gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-500 dark:text-amber-400">
+          <span aria-hidden className="shrink-0">⚠</span>
+          <span>
+            Connecting to an HPC/SSH host <span className="font-medium">uploads your
+            Resend API key</span> to it (<code>~/.gameca/resend_key</code>, private
+            permissions) so jobs running there can email you. Only connect to hosts you
+            trust with that key.
+          </span>
+        </div>
 
         {/* Setup status badge */}
         <div className={`mt-3 flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium ${

@@ -294,6 +294,13 @@ class HPCClient:
                 print(f"[GAMECA] Container auto-setup skipped ({e}); "
                       "falling back to the venv path.")
 
+            # Provision the Resend API key so in-job emails can send from here.
+            # Never let this block a successful connection.
+            try:
+                self._ensure_resend_key()
+            except Exception as e:
+                print(f"[GAMECA] Resend key provisioning skipped ({e}).")
+
             return True
 
         except paramiko.ssh_exception.AuthenticationException as e:
@@ -787,6 +794,85 @@ fi
             print(f"[GAMECA] singularity build failed (exit {code}); container mode stays off.")
             if err.strip():
                 print(err.strip()[-500:])
+
+    def _local_resend_key(self) -> str:
+        """Resolve the Resend API key on this machine: env var, then the key file.
+
+        Mirrors te_notify._load_api_key so the key uploaded to the remote matches
+        exactly what the local notify path would use.
+        """
+        key = os.environ.get("GAMECA_RESEND_API_KEY", "").strip()
+        if key:
+            return key
+        kf = Path.home() / ".gameca" / "resend_key"
+        try:
+            return kf.read_text(errors="ignore").strip() if kf.exists() else ""
+        except OSError:
+            return ""
+
+    def _write_remote_secret(self, key: str, remote_dir: str) -> bool:
+        """Write `key` to remote_dir/resend_key with 0700 dir / 0600 file perms.
+
+        Prefers SFTP so the secret never lands in the remote process list (argv);
+        falls back to a base64 shell pipe.
+        """
+        remote_key = f"{remote_dir}/resend_key"
+        self.run_command(
+            f"mkdir -p {shlex.quote(remote_dir)} && chmod 700 {shlex.quote(remote_dir)}"
+        )
+        if self.use_sftp and self.sftp:
+            try:
+                self.sftp.putfo(io.BytesIO(key.encode()), remote_key)
+                self.sftp.chmod(remote_key, 0o600)
+                return True
+            except Exception as e:
+                print(f"[GAMECA] SFTP key upload failed ({e}); trying shell fallback.")
+        enc = base64.b64encode(key.encode()).decode()
+        _, _, code = self.run_command(
+            f"umask 077 && printf %s {shlex.quote(enc)} | base64 -d > {shlex.quote(remote_key)} "
+            f"&& chmod 600 {shlex.quote(remote_key)}"
+        )
+        return code == 0
+
+    def _ensure_resend_key(self):
+        """Provision the Resend API key to ~/.gameca/resend_key on the remote host
+        so in-job completion emails can send from compute nodes.
+
+        The key was removed from source (public repo), so it only exists where the
+        user has placed it locally. te_notify.py running inside a job reads
+        Path.home()/.gameca/resend_key on the *remote*; without this upload it finds
+        nothing and email is a silent no-op. Skipped when no local key is configured.
+
+        Writes to BOTH the login home and /tmp: run_command wraps jobs as
+        `HOME=/tmp bash -lc` (so an unmounted NFS home can't break `bash -l`), which
+        makes te_notify's Path.home() resolve to /tmp inside a job — while a job that
+        runs under the real home needs the copy there. Covering both is cheap.
+
+        SECURITY: this writes your Resend API key onto whatever host you connect to.
+        The desktop app surfaces this in the notifications dialog. Never block a
+        successful connection on it.
+        """
+        key = self._local_resend_key()
+        if not key:
+            return  # nothing to provision
+
+        # Real login home from the passwd db (unaffected by the HOME=/tmp wrapper),
+        # plus /tmp for the wrapped-job context. Dedupe.
+        out, _, _ = self.run_command('getent passwd "$(id -un)" | cut -d: -f6')
+        real_home = out.strip() or f"/home/{self.username}"
+        targets = list(dict.fromkeys([f"{real_home}/.gameca", "/tmp/.gameca"]))
+
+        ok_any = False
+        for d in targets:
+            if self._write_remote_secret(key, d):
+                ok_any = True
+        if ok_any:
+            print("[GAMECA] Resend API key provisioned "
+                  f"({', '.join(t + '/resend_key' for t in targets)}); "
+                  "job completion emails enabled.")
+        else:
+            print("[GAMECA] Could not provision Resend key; job completion emails "
+                  "may not send from this host.")
 
     def _upload_sif_if_stale(self, local_path: Path, remote_path: str) -> bool:
         """Upload local_path to remote_path via SFTP, skipping if sizes already match."""
