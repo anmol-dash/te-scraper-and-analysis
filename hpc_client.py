@@ -1069,15 +1069,28 @@ echo "[GAMECA] Python: $(python --version 2>&1)  Pip: $(python -m pip --version 
         unnecessary (and would run outside the image anyway)."""
         if self._container_sif():
             return "# MAFFT provided by gameca.sif (container mode) — no host install needed"
+        # Pin 7.505: bioconda's 7.525 build segfaults in `mafft --addfragments`
+        # (pairlocalalign) on some CPUs, which fails run_phylo_analysis (it refuses
+        # to pseudo-align). Support mamba/micromamba too — a bare host may have a
+        # conda-family manager that isn't named `conda`, and its bin dir may not be
+        # on PATH, so add the resolved base bin dir.
         return '''# Install MAFFT if not available
 if ! command -v mafft >/dev/null 2>&1; then
-    if command -v conda >/dev/null 2>&1; then
-        echo "[$(date +%H:%M:%S)] Installing MAFFT via conda ..."
-        conda install -y -c bioconda mafft 2>/dev/null || echo "  (MAFFT install skipped — conda failed)"
+    _mgr=""
+    for _c in mamba micromamba conda; do command -v "$_c" >/dev/null 2>&1 && { _mgr="$_c"; break; }; done
+    if [ -n "$_mgr" ]; then
+        echo "[$(date +%H:%M:%S)] Installing MAFFT (7.505) via $_mgr ..."
+        "$_mgr" install -y -n base -c bioconda -c conda-forge "mafft=7.505" 2>&1 | tail -3 \
+            || echo "  (MAFFT install via $_mgr failed)"
+        # Ensure the manager's base bin dir is on PATH for this job.
+        for _b in "${MAMBA_ROOT_PREFIX:-$HOME/micromamba}/bin" "${CONDA_PREFIX:-}/bin" "$HOME/miniconda3/bin" "$HOME/anaconda3/bin"; do
+            [ -x "$_b/mafft" ] && case ":$PATH:" in *":$_b:"*) : ;; *) export PATH="$_b:$PATH" ;; esac
+        done
     else
-        echo "  (MAFFT not found and conda is unavailable; alignment may fail if MAFFT is required)"
+        echo "  (MAFFT not found and no conda/mamba/micromamba; phylo alignment will be skipped)"
     fi
 fi
+command -v mafft >/dev/null 2>&1 && echo "[$(date +%H:%M:%S)] MAFFT: $(mafft --version 2>&1 | head -1) at $(command -v mafft)"
 '''
 
     def _nextflow_setup_block(self):
