@@ -220,6 +220,11 @@ def run_mafft(records: list, mafft_cmd: str) -> list:
         res = subprocess.run([exe, "--auto", "--quiet", str(fin)],
                              capture_output=True, text=True)
         if res.returncode != 0:
+            # bioconda 7.525 can segfault in pairlocalalign under --auto too;
+            # --6merpair --retree 2 is a progressive path that avoids it.
+            res = subprocess.run([exe, "--6merpair", "--retree", "2", "--quiet", str(fin)],
+                                 capture_output=True, text=True)
+        if res.returncode != 0:
             raise AlignmentError(
                 f"mafft exited with code {res.returncode}: {res.stderr.strip()[:300]}")
         fout = Path(td) / "out.fa"
@@ -263,10 +268,18 @@ def align_cluster_to_consensus(records: list, mafft_cmd: str):
         ref.write_text(f">SEED\n{seed_seq}\n")
         frags = Path(td) / "frags.fa"
         frags.write_text("".join(f">c{i}\n{s}\n" for i, s in clean))
-        res = subprocess.run(
-            [exe, "--addfragments", str(frags), "--keeplength",
-             "--thread", "-1", "--quiet", str(ref)],
-            capture_output=True, text=True)
+        base = [exe, "--addfragments", str(frags), "--keeplength",
+                "--thread", "-1", "--quiet", str(ref)]
+        res = subprocess.run(base, capture_output=True, text=True)
+        if res.returncode != 0:
+            # Some MAFFT builds (bioconda 7.525) SEGFAULT in pairlocalalign on
+            # --addfragments regardless of --thread. --6merpair uses a different
+            # pairwise path that avoids the crash and still yields a valid
+            # --keeplength alignment (verified against 7.525 on real LTR5_Hs data).
+            res = subprocess.run(
+                [exe, "--addfragments", str(frags), "--keeplength", "--6merpair",
+                 "--thread", "-1", "--quiet", str(ref)],
+                capture_output=True, text=True)
         if res.returncode != 0:
             raise AlignmentError(
                 f"mafft --addfragments failed ({res.returncode}): "

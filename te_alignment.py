@@ -105,6 +105,13 @@ def run_mafft(input_fasta, output_fasta, threads=-1, timeout=14400):
     try:
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True,
                                 timeout=timeout)
+        if result.returncode != 0:
+            # bioconda 7.525 segfaults in pairlocalalign; --6merpair uses a
+            # different pairwise path that avoids the crash (verified vs 7.525).
+            _pp("  MAFFT failed — retrying with --6merpair (segfault-safe path)")
+            cmd = f"mafft --6merpair --retree 2 --thread {threads} {input_fasta} > {output_fasta}"
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+                                    timeout=timeout)
     except subprocess.TimeoutExpired:
         _pp(f"  MAFFT TIMEOUT after {timeout}s for {input_fasta.name} — skipping alignment")
         if output_fasta.exists():
