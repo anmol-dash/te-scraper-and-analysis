@@ -79,6 +79,64 @@ def _check_hpc_environment():
     )
     sys.exit(1)
 
+# ── Auto-containerize ──────────────────────────────────────────────────────────
+def _maybe_reexec_in_container() -> None:
+    """If a gameca.sif is present and we're not already inside it, re-exec this
+    exact invocation inside the container — so the pipeline runs against the
+    image's Python 3.11 + baked deps + mafft with the CURRENT host code
+    (bind-mounted), and the user never has to type `singularity exec`.
+
+    Runs BEFORE the heavy imports below (numpy etc.), so the host side needs only
+    the stdlib. Opt out with GAMECA_NO_CONTAINER=1. Discovery order for the sif:
+    $CONTAINER_SIF, $GAMECA_SIF, ./gameca.sif next to this file, ./gameca.sif in CWD.
+    """
+    if (os.environ.get("GAMECA_IN_CONTAINER") or os.environ.get("SINGULARITY_CONTAINER")
+            or os.environ.get("APPTAINER_CONTAINER") or os.environ.get("GAMECA_NO_CONTAINER")):
+        return
+    if any(a in ("-h", "--help") for a in sys.argv[1:]):
+        return
+    here = Path(__file__).resolve().parent
+    cand = [os.environ.get("CONTAINER_SIF"), os.environ.get("GAMECA_SIF"),
+            str(here / "gameca.sif"), str(Path.cwd() / "gameca.sif")]
+    sif = next((c for c in cand if c and Path(c).is_file()), None)
+    if not sif:
+        return
+    runtime = shutil.which("singularity") or shutil.which("apptainer")
+    if not runtime:
+        return
+    # Bind what the run must see: home, cwd, code dir, sif dir, and the parent of
+    # any absolute path on the command line (input/output/genome).
+    binds = {str(Path.home()), os.getcwd(), str(here), str(Path(sif).resolve().parent)}
+    for a in sys.argv[1:]:
+        if a.startswith("/"):
+            p = Path(a)
+            d = p if p.is_dir() else p.parent
+            if d.is_dir():
+                binds.add(str(d))
+    bind_args = []
+    for b in sorted(binds):
+        bind_args += ["--bind", b]
+    # In-process stages inside the container: a nextflow handoff would nest
+    # singularity and re-hit the broken path, so force the loop path.
+    child = list(sys.argv[1:])
+    for flag in ("--no-nextflow", "--stage11-loop"):
+        if flag not in child:
+            child.append(flag)
+    cmd = [runtime, "exec", *bind_args, sif, "python", str(Path(__file__).resolve()), *child]
+    env = dict(os.environ, GAMECA_IN_CONTAINER="1")
+    print(f"[GAMECA] gameca.sif detected → running inside container via "
+          f"{Path(runtime).name}: {sif}", flush=True)
+    try:
+        rc = subprocess.run(cmd, env=env).returncode
+    except Exception as exc:
+        print(f"[GAMECA] container re-exec failed ({exc}); continuing on host.", flush=True)
+        return
+    sys.exit(rc)
+
+
+if __name__ == "__main__":
+    _maybe_reexec_in_container()
+
 # Fix matplotlib backend before any plotting imports
 os.environ["MPLBACKEND"] = "Agg"
 
