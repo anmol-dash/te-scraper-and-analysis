@@ -18,6 +18,7 @@ Usage:
         [--build mm10] \
         [--max-loci 5000]
 """
+from __future__ import annotations  # PEP 604 unions must eval-safe on 3.9 remotes
 
 import argparse
 import datetime

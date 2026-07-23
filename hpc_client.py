@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations  # PEP 604 unions must eval-safe on 3.9 remotes
 _SCRIPT_BUILD = "20260610-1"  # bump this when changing job script logic
 """
 HPC Client for TE Analysis Pipeline
@@ -1031,9 +1032,28 @@ if [ -f "$REQ_FILE" ]; then
     echo "[GAMECA] Installing requirements (this may take a few minutes on first run) ..."
     PIP_START=$SECONDS
     python -m pip install --upgrade pip setuptools wheel 2>&1 | tail -5 || true
-    python -m pip install --prefer-binary -r "$REQ_FILE" 2>&1 | tail -20 || {{
-        echo "[GAMECA] WARNING: pip install had errors — packages may be partially installed"
-    }}
+    # Install each requirement INDEPENDENTLY. requirements.txt is not satisfiable
+    # as one resolve (colabfold wants numpy>=2.0.2 against the pins), and a single
+    # `pip install -r` is all-or-nothing: it aborts with ResolutionImpossible and
+    # installs NOTHING — which is why `import numpy` failed. A per-package loop
+    # lets the optional colabfold stack fail while numpy/pandas/scipy still land.
+    _failed=""
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        _pkg="${{_line%%#*}}"; _pkg="$(echo $_pkg | xargs)"
+        [ -z "$_pkg" ] && continue
+        if ! python -m pip install --prefer-binary "$_pkg" > /tmp/gameca_pip.$$ 2>&1; then
+            echo "[GAMECA] WARN: could not install '$_pkg' (skipping):"
+            tail -3 /tmp/gameca_pip.$$ | sed 's/^/[GAMECA]     /'
+            _failed="$_failed $_pkg"
+        fi
+    done < "$REQ_FILE"
+    rm -f /tmp/gameca_pip.$$
+    [ -n "$_failed" ] && echo "[GAMECA] Requirements installed (skipped:$_failed )" \
+                      || echo "[GAMECA] Requirements installed."
+    # Guard: the core stack must be importable or the pipeline can't run.
+    if ! python -c "import numpy, pandas, sklearn" 2>/dev/null; then
+        echo "[GAMECA] ERROR: core packages (numpy/pandas/scikit-learn) failed to install."
+    fi
     echo "[GAMECA] pip done in $((SECONDS - PIP_START))s"
 else
     echo "[GAMECA] WARNING: requirements.txt not found at $REQ_FILE"

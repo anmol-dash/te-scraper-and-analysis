@@ -38,6 +38,7 @@ Notes on the molecular clock:
   For LTR families an LTR–LTR estimate would instead divide by 2*rate; expose this
   via --clock-divisor (1 = consensus-based default, 2 = paired-LTR).
 """
+from __future__ import annotations  # PEP 604 unions must eval-safe on 3.9 remotes
 
 import argparse
 import datetime

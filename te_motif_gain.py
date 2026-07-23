@@ -35,6 +35,7 @@ Standalone:
     python te_motif_gain.py --input clustered.csv --reports-dir ./reports \\
         --family LTR5_Hs --assembly hg38
 """
+from __future__ import annotations  # PEP 604 unions must eval-safe on 3.9 remotes
 
 from __future__ import annotations
 
