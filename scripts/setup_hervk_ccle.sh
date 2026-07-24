@@ -32,7 +32,7 @@ MANIFEST=$(cd "$(dirname "$0")" && pwd)/hervk_ccle_manifest.tsv
 bsub_args=( -n "$THREADS" -M "$MEM_MB" -R "rusage[mem=$MEM_MB]" )
 [ -n "$QUEUE" ]      && bsub_args+=( -q "$QUEUE" )
 [ -n "$LSF_SELECT" ] && bsub_args+=( -R "select[$LSF_SELECT]" )
-mkdir -p "$WORK" "$REF" "$CONT" "$WORK/sra"
+mkdir -p "$WORK" "$REF" "$CONT" "$WORK/fastq"
 
 DEPOT=https://depot.galaxyproject.org/singularity
 STAR_SIF=$CONT/star.sif
