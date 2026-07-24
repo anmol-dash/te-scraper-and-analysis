@@ -23,10 +23,9 @@ REF=$WORK/ref
 CONT=$WORK/containers
 THREADS=${THREADS:-12}
 MEM_MB=${MEM_MB:-45000}
-# QUEUE: real queue name from `bqueues` (empty -> LSF default queue).
-# LSF_SELECT: LSF select[] expr to force RHEL9 nodes, e.g. LSF_SELECT="rhel90"
-#             (find the exact token via `lshosts -w`). Empty -> no OS constraint.
-QUEUE=${QUEUE:-}
+# QUEUE: PennHPC/PMACS post-2026-Q3-maintenance default is 'rhel9' (lowercase).
+# LSF_SELECT: optional LSF select[] expr; not needed on PennHPC (rhel9 is a queue).
+QUEUE=${QUEUE:-rhel9}
 LSF_SELECT=${LSF_SELECT:-}
 MANIFEST=$(cd "$(dirname "$0")" && pwd)/hervk_ccle_manifest.tsv
 # assemble bsub resource/queue args once

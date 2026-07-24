@@ -17,8 +17,8 @@ REF=$WORK/ref
 CONT=$WORK/containers
 THREADS=${THREADS:-12}
 MEM_MB=${MEM_MB:-45000}          # STAR needs ~32-40 GB for hg38
-QUEUE=${QUEUE:-}                 # real queue from `bqueues` (empty -> LSF default)
-LSF_SELECT=${LSF_SELECT:-}       # e.g. "rhel90" to force RHEL9 nodes (see `lshosts -w`)
+QUEUE=${QUEUE:-rhel9}            # PennHPC/PMACS default queue post-Q3-2026 (lowercase)
+LSF_SELECT=${LSF_SELECT:-}       # optional select[]; not needed on PennHPC
 
 STAR_SIF=$CONT/star.sif
 TE_SIF=$CONT/tetranscripts.sif
