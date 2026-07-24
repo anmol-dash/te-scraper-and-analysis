@@ -100,13 +100,14 @@ EOF
   echo "  -> watch: bjobs -J star_index ; log: $WORK/star_index.*.log"
 fi
 
-# --- 4. download gzipped FASTQ from EBI ENA (resilient; resumes TLS drops) --
-# PC-3 ~87 GB and PANC-1 ~64 GB gz -- the long step, and ENA drops TLS mid-way.
-# For unattended reliability run the downloader detached instead of inline:
-#   nohup bash scripts/download_fastq_ena.sh > $WORK/download.log 2>&1 &
+# --- 4. submit the ENA FASTQ download as its own LSF job (aria2, parallel) --
+# PC-3 ~87 GB and PANC-1 ~64 GB gz -- long + TLS-drop-prone, so it runs on a
+# compute node via bsub (aria2c -x16, native resume; curl fallback).
 DL=$(cd "$(dirname "$0")" && pwd)/download_fastq_ena.sh
-echo "[setup] downloading FASTQ from ENA (resilient) ..."
+echo "[setup] submitting ENA FASTQ download job ..."
 bash "$DL"
 
-echo; echo "[setup] DONE. When star_index finishes AND all 6 fastq.gz are present, run:"
+echo; echo "[setup] DONE. Two jobs are now running: star_index + ena_dl."
+echo "  watch:  bjobs"
+echo "  when the index is built AND all 6 fastq.gz are present, run:"
 echo "  bash scripts/submit_hervk_ccle_requant.sh"
