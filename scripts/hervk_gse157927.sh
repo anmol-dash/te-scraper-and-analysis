@@ -60,12 +60,19 @@ echo "Done. Wrote: $OUT/ervk_fpkm.tsv"
 # ---------------------------------------------------------------------------
 # OPTIONAL — real HERVK SUBFAMILY expression from RAW reads (heavy; disabled).
 # Requires: sra-tools, a TE-aware quantifier, RepeatMasker hg38 GTF.
-# Only Panc1 is relevant here (no MCF-7/PC3 in this study).
 #
-#   esearch -db sra -query PRJNA663345 | efetch -format runinfo > runinfo.csv
-#   # pick the Panc1 RNA-seq run(s), then:
-#   prefetch <SRR>; fasterq-dump --split-files <SRR>
-#   # STAR --outFilterMultimapNmax 100 --winAnchorMultimapNmax 100 ...
-#   # TEcount --GTF genes.gtf --TE hg38_rmsk_TE.gtf -b Aligned.bam
-#   #   -> then sum HERVK-int / LTR5 / LTR5_Hs rows
+# GSE157927 has ONLY Panc1 (no MCF-7/PC3). For a CONSISTENT MCF-7 + PC-3 +
+# PANC-1 comparison, use the public CCLE RNA-seq study SRP186687 / PRJNA523380
+# instead — accessions in scripts/hervk_ccle_manifest.tsv:
+#
+#   MCF-7   SRR8657780   PC-3  SRR8670734   PANC-1  SRR8670733   (all PAIRED, public)
+#   NOTE: PC-3/PANC-1 runs are ~40x deeper than MCF-7 -> subsample or
+#         depth-normalize before comparing subfamily counts.
+#
+#   while read -r cl smp run rest; do [ "$cl" = cell_line ] && continue
+#     prefetch "$run"; fasterq-dump --split-files "$run"
+#     # STAR --outFilterMultimapNmax 100 --winAnchorMultimapNmax 100 ...
+#     # TEcount --GTF genes.gtf --TE hg38_rmsk_TE.gtf -b Aligned.bam
+#     #   -> sum HERVK-int / LTR5 / LTR5_Hs rows for $cl
+#   done < scripts/hervk_ccle_manifest.tsv
 # ---------------------------------------------------------------------------
