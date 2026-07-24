@@ -28,10 +28,11 @@ MANIFEST=$(cd "$(dirname "$0")" && pwd)/hervk_ccle_manifest.tsv
 mkdir -p "$WORK" "$REF" "$CONT" "$WORK/sra"
 
 DEPOT=https://depot.galaxyproject.org/singularity
-SRA_SIF=$CONT/sra-tools.sif
 STAR_SIF=$CONT/star.sif
 TE_SIF=$CONT/tetranscripts.sif
 sing() { singularity exec -B "$WORK" "$@"; }
+# FASTQ come straight from EBI ENA (deterministic HTTP, gzipped) -- no sra-tools
+# (its 3.4.1 build segfaults on exit here even though the download succeeds).
 
 # --- 1. tool containers (carry their own glibc) ---------------------------
 pull() {  # $1=target sif  $2=depot image name
@@ -40,11 +41,9 @@ pull() {  # $1=target sif  $2=depot image name
   curl -fSL -o "$1" "$DEPOT/$2"
 }
 echo "[setup] pulling tool images ..."
-pull "$SRA_SIF"  "sra-tools:3.4.1--h4304569_1"
 pull "$STAR_SIF" "star:2.7.11b--h5ca1c30_8"
 pull "$TE_SIF"   "tetranscripts:2.2.4--pyh106432d_0"
 echo "[setup] tool check (runtime, inside containers):"
-sing "$SRA_SIF" prefetch --version | head -1
 sing "$STAR_SIF" STAR --version
 sing "$TE_SIF" TEcount --version 2>&1 | head -1
 
@@ -69,16 +68,7 @@ echo "  TE GTF: $(wc -l < hg38_rmsk_TE.gtf) lines; HERVK subfamilies present:"
 awk -F'gene_id "' '{split($2,a,"\"");print a[1]}' hg38_rmsk_TE.gtf \
   | grep -E '^(HERVK.*-int|LTR5|LTR5_Hs|LTR5A|LTR5B)$' | sort | uniq -c
 
-# --- 3. pre-download SRA (.sra) on the login node -------------------------
-echo "[setup] prefetch SRA runs (big network step) ..."
-tail -n +2 "$MANIFEST" | while IFS=$'\t' read -r cl smp run rest; do
-  [ -z "${run:-}" ] && continue
-  if [ -s "$WORK/sra/$run/$run.sra" ]; then echo "  $run present"; continue; fi
-  echo "  prefetch $cl $run"
-  sing "$SRA_SIF" prefetch --max-size u -O "$WORK/sra" "$run"
-done
-
-# --- 4. submit STAR index build (~40 GB RAM) ------------------------------
+# --- 3. submit STAR index build first (runs on a node while we download) ---
 IDX=$REF/star_hg38
 if [ -s "$IDX/SAindex" ]; then
   echo "[setup] STAR index already built at $IDX"
@@ -99,6 +89,22 @@ EOF
        bash "$WORK/build_index.sh"
   echo "  -> watch: bjobs -J star_index ; log: $WORK/star_index.*.log"
 fi
+
+# --- 4. download gzipped FASTQ from EBI ENA (resumable) --------------------
+# PC-3 ~87 GB and PANC-1 ~64 GB gz -- this is the long step; -C - resumes.
+echo "[setup] downloading FASTQ from ENA ..."
+tail -n +2 "$MANIFEST" | while IFS=$'\t' read -r cl smp run rest; do
+  [ -z "${run:-}" ] && continue
+  urls=$(curl -s "https://www.ebi.ac.uk/ena/portal/api/filereport?accession=${run}&result=read_run&fields=fastq_ftp&format=tsv" | awk 'NR==2{print $NF}')
+  [ -z "$urls" ] && { echo "  ENA had no FASTQ for $run"; exit 1; }
+  IFS=';' read -r u1 u2 <<< "$urls"
+  for u in "$u1" "$u2"; do
+    f="$WORK/fastq/$(basename "$u")"
+    if [ -s "$f" ]; then echo "  have $(basename "$f")"; continue; fi
+    echo "  get $cl $(basename "$f")"
+    curl -fSL -C - -o "$f" "https://${u}"
+  done
+done
 
 echo; echo "[setup] DONE. When star_index finishes, run:"
 echo "  bash scripts/submit_hervk_ccle_requant.sh"

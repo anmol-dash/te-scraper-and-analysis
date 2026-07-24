@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # submit_hervk_ccle_requant.sh
 # TE-aware HERVK requantification for MCF-7, PC-3, PANC-1 from public CCLE
-# RNA-seq (SRP186687 / PRJNA523380). FULL DEPTH, one sample at a time with
-# immediate cleanup of FASTQ/BAM.
+# RNA-seq (SRP186687 / PRJNA523380). FULL DEPTH, one sample at a time; BAMs
+# are deleted as soon as counted (gz FASTQ kept for re-runs).
 #
-# Prereq: run scripts/setup_hervk_ccle.sh first (login node) and let the
-# star_index job finish. Compiled tools run from Singularity images (the sif
-# host is old-glibc, so bioconda binaries won't run natively). Compute node
-# needs NO internet: .sra were pre-downloaded; fasterq-dump reads them locally.
+# Prereq: run scripts/setup_hervk_ccle.sh first (login node; downloads gz FASTQ
+# from ENA) and let the star_index job finish. Tools run from Singularity images
+# (host is old-glibc, so bioconda binaries won't run natively). Compute node
+# needs NO internet: FASTQ were pre-downloaded; STAR reads the .gz directly.
 #
 # Submit:  bash scripts/submit_hervk_ccle_requant.sh
 set -euo pipefail
@@ -19,7 +19,6 @@ THREADS=${THREADS:-12}
 MEM_MB=${MEM_MB:-45000}          # STAR needs ~32-40 GB for hg38
 QUEUE=${QUEUE:-normal}
 
-SRA_SIF=$CONT/sra-tools.sif
 STAR_SIF=$CONT/star.sif
 TE_SIF=$CONT/tetranscripts.sif
 STAR_INDEX=$REF/star_hg38
@@ -31,7 +30,7 @@ sing() { singularity exec -B "$WORK" "$@"; }
 
 preflight() {
   echo "== preflight =="
-  for s in "$SRA_SIF" "$STAR_SIF" "$TE_SIF"; do
+  for s in "$STAR_SIF" "$TE_SIF"; do
     [ -s "$s" ] && echo "  img OK: $(basename "$s")" || { echo "  img MISSING: $s (run setup)"; exit 1; }
   done
   for f in "$STAR_INDEX/SAindex" "$GENE_GTF" "$TE_GTF"; do
@@ -39,24 +38,21 @@ preflight() {
   done
   tail -n +2 "$MANIFEST" | while IFS=$'\t' read -r cl smp run rest; do
     [ -z "${run:-}" ] && continue
-    [ -s "$WORK/sra/$run/$run.sra" ] && echo "  sra OK: $cl $run" || { echo "  sra MISSING: $cl $run (run setup)"; exit 1; }
+    { [ -s "$WORK/fastq/${run}_1.fastq.gz" ] && [ -s "$WORK/fastq/${run}_2.fastq.gz" ]; } \
+      && echo "  fastq OK: $cl $run" || { echo "  fastq MISSING: $cl $run (run setup)"; exit 1; }
   done
 }
 
 process_one() {
   local cl="$1" run="$2"
-  local fq1="$WORK/fastq/${run}_1.fastq" fq2="$WORK/fastq/${run}_2.fastq"
+  local fq1="$WORK/fastq/${run}_1.fastq.gz" fq2="$WORK/fastq/${run}_2.fastq.gz"
   local pref="$WORK/bam/${cl}." bam
-  echo "[$cl] fasterq-dump (offline, full depth)"
-  sing "$SRA_SIF" fasterq-dump --split-files -e "$THREADS" -t "$WORK/tmp" \
-      -O "$WORK/fastq" "$WORK/sra/$run/$run.sra"
-  echo "[$cl] STAR (multimappers retained)"
+  echo "[$cl] STAR (multimappers retained; reads gz directly)"
   sing "$STAR_SIF" STAR --runThreadN "$THREADS" --genomeDir "$STAR_INDEX" \
-      --readFilesIn "$fq1" "$fq2" \
+      --readFilesIn "$fq1" "$fq2" --readFilesCommand zcat \
       --outSAMtype BAM Unsorted --outFileNamePrefix "$pref" \
       --outFilterMultimapNmax 100 --winAnchorMultimapNmax 100 \
       --outSAMprimaryFlag AllBestScore
-  rm -f "$fq1" "$fq2"
   bam="${pref}Aligned.out.bam"
   echo "[$cl] TEcount"
   sing "$TE_SIF" TEcount --mode multi --format BAM --sortByPos \
