@@ -23,8 +23,16 @@ REF=$WORK/ref
 CONT=$WORK/containers
 THREADS=${THREADS:-12}
 MEM_MB=${MEM_MB:-45000}
-QUEUE=${QUEUE:-normal}
+# QUEUE: real queue name from `bqueues` (empty -> LSF default queue).
+# LSF_SELECT: LSF select[] expr to force RHEL9 nodes, e.g. LSF_SELECT="rhel90"
+#             (find the exact token via `lshosts -w`). Empty -> no OS constraint.
+QUEUE=${QUEUE:-}
+LSF_SELECT=${LSF_SELECT:-}
 MANIFEST=$(cd "$(dirname "$0")" && pwd)/hervk_ccle_manifest.tsv
+# assemble bsub resource/queue args once
+bsub_args=( -n "$THREADS" -M "$MEM_MB" -R "rusage[mem=$MEM_MB]" )
+[ -n "$QUEUE" ]      && bsub_args+=( -q "$QUEUE" )
+[ -n "$LSF_SELECT" ] && bsub_args+=( -R "select[$LSF_SELECT]" )
 mkdir -p "$WORK" "$REF" "$CONT" "$WORK/sra"
 
 DEPOT=https://depot.galaxyproject.org/singularity
@@ -83,8 +91,8 @@ singularity exec -B "$WORK" "$STAR_SIF" STAR --runMode genomeGenerate \
 echo "STAR index done: $IDX"
 EOF
   chmod +x "$WORK/build_index.sh"
-  echo "[setup] submitting STAR index build ..."
-  bsub -q "$QUEUE" -n "$THREADS" -M "$MEM_MB" -R "rusage[mem=$MEM_MB]" \
+  echo "[setup] submitting STAR index build (${bsub_args[*]}) ..."
+  bsub "${bsub_args[@]}" \
        -J star_index -o "$WORK/star_index.%J.log" -e "$WORK/star_index.%J.log" \
        bash "$WORK/build_index.sh"
   echo "  -> watch: bjobs -J star_index ; log: $WORK/star_index.*.log"

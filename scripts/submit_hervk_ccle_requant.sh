@@ -17,7 +17,8 @@ REF=$WORK/ref
 CONT=$WORK/containers
 THREADS=${THREADS:-12}
 MEM_MB=${MEM_MB:-45000}          # STAR needs ~32-40 GB for hg38
-QUEUE=${QUEUE:-normal}
+QUEUE=${QUEUE:-}                 # real queue from `bqueues` (empty -> LSF default)
+LSF_SELECT=${LSF_SELECT:-}       # e.g. "rhel90" to force RHEL9 nodes (see `lshosts -w`)
 
 STAR_SIF=$CONT/star.sif
 TE_SIF=$CONT/tetranscripts.sif
@@ -91,8 +92,10 @@ PY
 
 if [ "${1:-}" = "--run" ]; then main; exit 0; fi
 preflight   # fail fast before submitting
+bsub_args=( -n "$THREADS" -M "$MEM_MB" -R "rusage[mem=$MEM_MB]" )
+[ -n "$QUEUE" ]      && bsub_args+=( -q "$QUEUE" )
+[ -n "$LSF_SELECT" ] && bsub_args+=( -R "select[$LSF_SELECT]" )
 LOG="$WORK/hervk_ccle.%J.log"
-bsub -q "$QUEUE" -n "$THREADS" -M "$MEM_MB" -R "rusage[mem=$MEM_MB]" \
-     -J hervk_ccle -o "$LOG" -e "$LOG" \
+bsub "${bsub_args[@]}" -J hervk_ccle -o "$LOG" -e "$LOG" \
      bash "$(cd "$(dirname "$0")" && pwd)/$(basename "$0")" --run
-echo "submitted; log -> $LOG"
+echo "submitted (${bsub_args[*]}); log -> $LOG"
