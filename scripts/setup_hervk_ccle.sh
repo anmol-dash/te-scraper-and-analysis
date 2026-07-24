@@ -79,6 +79,9 @@ awk -F'gene_id "' '{split($2,a,"\"");print a[1]}' hg38_rmsk_TE.gtf \
 IDX=$REF/star_hg38
 if [ -s "$IDX/SAindex" ]; then
   echo "[setup] STAR index already built at $IDX"
+elif bjobs -J star_index 2>/dev/null | grep -qE '\b(PEND|RUN)\b'; then
+  # don't submit a 2nd build into the same genomeDir (would corrupt it)
+  echo "[setup] STAR index job already PEND/RUN (bjobs -J star_index); not resubmitting"
 else
   mkdir -p "$IDX"
   cat > "$WORK/build_index.sh" <<EOF
