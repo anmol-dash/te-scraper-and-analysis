@@ -100,21 +100,13 @@ EOF
   echo "  -> watch: bjobs -J star_index ; log: $WORK/star_index.*.log"
 fi
 
-# --- 4. download gzipped FASTQ from EBI ENA (resumable) --------------------
-# PC-3 ~87 GB and PANC-1 ~64 GB gz -- this is the long step; -C - resumes.
-echo "[setup] downloading FASTQ from ENA ..."
-tail -n +2 "$MANIFEST" | while IFS=$'\t' read -r cl smp run rest; do
-  [ -z "${run:-}" ] && continue
-  urls=$(curl -s "https://www.ebi.ac.uk/ena/portal/api/filereport?accession=${run}&result=read_run&fields=fastq_ftp&format=tsv" | awk 'NR==2{print $NF}')
-  [ -z "$urls" ] && { echo "  ENA had no FASTQ for $run"; exit 1; }
-  IFS=';' read -r u1 u2 <<< "$urls"
-  for u in "$u1" "$u2"; do
-    f="$WORK/fastq/$(basename "$u")"
-    if [ -s "$f" ]; then echo "  have $(basename "$f")"; continue; fi
-    echo "  get $cl $(basename "$f")"
-    curl -fSL -C - -o "$f" "https://${u}"
-  done
-done
+# --- 4. download gzipped FASTQ from EBI ENA (resilient; resumes TLS drops) --
+# PC-3 ~87 GB and PANC-1 ~64 GB gz -- the long step, and ENA drops TLS mid-way.
+# For unattended reliability run the downloader detached instead of inline:
+#   nohup bash scripts/download_fastq_ena.sh > $WORK/download.log 2>&1 &
+DL=$(cd "$(dirname "$0")" && pwd)/download_fastq_ena.sh
+echo "[setup] downloading FASTQ from ENA (resilient) ..."
+bash "$DL"
 
-echo; echo "[setup] DONE. When star_index finishes, run:"
+echo; echo "[setup] DONE. When star_index finishes AND all 6 fastq.gz are present, run:"
 echo "  bash scripts/submit_hervk_ccle_requant.sh"
