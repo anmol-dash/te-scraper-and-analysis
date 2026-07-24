@@ -5,31 +5,34 @@
 # immediate cleanup of FASTQ/BAM.
 #
 # Prereq: run scripts/setup_hervk_ccle.sh first (login node) and let the
-# star_index job finish. Tools come from the micromamba env it created
-# ($WORK/env) because gameca.sif has none of them. The compute node needs
-# NO internet: .sra files were pre-downloaded by setup; fasterq-dump reads
-# them locally.
+# star_index job finish. Compiled tools run from Singularity images (the sif
+# host is old-glibc, so bioconda binaries won't run natively). Compute node
+# needs NO internet: .sra were pre-downloaded; fasterq-dump reads them locally.
 #
 # Submit:  bash scripts/submit_hervk_ccle_requant.sh
 set -euo pipefail
 
 WORK=${WORK:-$HOME/hervk_ccle}
-ENVBIN=$WORK/env/bin
 REF=$WORK/ref
+CONT=$WORK/containers
 THREADS=${THREADS:-12}
 MEM_MB=${MEM_MB:-45000}          # STAR needs ~32-40 GB for hg38
 QUEUE=${QUEUE:-normal}
 
+SRA_SIF=$CONT/sra-tools.sif
+STAR_SIF=$CONT/star.sif
+TE_SIF=$CONT/tetranscripts.sif
 STAR_INDEX=$REF/star_hg38
 GENE_GTF=$REF/hg38.knownGene.gtf
 TE_GTF=$REF/hg38_rmsk_TE.gtf
 MANIFEST=$(cd "$(dirname "$0")" && pwd)/hervk_ccle_manifest.tsv
 mkdir -p "$WORK/fastq" "$WORK/bam" "$WORK/counts" "$WORK/tmp"
+sing() { singularity exec -B "$WORK" "$@"; }
 
 preflight() {
   echo "== preflight =="
-  for t in fasterq-dump STAR TEcount; do
-    [ -x "$ENVBIN/$t" ] && echo "  tool $t OK" || { echo "  tool $t MISSING (run setup first)"; exit 1; }
+  for s in "$SRA_SIF" "$STAR_SIF" "$TE_SIF"; do
+    [ -s "$s" ] && echo "  img OK: $(basename "$s")" || { echo "  img MISSING: $s (run setup)"; exit 1; }
   done
   for f in "$STAR_INDEX/SAindex" "$GENE_GTF" "$TE_GTF"; do
     [ -e "$f" ] && echo "  ref OK: $f" || { echo "  ref MISSING: $f (run setup / wait for index)"; exit 1; }
@@ -45,10 +48,10 @@ process_one() {
   local fq1="$WORK/fastq/${run}_1.fastq" fq2="$WORK/fastq/${run}_2.fastq"
   local pref="$WORK/bam/${cl}." bam
   echo "[$cl] fasterq-dump (offline, full depth)"
-  "$ENVBIN/fasterq-dump" --split-files -e "$THREADS" -t "$WORK/tmp" \
+  sing "$SRA_SIF" fasterq-dump --split-files -e "$THREADS" -t "$WORK/tmp" \
       -O "$WORK/fastq" "$WORK/sra/$run/$run.sra"
   echo "[$cl] STAR (multimappers retained)"
-  "$ENVBIN/STAR" --runThreadN "$THREADS" --genomeDir "$STAR_INDEX" \
+  sing "$STAR_SIF" STAR --runThreadN "$THREADS" --genomeDir "$STAR_INDEX" \
       --readFilesIn "$fq1" "$fq2" \
       --outSAMtype BAM Unsorted --outFileNamePrefix "$pref" \
       --outFilterMultimapNmax 100 --winAnchorMultimapNmax 100 \
@@ -56,7 +59,7 @@ process_one() {
   rm -f "$fq1" "$fq2"
   bam="${pref}Aligned.out.bam"
   echo "[$cl] TEcount"
-  "$ENVBIN/TEcount" --mode multi --format BAM --sortByPos \
+  sing "$TE_SIF" TEcount --mode multi --format BAM --sortByPos \
       -b "$bam" --GTF "$GENE_GTF" --TE "$TE_GTF" \
       --project "$WORK/counts/${cl}"
   rm -f "$bam"
@@ -71,7 +74,7 @@ main() {
     process_one "$cl" "$run"
   done
   echo; echo "=== HERVK subfamily counts across the three lines ==="
-  "$ENVBIN/python" - "$WORK/counts" <<'PY'
+  sing "$TE_SIF" python - "$WORK/counts" <<'PY'
 import sys, glob, os, csv
 d=sys.argv[1]
 want={"HERVK-int","HERVK9-int","HERVK11-int","LTR5","LTR5_Hs","LTR5A","LTR5B"}
@@ -91,7 +94,7 @@ PY
 }
 
 if [ "${1:-}" = "--run" ]; then main; exit 0; fi
-preflight   # fail fast on the login node before submitting
+preflight   # fail fast before submitting
 LOG="$WORK/hervk_ccle.%J.log"
 bsub -q "$QUEUE" -n "$THREADS" -M "$MEM_MB" -R "rusage[mem=$MEM_MB]" \
      -J hervk_ccle -o "$LOG" -e "$LOG" \
