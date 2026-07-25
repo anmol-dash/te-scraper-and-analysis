@@ -334,6 +334,11 @@ def parse_args(argv=None):
                    help="Skip JASPAR motif / TF binding analysis")
     p.add_argument("--skip-go",       action="store_true",
                    help="Skip GO annotation plots")
+    p.add_argument("--no-motif-fatal", dest="motif_fatal", action="store_false",
+                   default=True,
+                   help="Treat a motif/TFBS/GO stage failure as a warning instead of "
+                        "exiting non-zero. Either way the run always continues through "
+                        "primers and Stage 11, which do not depend on the motif stage.")
     p.add_argument("--jaspar-bed",    type=str, default=None,
                    help="Path to pre-downloaded JASPAR BED")
     p.add_argument("--jaspar-dir",    type=str, default=None,
@@ -648,11 +653,54 @@ def _detect_coord_columns(df, label="table"):
     return chr_col, start_col, stop_col
 
 
+def _normalize_coord_columns(df, label="table"):
+    """Ensure canonical 'chr'/'start'/'stop' columns exist on *df*.
+
+    Input CSVs spell coordinates many ways (Chromosome/chrom/seqnames, end/
+    chromEnd, ...). Stages that need coordinates used to each guess on their
+    own, so a CSV using a non-canonical spelling would satisfy one stage and
+    KeyError in the next. Aliasing once here (non-destructively — the original
+    columns are kept) means every later stage can rely on chr/start/stop.
+
+    Returns df unchanged if the columns can't be detected; callers that
+    genuinely require coordinates raise their own errors later.
+    """
+    try:
+        chr_col, start_col, stop_col = _detect_coord_columns(df, label)
+    except ValueError as exc:
+        _diag(f"  Coordinate columns not detected in {label}: {exc}")
+        return df
+
+    renames = {}
+    for src, canon in ((chr_col, "chr"), (start_col, "start"), (stop_col, "stop")):
+        if src != canon:
+            renames[src] = canon
+    if not renames:
+        return df
+
+    for src, canon in renames.items():
+        df[canon] = df[src]
+    progress_print(f"  Normalized coordinate columns: "
+                   + ", ".join(f"{s} → {d}" for s, d in renames.items()))
+    _diag(f"  Coordinate aliases added: {renames}")
+    return df
+
+
 def _read_expression_assembly(path):
     """Read expression assembly as CSV/TSV/BED-like table."""
     path = Path(path).expanduser()
     if not path.exists():
-        raise FileNotFoundError(f"Expression assembly not found: {path}")
+        # A common mistake is passing an assembly name here (the flag reads like
+        # "--assembly"), which costs a whole job to discover. Say so explicitly.
+        hint = ""
+        if str(path) in {"hg38", "hg19", "mm10", "mm39", "hs1", "chm13", "t2t"}:
+            hint = (f"\n  '{path}' looks like a genome assembly, not a file. "
+                    f"--expression-assembly takes a PATH to a CSV/TSV/BED table of "
+                    f"expression intervals with chr/start/stop columns."
+                    f"\n  Did you mean  --assembly {path}  ?"
+                    f"\n  If this family has no expression data, omit "
+                    f"--expression-assembly entirely.")
+        raise FileNotFoundError(f"Expression assembly not found: {path}{hint}")
 
     sep = "\t" if path.suffix.lower() in {".tsv", ".bed"} else None
     try:
@@ -1512,6 +1560,29 @@ def build_tfbs_analysis(out_dir, family_name):
         return False
 
 
+def _resolve_consensus_fa(out_dir, filename):
+    """Locate a combined consensus FASTA under *out_dir*.
+
+    Stage 7 now writes every alignment/consensus artifact under
+    04_alignments/fasta/. The older split layout (cluster_alignments/,
+    cleaned_consensus/, 05_consensus/) is still searched so Stage 11 can run
+    against result trees produced by earlier versions of the pipeline.
+    Returns the first existing path, else the canonical new location.
+    """
+    out_dir = Path(out_dir)
+    canonical = out_dir / "04_alignments" / "fasta" / filename
+    for cand in (
+        canonical,
+        out_dir / "04_alignments" / filename,
+        out_dir / "cluster_alignments" / filename,
+        out_dir / "cleaned_consensus" / filename,
+        out_dir / "05_consensus" / filename,
+    ):
+        if cand.exists():
+            return cand
+    return canonical
+
+
 def validate_existing_outputs(out_dir, family_name):
     """Print a compact checklist of restartable outputs."""
     out_dir = Path(out_dir)
@@ -1520,7 +1591,8 @@ def validate_existing_outputs(out_dir, family_name):
         ("sequences", out_dir / "01_data" / f"{family_lower}_with_sequences.csv"),
         ("clustered", out_dir / "01_data" / f"{family_lower}_clustered.csv"),
         ("clustering_html", out_dir / "03_clustering" / "clustering_visualization.html"),
-        ("consensus", out_dir / "05_consensus"),
+        ("alignments", out_dir / "04_alignments" / "fasta"),
+        ("alignment_images", out_dir / "04_alignments" / "images"),
         ("motif_overlaps", out_dir / "motif_analysis" / "all_overlaps.tsv"),
         ("motif_enrichment", out_dir / "enrichment_results"),
         ("tfbs", out_dir / "05_tfbs" / "cluster_tf_binding_heatmap.html"),
@@ -2676,8 +2748,8 @@ def _run_standout_analysis(args, out_dir, dirs, family_name, stage_times):
     else:
         _sdir = Path(__file__).resolve().parent
     _py = shutil.which("python3") or shutil.which("python") or sys.executable
-    cons_fa = out_dir / "cluster_alignments" / "all_cluster_consensuses.fa"
-    cleaned_cons_fa = out_dir / "cleaned_consensus" / "all_clusters_cleaned_consensus.fa"
+    cons_fa = _resolve_consensus_fa(out_dir, "all_cluster_consensuses.fa")
+    cleaned_cons_fa = _resolve_consensus_fa(out_dir, "all_clusters_cleaned_consensus.fa")
 
     _assembly_arg = getattr(args, "assembly", "hg38") or "hg38"
 
@@ -2896,8 +2968,11 @@ def _setup_output(args):
         "data":          out_dir / "01_data",
         "stats":         out_dir / "02_statistics",
         "clustering":    out_dir / "03_clustering",
+        # Stage 7 keeps alignments, consensuses and CIAlign output together in
+        # one tree: 04_alignments/{fasta,images,logs}.
         "alignments":    out_dir / "04_alignments",
-        "consensus":     out_dir / "05_consensus",
+        "alignment_fasta":  out_dir / "04_alignments" / "fasta",
+        "alignment_images": out_dir / "04_alignments" / "images",
         "primers":       out_dir / "06_primers",
         "visualizations": out_dir / "07_visualizations",
         "motif":         out_dir / "motif_analysis",
@@ -3112,6 +3187,7 @@ def _stage2_load_data(args, family_name, out_dir):
             _diag(f"  ERROR: No sequences found for family '{family_name}'")
             print(f"ERROR: No sequences found for family '{family_name}'")
             sys.exit(1)
+        df_family = _normalize_coord_columns(df_family, f"{family_name} input")
         progress_print(f"  {len(df_family)} sequences to analyze")
         _diag(f"  Loaded {len(df_family)} rows  columns={list(df_family.columns)}")
         _diag(f"  dtypes: {dict(df_family.dtypes)}")
@@ -3277,6 +3353,11 @@ def _stage5_clustering(args, df_family, dirs, out_dir, family_name):
     print()
 
     _diag(f"  min_cluster_size={_min_cluster_size}  n_seqs={len(df_family)}  min_sequences={args.min_sequences}")
+    # Use the columns the user designated (Stage 4 / _resolve_expr_cols) so the
+    # expression-sized clustering view is only produced when there really is
+    # expression data.
+    _expr_cols, _ = _load_expr_cols(dirs)
+    _diag(f"  expr_cols for clustering viz: {_expr_cols}")
     try:
         if len(df_family) < args.min_sequences:
             progress_print(
@@ -3308,31 +3389,48 @@ def _stage5_clustering(args, df_family, dirs, out_dir, family_name):
                 n_neighbors=args.n_neighbors,
                 min_dist=args.min_dist,
                 min_samples=args.min_samples,
+                expr_cols=_expr_cols,
             )
             _diag(f"  clustering_analysis returned — Cluster col present: {'Cluster' in df_family.columns}")
-
-        df_family.to_csv(dirs["data"] / f"{family_name.lower()}_clustered.csv", index=False)
         n_clusters = len([c for c in df_family["Cluster"].unique() if c >= 0])
         progress_print(f"  {n_clusters} clusters, {(df_family['Cluster']==-1).sum()} noise")
         _diag(f"  n_clusters={n_clusters}  noise={(df_family['Cluster']==-1).sum()}")
+    except Exception as e:
+        _diag(f"  CLUSTERING FAILED: {type(e).__name__}: {e}\n{traceback.format_exc()}")
+        log_error("CLUSTERING", e)
+        # Only collapse to a single cluster if clustering genuinely produced no
+        # labels. Never overwrite labels that already exist — a post-clustering
+        # error used to reset every locus to Cluster 0 here, silently
+        # contradicting the clustering HTML that had already been written.
+        if "Cluster" not in df_family.columns:
+            df_family["Cluster"] = 0
+            n_clusters = 0
+        else:
+            n_clusters = len([c for c in df_family["Cluster"].unique() if c >= 0])
+            progress_print(f"  Keeping the {n_clusters} cluster labels already assigned")
 
+    df_family.to_csv(dirs["data"] / f"{family_name.lower()}_clustered.csv", index=False)
+
+    # Sequence summary is a convenience export, not part of clustering: keep it
+    # in its own try so a coordinate-column problem here can't affect the
+    # cluster labels written above.
+    try:
         _seq_csv = out_dir / f"{family_name.lower()}_sequences.csv"
+        _c, _s, _e2 = _detect_coord_columns(df_family, "clustered table")
         _strand_series = df_family.apply(_row_strand, axis=1)
         _seq_out = pd.DataFrame({
-            "chr":      df_family["chr"].values,
-            "start":    df_family["start"].values,
-            "stop":     df_family["stop"].values,
+            "chr":      df_family[_c].values,
+            "start":    df_family[_s].values,
+            "stop":     df_family[_e2].values,
             "strand":   _strand_series.values,
             "sequence": df_family["Seq"].values,
         })
         _seq_out.to_csv(_seq_csv, index=False)
         progress_print(f"  Sequence summary → {_seq_csv}")
     except Exception as e:
-        _diag(f"  CLUSTERING FAILED: {type(e).__name__}: {e}\n{traceback.format_exc()}")
-        log_error("CLUSTERING", e)
-        df_family["Cluster"] = 0
-        n_clusters = 0
-        df_family.to_csv(dirs["data"] / f"{family_name.lower()}_clustered.csv", index=False)
+        _diag(f"  Sequence summary FAILED (non-fatal): {type(e).__name__}: {e}")
+        progress_print(f"  WARNING: sequence summary not written ({type(e).__name__}: {e})")
+
     _checkpoint(out_dir, "stage5_clustering", f"n_clusters={n_clusters}")
     return df_family, n_clusters
 
@@ -3392,6 +3490,9 @@ def _stage9_motif(args, out_dir, dirs, family_name, clustered_csv, fatal_on_erro
     MOTIF_ANALYSIS_FAILED.txt breadcrumb on error.
     """
     _diag("STAGE 9: Motif / TFBS / GO")
+    # Clear any breadcrumb from a previous attempt so its presence afterwards
+    # always means "this run failed", which is what the caller checks.
+    (dirs["motif"] / "MOTIF_ANALYSIS_FAILED.txt").unlink(missing_ok=True)
     _diag(f"  clustered_csv={clustered_csv}  exists={Path(clustered_csv).exists()}")
     _diag(f"  jaspar_bed={getattr(args,'jaspar_bed',None)}  p_threshold={getattr(args,'p_threshold',None)}")
     try:
@@ -3714,13 +3815,30 @@ def run_pipeline(args):
         else:
             _diag("STAGE 7: Alignment SKIPPED (--skip-alignment)")
 
+    motif_failed = False
     if start_idx <= order.index("motif"):
         if not args.skip_motif:
             t0 = time.time()
             clustered_csv = DIRS["data"] / f"{FAMILY_NAME.lower()}_clustered.csv"
-            _stage9_motif(args, OUT_DIR, DIRS, FAMILY_NAME, clustered_csv, fatal_on_error=True)
+            # Nothing after this point depends on the motif stage: primer design
+            # and every Stage 11 module read the clustered CSV, not the JASPAR
+            # overlaps. Aborting here used to throw away primers AND all of
+            # Stage 11 over an unrelated JASPAR/tabix problem, so the failure is
+            # now deferred — the run finishes everything else and then exits
+            # non-zero at the summary (unless --no-motif-fatal).
+            _stage9_motif(args, OUT_DIR, DIRS, FAMILY_NAME, clustered_csv,
+                          fatal_on_error=False)
+            motif_failed = (DIRS["motif"] / "MOTIF_ANALYSIS_FAILED.txt").exists()
             stage_times["Motif+TFBS+GO"] = time.time() - t0
+            if motif_failed:
+                print("\n[Pipeline] WARNING: the motif/TFBS/GO stage FAILED. "
+                      "Continuing with primers + Stage 11, which do not depend on it.")
+                if getattr(args, "motif_fatal", True):
+                    print("[Pipeline] The run will exit non-zero at the end "
+                          "(pass --no-motif-fatal to treat this as a warning).")
             if stop_after in {"motif", "go"}:
+                if motif_failed and getattr(args, "motif_fatal", True):
+                    sys.exit(1)
                 print("[Pipeline] Stopping after motif/go stage."); return None
         else:
             _diag("STAGE 9: Motif SKIPPED (--skip-motif)")
@@ -3806,11 +3924,13 @@ def run_pipeline(args):
         print(f"  WARNING: could not write stage_times.json: {_e}")
     print(f"  Sequences:       {FAMILY_NAME.lower()}_sequences.csv")
     print(f"  Dashboard:       07_visualizations/index.html")
-    print(f"  CIAlign:         cialign_plots/index.html")
     print(f"  Primers:         06_primers/selected_primers_summary.csv")
     print(f"  Clustering:      03_clustering/clustering_visualization.html")
-    print(f"  Expr clusters:   03_clustering/clustering_visualization_expr.html  (if expression data present)")
-    print(f"  Consensus:       05_consensus/")
+    print(f"  Expr clusters:   03_clustering/clustering_visualization_expr.html  (only if expression data present)")
+    print(f"  Alignments:      04_alignments/index.html")
+    print(f"    FASTAs:        04_alignments/fasta/      (whole family + each cluster, cleaned + not cleaned)")
+    print(f"    CIAlign plots: 04_alignments/images/")
+    print(f"    Summary:       04_alignments/consensus_summary.csv")
     print(f"  Motifs:          motif_analysis/overall_top_motifs.png")
     print(f"  TF binding:      05_tfbs/cluster_tf_binding_heatmap.html")
     print(f"  GO:              go_annotations/")
@@ -3832,6 +3952,14 @@ def run_pipeline(args):
     print(f"  Motif gain bar:  reports/fig_motif_gains_bar.png")
     print(f"  Motif heatmap:   reports/fig_motif_gains_heatmap.png")
     print("=" * 60)
+
+    # Deferred motif failure: every other stage has now run and been reported.
+    if motif_failed:
+        print("\n[Pipeline] Motif/TFBS/GO stage FAILED — see "
+              f"{DIRS['motif'] / 'MOTIF_ANALYSIS_FAILED.txt'} and pipeline_errors.log")
+        print("[Pipeline] All other stages completed; their outputs above are valid.")
+        if getattr(args, "motif_fatal", True):
+            sys.exit(1)
 
     return df_family
 

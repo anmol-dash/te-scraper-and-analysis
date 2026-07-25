@@ -290,9 +290,10 @@ def run_subfamily_analysis(input_csv, reports_dir, family_name,
     if consensus_fasta is None:
         _base = Path(input_csv).parent.parent
         for _c in [
-            _base / "cluster_alignments" / "all_cluster_consensuses.fa",
-            _base / "04_alignments"       / "all_cluster_consensuses.fa",
-            _base / "05_consensus"        / "all_cluster_consensuses.fa",
+            _base / "04_alignments" / "fasta" / "all_cluster_consensuses.fa",
+            _base / "04_alignments"           / "all_cluster_consensuses.fa",
+            _base / "cluster_alignments"      / "all_cluster_consensuses.fa",
+            _base / "05_consensus"            / "all_cluster_consensuses.fa",
         ]:
             if _c.exists():
                 consensus_fasta = str(_c)

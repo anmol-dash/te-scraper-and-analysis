@@ -1282,17 +1282,53 @@ def ensure_tabix_index(bed_gz, scratch=None):
             return str(link)
         return None
 
-    # 4. Plain gzip → decompress, coord-sort, re-bgzip once, then index.
+    # 4. Plain gzip *or* uncompressed BED → decompress if needed, coord-sort,
+    #    bgzip once, then index.
+    #
+    #    The decompressor must be chosen from the file's magic bytes, not its
+    #    name: the bigBed path writes an *uncompressed* JASPAR2022_<build>.te_loci.bed,
+    #    and running `zcat` on that emits nothing while still exiting the
+    #    pipeline cleanly — producing a valid but EMPTY .bed.gz that tabix
+    #    indexes happily. The downstream `tabix -R` then returns 0 rows and the
+    #    motif/enrichment/GO stages all come back empty. Hence both the
+    #    magic-byte dispatch and the row-count guard below.
     tmp_dir.mkdir(parents=True, exist_ok=True)
     cached = tmp_dir / (bed_gz.name if bed_gz.name.endswith(".bed.gz")
                         else bed_gz.stem + ".sorted.bed.gz")
     if _has_index(cached):
         return str(cached)
-    log.info("Re-bgzipping plain-gzip %s (one-time) ...", bed_gz)
+
+    def _is_gzip(p):
+        try:
+            with open(p, "rb") as f:
+                return f.read(2) == b"\x1f\x8b"
+        except Exception:
+            return False
+
+    n_in = None
+    if _is_gzip(bed_gz):
+        # `gzip -dc`, not `zcat`: macOS/BSD zcat only accepts .Z and fails on
+        # .gz, which used to yield the same silent empty-output failure.
+        decomp = ["gzip", "-dc", str(bed_gz)]
+        log.info("Re-bgzipping plain-gzip %s (one-time) ...", bed_gz)
+    else:
+        decomp = ["cat", str(bed_gz)]
+        log.info("bgzipping uncompressed BED %s (one-time) ...", bed_gz)
+        try:
+            with open(bed_gz, "rb") as _f:
+                n_in = sum(1 for _ in _f)
+            log.info("  source has %d lines", n_in)
+        except Exception:
+            pass
+    if n_in == 0:
+        log.error("Cannot index %s — source file is empty (0 lines). "
+                  "The JASPAR fetch upstream produced no records.", bed_gz)
+        return None
+
     t0 = time.time()
     try:
         with open(cached, "wb") as fout:
-            p1 = subprocess.Popen(["zcat", str(bed_gz)], stdout=subprocess.PIPE)
+            p1 = subprocess.Popen(decomp, stdout=subprocess.PIPE)
             p2 = subprocess.Popen(
                 ["sort", "-k1,1", "-k2,2n", "-S", "1G", "-T", str(tmp_dir)],
                 stdin=p1.stdout, stdout=subprocess.PIPE)
@@ -1301,12 +1337,36 @@ def ensure_tabix_index(bed_gz, scratch=None):
                                   stdin=p2.stdout, stdout=fout)
             p2.stdout.close()
             p3.communicate(); p2.wait(); p1.wait()
+            if p1.returncode != 0:
+                raise RuntimeError(
+                    f"{decomp[0]} exit {p1.returncode} on {bed_gz}")
+            if p2.returncode != 0:
+                raise RuntimeError(f"sort exit {p2.returncode}")
             if p3.returncode != 0:
                 raise RuntimeError(f"bgzip pipeline exit {p3.returncode}")
     except Exception as exc:
         log.warning("re-bgzip pipeline failed for %s: %s", bed_gz, exc)
         cached.unlink(missing_ok=True)
         return None
+
+    # Guard: never hand back an indexed-but-empty BED. A silent empty cache is
+    # indistinguishable from "no motifs overlap our loci" much further
+    # downstream, where it surfaces as a bare "tabix returned 0 rows".
+    try:
+        n_out = 0
+        with gzip.open(cached, "rt") as _f:
+            for _ in _f:
+                n_out += 1
+        log.info("  bgzipped %d lines → %s", n_out, cached)
+        if n_out == 0:
+            log.error("bgzip produced an EMPTY %s from %s — refusing to index it. "
+                      "Check that the JASPAR source file actually contains records.",
+                      cached, bed_gz)
+            cached.unlink(missing_ok=True)
+            return None
+    except Exception as exc:
+        log.warning("Could not verify line count of %s: %s", cached, exc)
+
     if _build(cached):
         log.info("Built tabix index (re-bgzipped copy) in %.1fs → %s",
                  time.time() - t0, cached)

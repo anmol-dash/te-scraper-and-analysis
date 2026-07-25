@@ -19,7 +19,7 @@ single-nucleotide changes in the copy do not spuriously trigger "gained".
 
 Inputs (auto-detected from --input path):
   motif_analysis/all_overlaps.tsv   produced by te_motif.py (Stage 8)
-  cluster_alignments/all_cluster_consensuses.fa  (fallback canonical)
+  04_alignments/fasta/all_cluster_consensuses.fa  (fallback canonical)
 
 External:
   Dfam REST API (optional, falls back to cluster consensus if unreachable)
@@ -286,12 +286,14 @@ def run_motif_gain_analysis(
     # Try Dfam first
     canonical = _fetch_dfam_consensus(family_name, build=assembly)
 
-    # Fallback: consensus FASTA from Stage 7 (cluster_alignments/)
+    # Fallback: consensus FASTA from Stage 7 (04_alignments/fasta/)
     if canonical is None:
         if consensus_fasta is not None:
             canonical = _consensus_from_fasta(Path(consensus_fasta))
         if canonical is None:
             for fa in [
+                incsv.parent.parent / "04_alignments" / "fasta" / "all_cluster_consensuses.fa",
+                incsv.parent.parent / "04_alignments" / "all_cluster_consensuses.fa",
                 incsv.parent.parent / "cluster_alignments" / "all_cluster_consensuses.fa",
                 incsv.parent / "all_cluster_consensuses.fa",
             ]:

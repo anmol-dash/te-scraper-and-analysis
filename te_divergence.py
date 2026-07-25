@@ -10,7 +10,7 @@ is the "repeat landscape" plot that is standard in TE methods papers.
 
 Inputs  (all auto-detected from the output directory):
   - clustered CSV produced by te_clustering.py   (needs 'Seq', 'Cluster')
-  - cluster_alignments/all_cluster_consensuses.fa (from te_alignment.py)
+  - 04_alignments/fasta/all_cluster_consensuses.fa (from te_alignment.py)
     → if absent, majority-vote consensus is built on the fly from 'Seq' column
 
 Outputs  (written to <reports_dir>/):
@@ -266,9 +266,10 @@ def run_divergence_analysis(input_csv, reports_dir, family_name,
         # Try standard locations relative to input CSV
         _base = Path(input_csv).parent.parent
         for _candidate in [
-            _base / "cluster_alignments" / "all_cluster_consensuses.fa",
-            _base / "04_alignments"       / "all_cluster_consensuses.fa",
-            _base / "05_consensus"        / "all_cluster_consensuses.fa",
+            _base / "04_alignments" / "fasta" / "all_cluster_consensuses.fa",
+            _base / "04_alignments"           / "all_cluster_consensuses.fa",
+            _base / "cluster_alignments"      / "all_cluster_consensuses.fa",
+            _base / "05_consensus"            / "all_cluster_consensuses.fa",
         ]:
             if _candidate.exists():
                 consensus_fasta = str(_candidate)

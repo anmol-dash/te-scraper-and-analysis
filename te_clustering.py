@@ -63,7 +63,7 @@ def clustering_analysis(df, kmer=10, min_cluster_size=100, out_dir=None,
                         family_name="FAMILY", debug=False,
                         pca_dims=50, n_epochs=200, random_state=42,
                         compute_tsne=True, n_neighbors=30, min_dist=0.0,
-                        min_samples=5):
+                        min_samples=5, expr_cols=None):
     """Run k-mer + SVD + UMAP/PCA/tSNE + HDBSCAN clustering on df['Seq'].
 
     Args:
@@ -80,6 +80,10 @@ def clustering_analysis(df, kmer=10, min_cluster_size=100, out_dir=None,
                           is silently overridden to 1 when a seed is set).
         compute_tsne:     Compute t-SNE embedding/labels. Set False for faster
                           dashboard reclustering when only UMAP is displayed.
+        expr_cols:        Explicit list of expression column names. Only when
+                          this is non-empty is the expression-sized
+                          visualisation produced. Pass None to fall back to
+                          numeric-column autodetection (legacy callers only).
 
     Returns:
         (df_with_cluster_cols, umap_label_array)
@@ -248,7 +252,8 @@ def clustering_analysis(df, kmer=10, min_cluster_size=100, out_dir=None,
     if out_dir is not None:
         _save_clustering_viz(
             df, pca_emb, pca_labels, umap_emb, umap_labels,
-            tsne_emb, tsne_labels, out_dir, family_name, kmer
+            tsne_emb, tsne_labels, out_dir, family_name, kmer,
+            expr_cols=expr_cols,
         )
         coords_path = Path(out_dir) / "clustering_coordinates.csv"
         coord_cols = [c for c in ["chr", "start", "stop", "strand", "Cluster",
@@ -267,13 +272,34 @@ def _write_cluster_summary(df, out_dir: Path) -> None:
     import pandas as _pd
 
     strand_col = next((c for c in ("strand", "Strand") if c in df.columns), None)
+
+    # Inputs without an explicit strand column still carry it in the te_prep
+    # TE_ID ("chr|start|stop|name|div|-"). Without this fallback every cluster
+    # reported n_plus=n_minus=0 / 0.00% for such inputs, which reads as "no
+    # strand data" rather than "not parsed".
+    strands = None
+    if strand_col is not None:
+        strands = df[strand_col].astype(str).str.strip()
+    else:
+        for col in ("TE_ID", "TE_name", "name", "Name", "id", "ID"):
+            if col not in df.columns:
+                continue
+            extracted = (df[col].astype(str).str.strip()
+                         .str.extract(r"(?:^|[|:,\s])([+-])$", expand=False))
+            if extracted.notna().any():
+                strands = extracted
+                _pp(f"    Strand recovered from '{col}' "
+                    f"({int(extracted.notna().sum())}/{len(df)} rows)")
+                break
+
     rows = []
     for cluster_id in sorted(df["Cluster"].unique()):
         sub = df[df["Cluster"] == cluster_id]
         n = len(sub)
-        if strand_col is not None:
-            n_plus  = int((sub[strand_col].astype(str).str.strip() == "+").sum())
-            n_minus = int((sub[strand_col].astype(str).str.strip() == "-").sum())
+        if strands is not None:
+            s = strands.loc[sub.index]
+            n_plus  = int((s == "+").sum())
+            n_minus = int((s == "-").sum())
         else:
             n_plus = n_minus = 0
         rows.append({
@@ -291,7 +317,8 @@ def _write_cluster_summary(df, out_dir: Path) -> None:
 
 
 def _save_clustering_viz(df, pca_emb, pca_lbl, umap_emb, umap_lbl,
-                          tsne_emb, tsne_lbl, out_dir, family_name, kmer):
+                          tsne_emb, tsne_lbl, out_dir, family_name, kmer,
+                          expr_cols=None):
     """Save interactive Plotly clustering visualisation (+ expression-sized variant if available)."""
     try:
         import plotly.graph_objects as go
@@ -300,12 +327,22 @@ def _save_clustering_viz(df, pca_emb, pca_lbl, umap_emb, umap_lbl,
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        # Detect expression columns (numeric, not coordinate/cluster/embedding cols)
-        _excl = {"start", "stop", "Unnamed: 0", "Cluster", "_total_expr",
-                 "pca_x", "pca_y", "umap_x", "umap_y", "tsne_x", "tsne_y"}
-        expr_cols = [c for c in df.select_dtypes(include=[np.number]).columns
-                     if c not in _excl]
+        # Expression columns must be the ones the user actually designated. The
+        # old behaviour — treat every numeric column as expression — sized dots
+        # by RepeatMasker fields (swScore, milliDiv, genoLeft, ...) on runs that
+        # had no expression data at all, producing a meaningless
+        # "clustering_visualization_expr.html".
+        if expr_cols is None:
+            _excl = {"chr", "start", "stop", "Unnamed: 0", "Cluster", "_total_expr",
+                     "pca_x", "pca_y", "umap_x", "umap_y", "tsne_x", "tsne_y"}
+            expr_cols = [c for c in df.select_dtypes(include=[np.number]).columns
+                         if c not in _excl]
+            if expr_cols:
+                _pp(f"    (autodetected expression columns: {expr_cols})")
+        expr_cols = [c for c in (expr_cols or []) if c in df.columns]
         expr_vals = None
+        if not expr_cols:
+            _pp("    No expression columns — skipping expression-sized visualisation")
         if expr_cols:
             raw = df[expr_cols].fillna(0).sum(axis=1).values.astype(float)
             mn, mx = raw.min(), raw.max()

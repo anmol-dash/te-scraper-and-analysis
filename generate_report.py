@@ -56,6 +56,41 @@ def get_img(folder, stem):
         return pdf_to_b64(pdf)
     return None
 
+def _alignment_images_dir(d):
+    """Return the directory holding CIAlign plots.
+
+    Stage 7 writes them to 04_alignments/images/; older result trees used a
+    top-level cialign_plots/.
+    """
+    d = Path(d)
+    new = d / "04_alignments" / "images"
+    if new.is_dir() and any(new.glob("*.png")):
+        return new
+    return d / "cialign_plots"
+
+
+def _cluster_image_stems(img_dir):
+    """Discover per-cluster CIAlign plot stems present in *img_dir*, in order."""
+    img_dir = Path(img_dir)
+    if not img_dir.is_dir():
+        return []
+    stems = set()
+    for p in img_dir.glob("cluster_*_alignment*.png"):
+        name = p.stem
+        cut = name.find("_alignment")
+        if cut > 0:
+            stems.add(name[:cut] + "_alignment")
+
+    def _key(s):
+        tok = s.replace("_alignment", "").replace("cluster_", "")
+        try:
+            return (0, int(tok))
+        except ValueError:
+            return (1, tok)
+
+    return sorted(stems, key=_key)
+
+
 def read_txt(path):
     p = Path(path)
     return p.read_text(errors="replace").strip() if p.exists() else ""
@@ -282,26 +317,35 @@ def sec_overview(d, stats, cl_rows):
 def sec_clustering(d):
     reports_dir = d / "reports"
     imgs = []
-    # Global alignment: input vs cleaned
-    for label, stem in [
-        ("Raw alignment (before CIAlign cleaning)", "global_alignment_input"),
-        ("Cleaned alignment (after CIAlign)", "global_alignment_output"),
-        ("Markup (removed positions highlighted)", "global_alignment_markup"),
+    img_dir = _alignment_images_dir(d)
+
+    # Whole family: not-cleaned vs CIAlign-cleaned. "whole_family_*" is the
+    # current stem; "global_*" is only tried if the new one is absent, so
+    # pre-restructure result trees still render.
+    for label, stem, legacy_stem in [
+        ("Raw alignment (before CIAlign cleaning)",
+         "whole_family_alignment_input",  "global_alignment_input"),
+        ("Cleaned alignment (after CIAlign)",
+         "whole_family_alignment_output", "global_alignment_output"),
+        ("Markup (removed positions highlighted)",
+         "whole_family_alignment_markup", "global_alignment_markup"),
     ]:
-        uri = get_img(d / "cialign_plots", stem)
+        uri = get_img(img_dir, stem) or get_img(img_dir, legacy_stem)
         if uri:
             imgs.append(fig(uri, label))
 
-    # Per-cluster
+    # Per-cluster — discovered from the images actually present rather than a
+    # hardcoded 0/1/2/-1 list, so families with more clusters aren't truncated.
     cluster_imgs = []
-    for stem_prefix in ["cluster_0_alignment", "cluster_1_alignment", "cluster_2_alignment",
-                         "cluster_-1_alignment"]:
-        uri = get_img(d / "cialign_plots", f"{stem_prefix}_output")
-        if uri:
-            label = stem_prefix.replace("_alignment", "").replace("cluster_", "Cluster ")
-            cluster_imgs.append(fig(uri, f"{label} — cleaned alignment"))
+    for stem_prefix in _cluster_image_stems(img_dir):
+        for suffix, what in (("_output", "cleaned alignment"),
+                             ("_input", "alignment, not cleaned")):
+            uri = get_img(img_dir, f"{stem_prefix}{suffix}")
+            if uri:
+                label = stem_prefix.replace("_alignment", "").replace("cluster_", "Cluster ")
+                cluster_imgs.append(fig(uri, f"{label} — {what}"))
 
-    align_stats = read_txt(d / "04_alignments" / "alignment_stats.txt")
+    align_stats = read_txt(Path(d) / "04_alignments" / "alignment_stats.txt")
     pre_block = f"<pre>{align_stats}</pre>" if align_stats else ""
 
     grid_global = f"<div class='fig-grid'>{''.join(imgs)}</div>" if imgs else ""
@@ -408,9 +452,13 @@ def sec_consensus(d):
       "canonical" form of each cluster and are used for LTR structure annotation,
       ORF finding, and primer specificity scoring.</p>"""]
 
-    h, rows = read_csv_rows(d / "05_consensus" / "cluster_consensus_summary.csv")
-    if not rows:
-        h, rows = read_csv_rows(d / "cluster_alignments" / "cluster_consensus_summary.csv")
+    h, rows = read_csv_rows(Path(d) / "04_alignments" / "consensus_summary.csv")
+    for _legacy in ("04_alignments/cluster_consensus_summary.csv",
+                    "05_consensus/cluster_consensus_summary.csv",
+                    "cluster_alignments/cluster_consensus_summary.csv"):
+        if rows:
+            break
+        h, rows = read_csv_rows(Path(d) / _legacy)
     if rows:
         body.append(html_table(h, rows))
     return "".join(body)

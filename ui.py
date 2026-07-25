@@ -218,10 +218,11 @@ def display_results(out_dir: Path):
             ("clustering_coordinates.csv",    "UMAP / PCA / t-SNE coords"),
             ("clustering_visualization.html", "Clustering interactive plot"),
         ]),
-        ("Alignment", [
-            ("cluster_alignments",  "Per-cluster alignment FASTAs"),
-            ("cialign_plots",       "CIAlign plots  (open index.html)"),
-            ("cleaned_consensus",   "CIAlign-cleaned consensus FASTAs"),
+        ("Alignment  (all in 04_alignments/)", [
+            ("04_alignments",         "Alignments + consensus  (open index.html)"),
+            ("04_alignments/fasta",   "All FASTAs: whole family + each cluster, cleaned & not cleaned"),
+            ("04_alignments/images",  "All CIAlign plots"),
+            ("consensus_summary.csv", "Per-group consensus summary"),
         ]),
         ("Primers", [
             ("selected_primers_summary.csv",   "Global primer summary"),
@@ -273,12 +274,18 @@ def display_results(out_dir: Path):
         print(f"  {dim('·')}  No checkpoint file found")
     print()
 
-    cluster_csv = out_dir / "cluster_alignments" / "cluster_consensus_summary.csv"
+    cluster_csv = next(
+        (p for p in (out_dir / "04_alignments" / "consensus_summary.csv",
+                     out_dir / "04_alignments" / "cluster_consensus_summary.csv",
+                     out_dir / "cluster_alignments" / "cluster_consensus_summary.csv")
+         if p.exists()),
+        out_dir / "04_alignments" / "consensus_summary.csv")
     if cluster_csv.exists():
         try:
             import pandas as pd
             df = pd.read_csv(cluster_csv)
-            disp_cols = [c for c in ["cluster", "size", "consensus_length"] if c in df.columns]
+            disp_cols = [c for c in ["group", "cluster", "size", "consensus_length",
+                                     "cleaned_consensus_length"] if c in df.columns]
             print(_divider(f"Clusters  ({len(df)})"))
             for _, row in df[disp_cols].iterrows():
                 parts = [f"{c}: {bold(str(row[c]))}" for c in disp_cols]

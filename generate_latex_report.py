@@ -129,6 +129,40 @@ def get_fig(folder, stem):
         if p.exists(): return p
     return None
 
+def _alignment_images_dir(d):
+    """Return the directory holding CIAlign plots.
+
+    Stage 7 writes them to 04_alignments/images/; older result trees used a
+    top-level cialign_plots/.
+    """
+    d = Path(d)
+    new = d / '04_alignments' / 'images'
+    if new.is_dir() and any(new.glob('*.png')):
+        return new
+    return d / 'cialign_plots'
+
+
+def _cluster_image_stems(img_dir):
+    """Discover per-cluster CIAlign plot stems present in *img_dir*, in order."""
+    img_dir = Path(img_dir)
+    if not img_dir.is_dir():
+        return []
+    stems = set()
+    for p in img_dir.glob('cluster_*_alignment*.png'):
+        cut = p.stem.find('_alignment')
+        if cut > 0:
+            stems.add(p.stem[:cut] + '_alignment')
+
+    def _key(s):
+        tok = s.replace('_alignment', '').replace('cluster_', '')
+        try:
+            return (0, int(tok))
+        except ValueError:
+            return (1, tok)
+
+    return sorted(stems, key=_key)
+
+
 def detect_assembly(d):
     """Infer assembly and organism from data files. Returns (assembly, organism_latex)."""
     for pat in ['01_data/*_clustered.csv', 'alusx1_sequences.csv', '*_sequences.csv']:
@@ -907,16 +941,19 @@ def ch_clustering(d):
         if kv:
             tex += kv_table(list(kv.items()), 'Global alignment statistics.', 'tab:align_stats')
 
-    p_in = get_fig(d / 'cialign_plots', 'global_alignment_input')
-    p_out = get_fig(d / 'cialign_plots', 'global_alignment_output')
-    tex += twofigs(p_in, 'Raw global alignment', 'fig:align_in',
-                   p_out, 'Cleaned global alignment (CIAlign)', 'fig:align_global')
+    _imgs = _alignment_images_dir(d)
+    p_in = (get_fig(_imgs, 'whole_family_alignment_input')
+            or get_fig(_imgs, 'global_alignment_input'))
+    p_out = (get_fig(_imgs, 'whole_family_alignment_output')
+             or get_fig(_imgs, 'global_alignment_output'))
+    tex += twofigs(p_in, 'Whole-family alignment, not cleaned', 'fig:align_in',
+                   p_out, 'Whole-family alignment, CIAlign-cleaned', 'fig:align_global')
 
-    # Per-cluster alignments
+    # Per-cluster alignments — enumerate whatever clusters actually produced
+    # plots instead of assuming -1/0/1/2.
     found_cluster_figs = []
-    for stem_prefix in ['cluster_-1_alignment', 'cluster_0_alignment',
-                         'cluster_1_alignment', 'cluster_2_alignment']:
-        p = get_fig(d / 'cialign_plots', f'{stem_prefix}_output')
+    for stem_prefix in _cluster_image_stems(_imgs):
+        p = get_fig(_imgs, f'{stem_prefix}_output')
         if p:
             label = stem_prefix.replace('_alignment', '').replace('cluster_', 'Cluster ')
             found_cluster_figs.append((p, label))
@@ -943,12 +980,16 @@ def ch_consensus(d):
         'open reading frame (ORF) prediction, and primer specificity scoring. '
         'Table~\\ref{tab:consensus_summary} summarises the length and composition of each cluster consensus.\n\n'
     )
-    h, rows = read_csv(d / '05_consensus' / 'cluster_consensus_summary.csv')
-    if not rows:
-        h, rows = read_csv(d / 'cluster_alignments' / 'cluster_consensus_summary.csv')
+    h, rows = read_csv(d / '04_alignments' / 'consensus_summary.csv')
+    for _legacy in ('04_alignments/cluster_consensus_summary.csv',
+                    '05_consensus/cluster_consensus_summary.csv',
+                    'cluster_alignments/cluster_consensus_summary.csv'):
+        if rows:
+            break
+        h, rows = read_csv(Path(d) / _legacy)
     if rows:
-        keep = ['cluster', 'n_sequences', 'consensus_length', 'avg_gaps_per_col',
-                'cols_majority_gap']
+        keep = ['group', 'cluster', 'n_sequences', 'consensus_length',
+                'cleaned_consensus_length', 'avg_gaps_per_col', 'cols_majority_gap']
         tex += longtable(h, rows, 'Cluster consensus sequence summary.', 'tab:consensus_summary',
                          cols=[c for c in keep if c in h],
                          note='Length: consensus length (bp); avg. gaps/col: mean gap count per '

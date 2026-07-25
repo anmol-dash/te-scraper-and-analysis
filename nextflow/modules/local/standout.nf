@@ -28,8 +28,8 @@ process GAMECA_STANDOUT {
 
     script:
     def clustered = "${results}/01_data/${meta.id.toLowerCase()}_clustered.csv"
-    def cons      = "${results}/cluster_alignments/all_cluster_consensuses.fa"
-    def cleaned   = "${results}/cleaned_consensus/all_clusters_cleaned_consensus.fa"
+    def cons      = "${results}/04_alignments/fasta/all_cluster_consensuses.fa"
+    def cleaned   = "${results}/04_alignments/fasta/all_clusters_cleaned_consensus.fa"
     """
     set -euo pipefail
     mkdir -p ${mod.name}_reports

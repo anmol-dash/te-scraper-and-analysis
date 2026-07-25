@@ -3,7 +3,7 @@
 // GAMECA_MERGE folds all four branches' new files back into one family folder.
 //
 // Input:  tuple val(meta), path(results)
-// Output: tuple val(meta), path(results)   (now containing cluster_alignments/, cleaned_consensus/, cialign_plots/)
+// Output: tuple val(meta), path(results)   (now containing 04_alignments/{fasta,images,logs})
 
 process GAMECA_ALIGNMENT {
     tag   { meta.id }
@@ -36,8 +36,8 @@ process GAMECA_ALIGNMENT {
 
     stub:
     """
-    mkdir -p ${results}/cluster_alignments
-    echo '>consensus' > ${results}/cluster_alignments/all_cluster_consensuses.fa
+    mkdir -p ${results}/04_alignments/fasta
+    echo '>consensus' > ${results}/04_alignments/fasta/all_cluster_consensuses.fa
     echo '"${task.process}": {stub: true}' > versions.yml
     """
 }

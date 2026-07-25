@@ -318,68 +318,153 @@ def run_cialign(input_fasta, output_stem, label="", timeout=CIALIGN_TIMEOUT,
     )
 
 
-def _cialign_index_html(cialign_dir, family_name, df):
-    """Generate an index.html for CIAlign plots."""
-    cialign_dir = Path(cialign_dir)
-    clusters = sorted(set(
-        int(f.name.split("_")[1])
-        for f in cialign_dir.glob("cluster_*_alignment*.png")
-    ))
+def _alignment_index_html(align_dir, family_name, groups):
+    """Write 04_alignments/index.html — one section per group.
 
-    def _plot_cards(pattern):
-        # Build the HTML "cards" embedding each CIAlign figure matching `pattern`.
+    *groups* is the ordered list of group names ("whole_family", "cluster_0",
+    ...). Each section shows the CIAlign plots for that group side by side and
+    links its raw + cleaned FASTAs, so the uncleaned and CIAlign-cleaned
+    versions of the same alignment are always presented together.
+    """
+    align_dir = Path(align_dir)
+    images_dir = align_dir / "images"
+    fasta_dir = align_dir / "fasta"
+
+    def _fasta_links(group):
+        rows = [
+            ("Sequences (unaligned)",        f"{group}_seqs.fa"),
+            ("Alignment — not cleaned",      f"{group}_aligned.fa"),
+            ("Alignment — CIAlign cleaned",  f"{group}_aligned_cleaned.fa"),
+            ("Consensus — not cleaned",      f"{group}_consensus.fa"),
+            ("Consensus — CIAlign cleaned",  f"{group}_consensus_cleaned.fa"),
+        ]
+        out = ""
+        for label, fn in rows:
+            if (fasta_dir / fn).exists():
+                kb = (fasta_dir / fn).stat().st_size / 1e3
+                out += (f'<tr><td>{label}</td>'
+                        f'<td><a href="fasta/{fn}">{fn}</a></td>'
+                        f'<td class="num">{kb:,.1f} KB</td></tr>')
+            else:
+                out += (f'<tr class="missing"><td>{label}</td>'
+                        f'<td colspan="2">not produced</td></tr>')
+        return out
+
+    def _plot_cards(group):
         html = ""
-        for pf in sorted(cialign_dir.glob(pattern)):
-            if pf.suffix in (".png", ".svg"):
-                name = pf.stem.replace("_", " ").title()
-                html += (
-                    f'<div class="plot-card"><h3>{name}</h3>'
-                    f'<img src="{pf.name}" alt="{name}">'
-                    f'<a href="{pf.name}" download>Download</a></div>\n'
-                )
-        return html or "<p>No plots generated.</p>"
+        for pf in sorted(images_dir.glob(f"{group}_alignment*")):
+            if pf.suffix.lower() not in (".png", ".svg"):
+                continue
+            tag = pf.stem[len(group) + 1:].replace("_", " ").strip() or "plot"
+            kind = ("CIAlign cleaned (output)" if "output" in pf.stem
+                    else "not cleaned (input)" if "input" in pf.stem else tag)
+            html += (
+                f'<div class="plot-card"><h4>{tag}</h4>'
+                f'<p class="kind">{kind}</p>'
+                f'<img src="images/{pf.name}" alt="{tag}" loading="lazy">'
+                f'<a href="images/{pf.name}" download>Download</a></div>\n'
+            )
+        return html or '<p class="none">No CIAlign plots generated for this group.</p>'
 
-    cluster_sections = ""
-    for cl in clusters:
-        cluster_sections += (
-            f"<h3>Cluster {cl}</h3>"
-            f'<div class="plot-grid">{_plot_cards(f"cluster_{cl}_alignment*")}</div>\n'
-        )
+    sections = ""
+    for g in groups:
+        title = "Whole family" if g == "whole_family" else g.replace("_", " ").title()
+        sections += f"""
+  <section>
+    <h2>{title}</h2>
+    <table class="files">
+      <tr><th>File</th><th>Name</th><th class="num">Size</th></tr>
+      {_fasta_links(g)}
+    </table>
+    <div class="plot-grid">{_plot_cards(g)}</div>
+  </section>"""
 
     html = f"""<!DOCTYPE html>
 <html>
 <head>
-  <title>CIAlign — {family_name}</title>
+  <meta charset="utf-8">
+  <title>Alignments &amp; Consensus — {family_name}</title>
   <style>
-    body {{font-family:Arial,sans-serif;margin:20px;background:#f5f5f5;}}
-    h1,h2,h3 {{color:#333;}}
-    .plot-grid {{display:grid;grid-template-columns:repeat(auto-fit,minmax(480px,1fr));gap:16px;margin:12px 0;}}
-    .plot-card {{background:#fff;padding:16px;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,.1);}}
-    .plot-card img {{width:100%;border:1px solid #ddd;border-radius:4px;}}
-    .plot-card a {{display:inline-block;margin-top:8px;padding:6px 14px;background:#4CAF50;
-                   color:#fff;text-decoration:none;border-radius:4px;}}
+    body {{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;
+           margin:0;padding:24px;background:#f5f5f5;color:#222;}}
+    h1 {{margin:0 0 4px;}}
+    .sub {{color:#666;margin:0 0 24px;font-size:14px;}}
+    section {{background:#fff;padding:20px;border-radius:8px;margin-bottom:20px;
+              box-shadow:0 2px 4px rgba(0,0,0,.08);}}
+    h2 {{margin:0 0 14px;padding-bottom:8px;border-bottom:2px solid #eee;}}
+    table.files {{border-collapse:collapse;width:100%;max-width:760px;margin-bottom:18px;
+                  font-size:14px;}}
+    table.files th, table.files td {{text-align:left;padding:6px 10px;border-bottom:1px solid #eee;}}
+    table.files th {{background:#fafafa;font-weight:600;}}
+    td.num, th.num {{text-align:right;white-space:nowrap;}}
+    tr.missing td {{color:#aaa;font-style:italic;}}
+    .plot-grid {{display:grid;grid-template-columns:repeat(auto-fit,minmax(460px,1fr));gap:16px;}}
+    .plot-card {{background:#fcfcfc;padding:14px;border:1px solid #eee;border-radius:6px;}}
+    .plot-card h4 {{margin:0 0 2px;font-size:14px;}}
+    .plot-card .kind {{margin:0 0 8px;font-size:12px;color:#777;}}
+    .plot-card img {{width:100%;border:1px solid #ddd;border-radius:4px;background:#fff;}}
+    .plot-card a {{display:inline-block;margin-top:8px;padding:5px 12px;background:#4CAF50;
+                   color:#fff;text-decoration:none;border-radius:4px;font-size:13px;}}
+    .none {{color:#999;font-style:italic;}}
+    footer {{font-size:12px;color:#888;margin-top:8px;}}
   </style>
 </head>
 <body>
-  <h1>CIAlign — {family_name}</h1>
-  <h2>Global Alignment</h2>
-  <div class="plot-grid">{_plot_cards("global_alignment*")}</div>
-  <h2>Per-Cluster Alignments</h2>
-  {cluster_sections}
-  <p style="margin-top:40px;font-size:12px;color:#888;">
-    Generated with <a href="https://github.com/KatyBrown/CIAlign">CIAlign</a>
+  <h1>Alignments &amp; Consensus — {family_name}</h1>
+  <p class="sub">
+    Every group below (the whole family and each cluster) has both a
+    <strong>not cleaned</strong> and a <strong>CIAlign-cleaned</strong> alignment
+    and consensus. All FASTAs are in <code>fasta/</code>; all images are in
+    <code>images/</code>.
   </p>
+  {sections}
+  <footer>
+    Alignment: <a href="https://mafft.cbrc.jp/alignment/software/">MAFFT</a> &middot;
+    cleaning/plots: <a href="https://github.com/KatyBrown/CIAlign">CIAlign</a>
+  </footer>
 </body>
 </html>"""
-    idx = cialign_dir / "index.html"
+    idx = align_dir / "index.html"
     idx.write_text(html)
-    _pp(f"    CIAlign index → {idx}")
+    _pp(f"  Alignment index → {idx}")
 
 
 # ── main entry point ────────────────────────────────────────────────────────
 
+def _group_frames(df):
+    """Yield (group_name, sub_df) for the whole family and then each cluster.
+
+    The whole family is treated as just another group so it gets exactly the
+    same treatment as the clusters — its own alignment, consensus, CIAlign
+    cleaning and plots — rather than being a separate special case whose
+    outputs landed in a different directory.
+    """
+    yield "whole_family", df
+    if "Cluster" not in df.columns:
+        return
+    for cl in sorted(df["Cluster"].unique()):
+        name = "cluster_noise" if cl == -1 else f"cluster_{cl}"
+        yield name, df[df["Cluster"] == cl]
+
+
 def run_alignment_pipeline(df, out_dir, family_name="FAMILY"):
-    """Run global + per-cluster MAFFT alignment, CIAlign, and consensus generation.
+    """Run MAFFT alignment, CIAlign cleaning and consensus for every group.
+
+    A "group" is the whole family plus each cluster. Each group gets, in a
+    single output tree:
+
+        04_alignments/fasta/<group>_seqs.fa               unaligned input
+        04_alignments/fasta/<group>_aligned.fa            alignment, not cleaned
+        04_alignments/fasta/<group>_aligned_cleaned.fa    alignment, CIAlign-cleaned
+        04_alignments/fasta/<group>_consensus.fa          consensus, not cleaned
+        04_alignments/fasta/<group>_consensus_cleaned.fa  consensus, CIAlign-cleaned
+        04_alignments/images/<group>_alignment*.png       CIAlign plots
+        04_alignments/logs/                               CIAlign logs / side files
+
+    plus combined FASTAs, consensus_summary.csv, alignment_stats.txt and an
+    index.html. All FASTAs live in one directory and all images in another —
+    consensus, alignments and CIAlign output are no longer split across
+    05_consensus/, cluster_alignments/, cialign_plots/ and cleaned_consensus/.
 
     Args:
         df:          DataFrame with 'Seq' and 'Cluster' columns.
@@ -387,187 +472,183 @@ def run_alignment_pipeline(df, out_dir, family_name="FAMILY"):
         family_name: Used in filenames and FASTA headers.
 
     Returns:
-        dict with 'mafft_available', 'cialign_available',
-        'global_alignment', 'cluster_consensus_summary'
+        dict with 'mafft_available', 'cialign_available', 'trimal_available',
+        'alignment_dir', 'groups' and 'cluster_consensus_summary'
     """
+    import os
+    import shutil as _shutil
+
     out_dir = Path(out_dir)
     mafft_ok = check_mafft()
     cialign_ok = check_cialign()
     trimal_ok = check_trimal()
     if cialign_ok and not trimal_ok:
         _pp("  Note: trimAl not found — CIAlign failures/timeouts will not have a fallback")
+    if not cialign_ok:
+        _pp("  CIAlign not found — cleaned alignments/consensuses and plots will be skipped")
 
-    family_lower = family_name.lower()
-    consensus_dir = out_dir / "05_consensus"
-    consensus_dir.mkdir(parents=True, exist_ok=True)
-
-    # ── Write global FASTA ─────────────────────────────────────────────────
-    global_fasta = out_dir / f"{family_lower}_seqs.fa"
-    write_fasta(df, global_fasta, family_name)
-    _pp(f"  Written {len(df)} sequences → {global_fasta.name}")
-
-    # ── Global alignment ───────────────────────────────────────────────────
-    global_aligned = out_dir / f"{family_lower}_aligned.fa"
-    if mafft_ok:
-        _pp(f"  Running global MAFFT alignment ({len(df)} sequences)...")
-        aln_ok = run_mafft(global_fasta, global_aligned)
-    else:
-        _pp("  MAFFT not found — writing unaligned majority consensuses")
-        aln_ok = False
-
-    global_consensus = None
-    if aln_ok:
-        try:
-            consensus = consensus_from_alignment(global_aligned)
-            cons_path = out_dir / f"{family_lower}_consensus.fa"
-            save_consensus(consensus, cons_path, f"{family_name}_consensus")
-            save_consensus(consensus, consensus_dir / f"{family_lower}_consensus.fa",
-                           f"{family_name}_consensus")
-            _pp(f"  Global consensus → {cons_path.name}")
-            global_consensus = cons_path
-
-            # Alignment stats
-            stats = alignment_stats(global_aligned)
-            stats_dir = out_dir / "04_alignments"
-            stats_dir.mkdir(parents=True, exist_ok=True)
-            stats_file = stats_dir / "alignment_stats.txt"
-            with open(stats_file, "w") as f:
-                f.write("=== GLOBAL ALIGNMENT STATISTICS ===\n\n")
-                for k, v in stats.items():
-                    f.write(f"{k}: {v}\n")
-            _pp(f"  Alignment stats → {stats_file.name}")
-        except Exception as e:
-            _pp(f"  WARNING: consensus generation failed: {e}")
-    else:
-        consensus = consensus_from_sequences(df["Seq"].tolist())
-        if consensus:
-            cons_path = out_dir / f"{family_lower}_consensus.fa"
-            save_consensus(consensus, cons_path, f"{family_name}_consensus")
-            save_consensus(consensus, consensus_dir / f"{family_lower}_consensus.fa",
-                           f"{family_name}_consensus")
-            _pp(f"  Global fallback consensus → {cons_path.name}")
-            global_consensus = cons_path
-
-    # ── Per-cluster alignments ─────────────────────────────────────────────
-    cluster_dir = out_dir / "cluster_alignments"
-    cluster_dir.mkdir(exist_ok=True)
-    cluster_summaries = []
-
-    for cluster in sorted(df["Cluster"].unique()):
-        c_df = df[df["Cluster"] == cluster]
-        clabel = f"noise_{abs(cluster)}" if cluster == -1 else str(cluster)
-        c_fasta = cluster_dir / f"cluster_{cluster}_seqs.fa"
-        c_aligned = cluster_dir / f"cluster_{cluster}_aligned.fa"
-        write_fasta(c_df, c_fasta, family_name)
-        if mafft_ok and len(c_df) >= 2:
-            _pp(f"  Cluster {clabel} alignment ({len(c_df)} seqs)...")
-            ok = run_mafft(c_fasta, c_aligned)
-        else:
-            ok = False
-            reason = "single sequence" if len(c_df) < 2 else "MAFFT unavailable"
-            _pp(f"  Cluster {clabel}: writing fallback consensus ({reason})")
-
-        try:
-            con = consensus_from_alignment(c_aligned) if ok else consensus_from_sequences(c_df["Seq"].tolist())
-            if not con:
-                continue
-            con_path = cluster_dir / f"cluster_{cluster}_consensus.fa"
-            save_consensus(con, con_path, f"{family_name}_cluster{cluster}_consensus")
-            save_consensus(con, consensus_dir / f"cluster_{cluster}_consensus.fa",
-                           f"{family_name}_cluster{cluster}_consensus")
-            stats = alignment_stats(c_aligned) if ok else {
-                "n_sequences": len(c_df),
-                "alignment_length": len(con),
-                "consensus_length_no_gaps": len(con),
-                "avg_gaps_per_col": 0.0,
-                "cols_no_gaps": len(con),
-                "cols_majority_gap": 0,
-            }
-            cluster_summaries.append({
-                "cluster": cluster, "size": len(c_df),
-                "consensus_length": len(con.replace("-", "")),
-                "fallback": "" if ok else "unaligned_majority",
-                **stats,
-            })
-        except Exception as e:
-            _pp(f"    WARNING cluster {clabel} consensus failed: {e}")
-
-    # Combined cluster consensuses FASTA
-    if cluster_summaries:
-        all_cons = cluster_dir / "all_cluster_consensuses.fa"
-        with open(all_cons, "w") as outf:
-            for cl in sorted(df["Cluster"].unique()):
-                cf = cluster_dir / f"cluster_{cl}_consensus.fa"
-                if cf.exists():
-                    outf.write(cf.read_text())
-        _pp(f"  All cluster consensuses → {all_cons.name}")
-        pd.DataFrame(cluster_summaries).to_csv(
-            cluster_dir / "cluster_consensus_summary.csv", index=False
-        )
-        pd.DataFrame(cluster_summaries).to_csv(
-            consensus_dir / "cluster_consensus_summary.csv", index=False
-        )
-
-    # ── CIAlign ────────────────────────────────────────────────────────────
-    cialign_dir = out_dir / "cialign_plots"
-    cleaned_dir = out_dir / "cleaned_consensus"
-    cialign_dir.mkdir(exist_ok=True)
-    cleaned_dir.mkdir(exist_ok=True)
-
+    # One folder for everything alignment-related.
+    align_dir = out_dir / "04_alignments"
+    fasta_dir = align_dir / "fasta"
+    images_dir = align_dir / "images"
+    logs_dir = align_dir / "logs"
+    for d in (fasta_dir, images_dir, logs_dir):
+        d.mkdir(parents=True, exist_ok=True)
     if cialign_ok:
-        import os
         os.environ["MPLBACKEND"] = "Agg"
-        _pp("  Running CIAlign...")
 
-        # Global
-        if global_aligned.exists() and global_aligned.stat().st_size > 0 and aln_ok:
-            run_cialign(global_aligned, cialign_dir / "global_alignment", "global")
-            gc_cleaned = cialign_dir / "global_alignment_cleaned.fasta"
-            if gc_cleaned.exists():
+    summaries = []
+    group_names = []
+
+    for gname, g_df in _group_frames(df):
+        n = len(g_df)
+        if n == 0:
+            continue
+        group_names.append(gname)
+        pretty = "whole family" if gname == "whole_family" else gname.replace("_", " ")
+        _pp(f"  ── {pretty}  ({n:,} sequences) ──")
+
+        seqs_fa    = fasta_dir / f"{gname}_seqs.fa"
+        aligned_fa = fasta_dir / f"{gname}_aligned.fa"
+        write_fasta(g_df, seqs_fa, family_name)
+
+        # ── MAFFT ──────────────────────────────────────────────────────────
+        if mafft_ok and n >= 2:
+            aln_ok = run_mafft(seqs_fa, aligned_fa)
+        else:
+            aln_ok = False
+            reason = "single sequence" if n < 2 else "MAFFT unavailable"
+            _pp(f"    no alignment ({reason}) — using unaligned majority consensus")
+
+        row = {"group": gname,
+               "cluster": ("whole_family" if gname == "whole_family"
+                           else ("noise" if gname == "cluster_noise"
+                                 else gname.rsplit("_", 1)[-1])),
+               "size": n,
+               "aligned": bool(aln_ok),
+               "fallback": "" if aln_ok else "unaligned_majority"}
+
+        # ── Consensus from the NOT-cleaned alignment ───────────────────────
+        con = None
+        try:
+            con = (consensus_from_alignment(aligned_fa) if aln_ok
+                   else consensus_from_sequences(g_df["Seq"].tolist()))
+            if con:
+                save_consensus(con, fasta_dir / f"{gname}_consensus.fa",
+                               f"{family_name}_{gname}_consensus")
+                row["consensus_length"] = len(con.replace("-", ""))
+        except Exception as e:
+            _pp(f"    WARNING: consensus failed for {pretty}: {e}")
+
+        if aln_ok:
+            try:
+                row.update(alignment_stats(aligned_fa))
+            except Exception as e:
+                _pp(f"    WARNING: alignment stats failed for {pretty}: {e}")
+        elif con:
+            row.update({"n_sequences": n, "alignment_length": len(con),
+                        "consensus_length_no_gaps": len(con),
+                        "avg_gaps_per_col": 0.0, "cols_no_gaps": len(con),
+                        "cols_majority_gap": 0})
+
+        # ── CIAlign: cleaned alignment + plots + cleaned consensus ─────────
+        row["cialign_cleaned"] = False
+        if cialign_ok and aln_ok and aligned_fa.exists() and aligned_fa.stat().st_size > 0:
+            stem = images_dir / f"{gname}_alignment"
+            run_cialign(aligned_fa, stem, pretty)
+
+            # CIAlign drops its cleaned alignment next to the plots; move it
+            # into the FASTA folder so every .fa lives in exactly one place.
+            produced = images_dir / f"{gname}_alignment_cleaned.fasta"
+            cleaned_fa = fasta_dir / f"{gname}_aligned_cleaned.fa"
+            if produced.exists() and produced.stat().st_size > 0:
+                _shutil.move(str(produced), str(cleaned_fa))
+                row["cialign_cleaned"] = True
                 try:
-                    con = consensus_from_alignment(gc_cleaned)
-                    save_consensus(con, cleaned_dir / f"{family_lower}_cleaned_consensus.fa",
-                                   f"{family_name}_cleaned_consensus")
+                    ccon = consensus_from_alignment(cleaned_fa)
+                    if ccon:
+                        save_consensus(
+                            ccon, fasta_dir / f"{gname}_consensus_cleaned.fa",
+                            f"{family_name}_{gname}_cleaned_consensus")
+                        row["cleaned_consensus_length"] = len(ccon.replace("-", ""))
+                    row.update({f"cleaned_{k}": v
+                                for k, v in alignment_stats(cleaned_fa).items()})
+                except Exception as e:
+                    _pp(f"    WARNING: cleaned consensus failed for {pretty}: {e}")
+            else:
+                _pp(f"    CIAlign produced no cleaned alignment for {pretty}")
+
+            # Keep images/ images-only: sweep CIAlign's logs and side files out.
+            for side in list(images_dir.glob(f"{gname}_alignment*")):
+                if side.suffix.lower() in (".png", ".svg"):
+                    continue
+                try:
+                    _shutil.move(str(side), str(logs_dir / side.name))
                 except Exception:
                     pass
 
-        # Per-cluster
-        all_cleaned = []
-        for cl in sorted(df["Cluster"].unique()):
-            ca = cluster_dir / f"cluster_{cl}_aligned.fa"
-            if ca.exists() and ca.stat().st_size > 0:
-                run_cialign(ca, cialign_dir / f"cluster_{cl}_alignment", f"cluster {cl}")
-                cl_cleaned = cialign_dir / f"cluster_{cl}_alignment_cleaned.fasta"
-                if cl_cleaned.exists():
-                    try:
-                        con = consensus_from_alignment(cl_cleaned)
-                        cp = cleaned_dir / f"cluster_{cl}_cleaned_consensus.fa"
-                        save_consensus(con, cp, f"{family_name}_cluster{cl}_cleaned_consensus")
-                        all_cleaned.append({"cluster": cl, "consensus": con})
-                    except Exception:
-                        pass
+        summaries.append(row)
 
-        # Combined cleaned FASTA
-        if all_cleaned:
-            with open(cleaned_dir / "all_clusters_cleaned_consensus.fa", "w") as f:
-                for item in all_cleaned:
-                    cl = item["cluster"]
-                    con = item["consensus"]
-                    f.write(f">{family_name}_cluster{cl}_cleaned_consensus\n")
-                    for i in range(0, len(con), 80):
-                        f.write(con[i:i + 80] + "\n")
+    # ── Combined FASTAs ────────────────────────────────────────────────────
+    def _concat(dest, names, suffix):
+        wrote = 0
+        with open(dest, "w") as outf:
+            for g in names:
+                src = fasta_dir / f"{g}_{suffix}"
+                if src.exists():
+                    outf.write(src.read_text())
+                    wrote += 1
+        if wrote:
+            _pp(f"  {dest.name}: {wrote} sequences")
+        else:
+            dest.unlink(missing_ok=True)
+        return wrote
 
-        # CIAlign index page
-        _cialign_index_html(cialign_dir, family_name, df)
-    else:
-        _pp("  CIAlign not found — skipping alignment visualization")
+    cluster_only = [g for g in group_names if g != "whole_family"]
+    # Everything, including the whole family.
+    _concat(fasta_dir / "all_consensuses.fa", group_names, "consensus.fa")
+    _concat(fasta_dir / "all_consensuses_cleaned.fa", group_names, "consensus_cleaned.fa")
+    # Clusters-only, under the historical names: downstream modules
+    # (te_divergence, te_subfamily, te_motif_gain, run_phylo_analysis) parse
+    # these into {cluster_id: seq} and would choke on a whole-family record.
+    _concat(fasta_dir / "all_cluster_consensuses.fa", cluster_only, "consensus.fa")
+    _concat(fasta_dir / "all_clusters_cleaned_consensus.fa",
+            cluster_only, "consensus_cleaned.fa")
 
+    # ── Summary table + stats ──────────────────────────────────────────────
+    if summaries:
+        sum_df = pd.DataFrame(summaries)
+        sum_df.to_csv(align_dir / "consensus_summary.csv", index=False)
+        # Historical filename, same content, for the report generators.
+        sum_df.to_csv(align_dir / "cluster_consensus_summary.csv", index=False)
+        _pp(f"  Consensus summary → {align_dir / 'consensus_summary.csv'}")
+
+        with open(align_dir / "alignment_stats.txt", "w") as f:
+            f.write(f"=== ALIGNMENT STATISTICS — {family_name} ===\n")
+            f.write("Groups: the whole family and each cluster.\n")
+            f.write("'cleaned_*' rows come from the CIAlign-cleaned alignment.\n\n")
+            for row in summaries:
+                head = ("WHOLE FAMILY" if row["group"] == "whole_family"
+                        else row["group"].replace("_", " ").upper())
+                f.write(f"--- {head} ---\n")
+                for k, v in row.items():
+                    if k == "group":
+                        continue
+                    f.write(f"{k}: {v}\n")
+                f.write("\n")
+        _pp(f"  Alignment stats → {align_dir / 'alignment_stats.txt'}")
+
+    _alignment_index_html(align_dir, family_name, group_names)
+
+    whole = fasta_dir / "whole_family_aligned.fa"
     return {
         "mafft_available": mafft_ok,
         "cialign_available": cialign_ok,
         "trimal_available": trimal_ok,
-        "global_alignment": str(global_aligned) if global_aligned.exists() else None,
-        "cluster_consensus_summary": cluster_summaries,
+        "alignment_dir": str(align_dir),
+        "groups": group_names,
+        "global_alignment": str(whole) if whole.exists() else None,
+        "cluster_consensus_summary": summaries,
     }
 
 
