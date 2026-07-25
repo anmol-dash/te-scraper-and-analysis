@@ -83,11 +83,18 @@ def main():
                     ov.pp(f"  WARNING: track '{name}' file missing: {path}")
                     continue
                 counts = ov.bedtools_intersect_count(bed, path)
-                if counts:
-                    overlap_by_track[name] = counts
-                    used.append(name)
-                    n_hit = sum(1 for v in counts.values() if v > 0)
-                    ov.pp(f"  {name}: {n_hit}/{len(df)} copies overlap")
+                if not counts:
+                    # bedtools returned nothing at all: the intersect failed or the
+                    # track shares no contigs with the loci. That is "unknown", not
+                    # "zero overlap" — recording a 0 column would put a measured-
+                    # looking 0% into the report for a track that never ran.
+                    ov.pp(f"  WARNING: track '{name}' produced no rows "
+                          f"(intersect failed or no shared contigs) --- reporting n/a")
+                    continue
+                overlap_by_track[name] = counts
+                used.append(name)
+                n_hit = sum(1 for v in counts.values() if v > 0)
+                ov.pp(f"  {name}: {n_hit}/{len(df)} copies overlap")
     else:
         if not tracks:
             ov.pp("  No --tracks provided. Use --preset K562 (or GM12878/HeLa-S3/IMR-90/H1-hESC) "
@@ -153,6 +160,11 @@ def main():
     for n in used:
         n_hit = sum(1 for v in overlap_by_track[n].values() if v > 0)
         txt.append(f"    {n:<12} {n_hit}/{len(df)} copies ({100*n_hit/len(df):.0f}%)")
+    unusable = [n for n in tracks if n not in used]
+    if unusable:
+        txt.append(f"  Tracks requested but unusable (reported as n/a, NOT as 0%):")
+        for n in unusable:
+            txt.append(f"    {n:<12} n/a")
     (reports / "epigenetic_report.txt").write_text("\n".join(txt))
     ov.pp("  Written epigenetic_measured_values.tex and epigenetic_report.txt")
     ov.pp("=" * 60); ov.pp("DONE")

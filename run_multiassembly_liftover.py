@@ -54,6 +54,15 @@ _ASSEMBLY_PRESETS = {
     "mm10": "GRCm38",
     "rn7":  "mRatBN7.2",
     "rn6":  "RGSC 6.0",
+    # Cross-species targets. UCSC ships hg38To{PanTro6,RheMac10,GorGor6,PonAbe3}
+    # under goldenPath/hg38/liftOver, so fetch_chain resolves these the same way
+    # as the intra-species ones. Kept in the same table as hg19/t2t because the
+    # module treats a chain as a chain — the species boundary only matters for
+    # how the mapping rate is interpreted, not for how it is computed.
+    "panTro6":  "Chimpanzee (panTro6)",
+    "rheMac10": "Rhesus macaque (rheMac10)",
+    "gorGor6":  "Gorilla (gorGor6)",
+    "ponAbe3":  "Sumatran orangutan (ponAbe3)",
 }
 
 
@@ -189,6 +198,17 @@ def main():
     for a in used:
         txt.append(f"    {a:<10} {len(mapped_by_asm[a])}/{len(df)} mapped "
                    f"({100*len(mapped_by_asm[a])/len(df):.1f}%)")
+    # Anything asked for that never produced a mapping is listed explicitly.
+    # Previously these just vanished from the report, so "Target assemblies: 1"
+    # read as a deliberate choice rather than two silent drops.
+    dropped = [a for a in (args.target_assemblies or [])
+               if ("hs1" if a in ("t2t", "hs1") else a) not in used]
+    if dropped:
+        txt.append("  Requested but unavailable (reported as n/a, NOT as 0%):")
+        for a in dropped:
+            why = ("not a known assembly" if a not in _ASSEMBLY_PRESETS
+                   else "chain download or liftOver failed")
+            txt.append(f"    {a:<10} n/a  ({why})")
     (reports / "multiassembly_report.txt").write_text("\n".join(txt))
     ov.pp("  Written multiassembly_measured_values.tex and multiassembly_report.txt")
     ov.pp("=" * 60); ov.pp("DONE")

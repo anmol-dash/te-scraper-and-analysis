@@ -44,6 +44,8 @@ import te_overlay as ov
 
 _SPECIES_PRESETS = {
     "panTro6":  "Chimpanzee",
+    "gorGor6":  "Gorilla",
+    "ponAbe3":  "Sumatran orangutan",
     "rheMac10": "Rhesus macaque",
     "mm39":     "Mouse (mm39)",
     "rn7":      "Rat (rn7)",
@@ -60,6 +62,11 @@ def parse_args():
     p.add_argument("--input", required=True)
     p.add_argument("--reports-dir", default="./reports")
     p.add_argument("--family", default="TE")
+    p.add_argument("--source-assembly", default="hg38",
+                   help=("Assembly the input coordinates are in. Chains are "
+                         "fetched as <source>To<Species>.over.chain, so a mouse "
+                         "family needs mm10/mm39 here or it silently lifts from "
+                         "the wrong genome."))
     p.add_argument("--chains", nargs="*", default=[], help="SPECIES=chain ...")
     p.add_argument("--species", nargs="*", default=[],
                    metavar="SPECIES",
@@ -86,7 +93,7 @@ def main():
             ov.pp(f"  WARNING: unknown species '{sp}'. "
                   f"Choices: {list(_SPECIES_PRESETS)}")
             continue
-        path = ov.fetch_chain(sp)
+        path = ov.fetch_chain(sp, src_asm=args.source_assembly)
         if path:
             auto_chains[sp] = str(path)
         else:
@@ -179,6 +186,13 @@ def main():
            f"  Lineage-specific:    {n_specific if used else 'n/a (no chains)'}"]
     for sp in used:
         txt.append(f"    {sp:<14} {len(presence[sp])}/{len(df)} shared")
+    dropped = [sp for sp in (args.species or []) if sp not in used]
+    if dropped:
+        txt.append("  Requested but unavailable (reported as n/a, NOT as absent):")
+        for sp in dropped:
+            why = ("not a known species" if sp not in _SPECIES_PRESETS
+                   else "chain download or liftOver failed")
+            txt.append(f"    {sp:<14} n/a  ({why})")
     (reports / "ortholog_report.txt").write_text("\n".join(txt))
     ov.pp("  Written ortholog_measured_values.tex and ortholog_report.txt")
     ov.pp("=" * 60); ov.pp("DONE")

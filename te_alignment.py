@@ -47,10 +47,25 @@ def check_mafft():
         return False
 
 
+def _cialign_version():
+    """CIAlign's reported version, or 'unknown'.
+
+    Recorded alongside every failure: CIAlign crashes are version-specific, and
+    a traceback without the version it came from is close to unusable when the
+    cluster and the workstation have different builds.
+    """
+    try:
+        r = subprocess.run(["CIAlign", "--version"], capture_output=True, text=True)
+        return (r.stdout or r.stderr or "").strip() or "unknown"
+    except (FileNotFoundError, OSError):
+        return "unknown"
+
+
 def check_cialign():
     """Return True if CIAlign is in PATH."""
     try:
         subprocess.run(["CIAlign", "--version"], capture_output=True)
+        _pp(f"  CIAlign version: {_cialign_version()}")
         return True
     except FileNotFoundError:
         return False
@@ -247,7 +262,11 @@ def run_trimal(input_fasta, output_fasta, timeout=TRIMAL_TIMEOUT):
     if result.returncode == 0 and output_fasta.exists():
         _pp(f"    trimAl cleaned {input_fasta.name} → {output_fasta.name}")
         return True
-    _pp(f"    trimAl failed for {input_fasta.name}: {result.stderr[:200]}")
+    _err = ((result.stderr or "") + (result.stdout or "")).strip()
+    _tail = [ln for ln in _err.splitlines() if ln.strip()][-3:] or ["(no output)"]
+    _pp(f"    trimAl failed for {input_fasta.name} (exit {result.returncode}):")
+    for _ln in _tail:
+        _pp(f"      {_ln}")
     return False
 
 
@@ -286,21 +305,44 @@ def run_cialign(input_fasta, output_stem, label="", timeout=CIALIGN_TIMEOUT,
         "--plot_output",
         "--plot_markup",
     ]
+    err_path = output_stem.parent / (output_stem.name + "_cialign_error.txt")
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout,
             env={**os.environ, "MPLBACKEND": "Agg"}
         )
-        failed, reason = (result.returncode != 0), result.stderr[:200]
+        failed = result.returncode != 0
+        full_err = (result.stderr or "") + (result.stdout or "")
+        reason = f"exit {result.returncode}"
     except subprocess.TimeoutExpired:
-        failed, reason = True, f"TIMEOUT after {timeout}s"
+        failed, full_err, reason = True, "", f"TIMEOUT after {timeout}s"
 
     if not failed:
         pngs = list(output_stem.parent.glob(f"{output_stem.name}*.png"))
         _pp(f"    CIAlign {label}: {len(pngs)} plots ({n_seqs:,} seqs)")
         return True
 
-    _pp(f"    CIAlign failed for {label}: {reason}")
+    # The old code kept only stderr[:200], which cut every traceback off inside
+    # the site-packages path and left the actual exception unknowable. Write the
+    # whole thing to a file next to the plots and echo the tail (the exception
+    # line lives at the END of a traceback, not the start).
+    if full_err:
+        try:
+            err_path.write_text(
+                f"CMD: {' '.join(cmd)}\n"
+                f"CIAlign: {_cialign_version()}\n"
+                f"input: {input_fasta}  ({n_seqs} seqs)\n"
+                f"{'=' * 60}\n{full_err}"
+            )
+        except OSError:
+            pass
+        tail = [ln for ln in full_err.strip().splitlines() if ln.strip()][-3:]
+        _pp(f"    CIAlign failed for {label} ({reason}):")
+        for ln in tail:
+            _pp(f"      {ln}")
+        _pp(f"      full output → {err_path}")
+    else:
+        _pp(f"    CIAlign failed for {label}: {reason}")
 
     if _fallback_attempted:
         _pp(f"    CIAlign fallback (trimAl) also failed for {label} — skipping plots")
@@ -499,6 +541,7 @@ def run_alignment_pipeline(df, out_dir, family_name="FAMILY"):
 
     summaries = []
     group_names = []
+    cialign_failures = []   # groups whose plots/cleaned alignment never appeared
 
     for gname, g_df in _group_frames(df):
         n = len(g_df)
@@ -555,7 +598,8 @@ def run_alignment_pipeline(df, out_dir, family_name="FAMILY"):
         row["cialign_cleaned"] = False
         if cialign_ok and aln_ok and aligned_fa.exists() and aligned_fa.stat().st_size > 0:
             stem = images_dir / f"{gname}_alignment"
-            run_cialign(aligned_fa, stem, pretty)
+            if not run_cialign(aligned_fa, stem, pretty):
+                cialign_failures.append(gname)
 
             # CIAlign drops its cleaned alignment next to the plots; move it
             # into the FASTA folder so every .fa lives in exactly one place.
@@ -640,6 +684,15 @@ def run_alignment_pipeline(df, out_dir, family_name="FAMILY"):
 
     _alignment_index_html(align_dir, family_name, group_names)
 
+    # Surface CIAlign losses instead of letting the stage read as clean: an
+    # 11/11 wipe-out previously showed up only as absent PNGs, with the stage
+    # still logging "Alignment OK".
+    if cialign_failures:
+        _pp(f"  WARNING: CIAlign failed for {len(cialign_failures)}/"
+            f"{len(group_names)} groups: {', '.join(cialign_failures)}")
+        _pp(f"           No cleaned alignment or plots for those groups. "
+            f"Tracebacks: {logs_dir}/<group>_alignment_cialign_error.txt")
+
     whole = fasta_dir / "whole_family_aligned.fa"
     return {
         "mafft_available": mafft_ok,
@@ -647,6 +700,7 @@ def run_alignment_pipeline(df, out_dir, family_name="FAMILY"):
         "trimal_available": trimal_ok,
         "alignment_dir": str(align_dir),
         "groups": group_names,
+        "cialign_failures": cialign_failures,
         "global_alignment": str(whole) if whole.exists() else None,
         "cluster_consensus_summary": summaries,
     }

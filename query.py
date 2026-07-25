@@ -2800,7 +2800,8 @@ def _run_standout_analysis(args, out_dir, dirs, family_name, stage_times):
         ("epigenetic",    "run_epigenetic_overlay.py",
          _opt("--preset", _epigenetic_preset)),
         ("ortholog",      "run_ortholog_insertion.py",
-         _opt_list("--species", _ortholog_species)
+         ["--source-assembly", _assembly_arg]
+         + _opt_list("--species", _ortholog_species)
          + _opt("--liftover-cmd", _liftover_cmd)),
         ("multiassembly", "run_multiassembly_liftover.py",
          ["--source-assembly", _assembly_arg]
@@ -2831,6 +2832,52 @@ def _run_standout_analysis(args, out_dir, dirs, family_name, stage_times):
          + _opt_list("--stage-cols", _expr_cols)
          + (_opt_list("--stage-labels", _expr_labels) if _expr_labels != _expr_cols else [])),
     ]
+
+    # A Stage 11 module that finds nothing still exits 0, so rc alone reported
+    # "15 ok / 0 failed" for a run where ColabFold folded zero structures and the
+    # liftover modules resolved zero assemblies. Each entry is the LaTeX macro
+    # holding that module's headline output count; 0 or missing => EMPTY, which
+    # counts as a failure in the summary.
+    #
+    # These are deliberately counts of PRODUCED OUTPUT (structures folded,
+    # assemblies resolved, loci analysed), never counts of biological findings.
+    # \ltrNfull is not used here: a family of solo LTRs legitimately has zero
+    # full-length copies, and calling that a module failure would be wrong.
+    _HEADLINES = {
+        "phylo":         ("phylo_measured_values.tex",         r"\phyloNCopies"),
+        "grna":          ("grna_offtarget_measured_values.tex", r"\grnaOTNGuides"),
+        "transduction":  ("transduction_measured_values.tex",  r"\transNCopies"),
+        "antisense":     ("antisense_measured_values.tex",     r"\antiNCopies"),
+        "ctcf_tad":      ("ctcf_tad_measured_values.tex",      r"\ctcfNCopies"),
+        "epigenetic":    ("epigenetic_measured_values.tex",    r"\epiNTracks"),
+        "ortholog":      ("ortholog_measured_values.tex",      r"\orthoNSpecies"),
+        "multiassembly": ("multiassembly_measured_values.tex", r"\masmNAssemblies"),
+        "fold":          ("fold_measured_values.tex",          r"\foldNFolded"),
+        "divergence":    ("repeat_landscape_values.tex",       r"\divNloci"),
+        "ltr_struct":    ("ltr_struct_values.tex",             r"\ltrNloci"),
+        "subfamily":     ("subfamily_values.tex",              r"\subfamNClusters"),
+        "benchmark":     ("benchmark_values.tex",              r"\benchNStages"),
+        "motif_gain":    ("motif_gain_values.tex",             r"\motifGainNFamily"),
+    }
+
+    def _headline_count(mod_name):
+        """Return (macro, value) for a module's headline count, or None.
+
+        value is an int, or None when the file/macro is absent (which is itself
+        treated as EMPTY — the module was supposed to write it).
+        """
+        entry = _HEADLINES.get(mod_name)
+        if not entry:
+            return None
+        fname, macro = entry
+        path = reports_dir / fname
+        if not path.exists():
+            return (macro, None)
+        # Some modules format with thousands separators (\ltrNloci{2,573}), so
+        # match digits-and-commas and strip them before int().
+        m = re.search(re.escape(macro) + r"\}\{([0-9][0-9,]*)",
+                      path.read_text(errors="replace"))
+        return (macro, int(m.group(1).replace(",", "")) if m else None)
 
     _diag(f"  STAGE 11: {len(_MODULES)} modules | script_dir={_sdir} | python={_py}")
     print(f"  Input:   {clustered_csv}")
@@ -2872,9 +2919,22 @@ def _run_standout_analysis(args, out_dir, dirs, family_name, stage_times):
             elapsed = time.time() - t_mod
             _lf.write(f"\n[EXIT {rc}  {elapsed:.0f}s]\n"); _lf.flush()
             if rc == 0:
-                print(f" ok ({elapsed:.0f}s)"); _sa_ok += 1
-                _diag(f"  STAGE 11 [{mod_name}]: ok ({elapsed:.0f}s)")
-                _sa_results.append((mod_name, "OK", elapsed))
+                _hl = _headline_count(mod_name)
+                if _hl and not _hl[1]:
+                    _shown = "missing" if _hl[1] is None else "0"
+                    msg = f"EMPTY ({_hl[0]}={_shown})"
+                    print(f" {msg} ({elapsed:.0f}s)"); _sa_fail += 1
+                    _diag(f"  STAGE 11 [{mod_name}]: {msg} — "
+                          f"exited 0 but produced no results")
+                    _lf.write(f"\n[{mod_name}] {msg}: the module exited cleanly but "
+                              f"its headline count is {_shown}. Treating as a "
+                              f"failure so it is not reported as a measured "
+                              f"result.\n")
+                    _sa_results.append((mod_name, msg, elapsed))
+                else:
+                    print(f" ok ({elapsed:.0f}s)"); _sa_ok += 1
+                    _diag(f"  STAGE 11 [{mod_name}]: ok ({elapsed:.0f}s)")
+                    _sa_results.append((mod_name, "OK", elapsed))
             else:
                 print(f" FAILED rc={rc} ({elapsed:.0f}s)"); _sa_fail += 1
                 _diag(f"  STAGE 11 [{mod_name}]: FAILED rc={rc}")
@@ -2886,9 +2946,12 @@ def _run_standout_analysis(args, out_dir, dirs, family_name, stage_times):
         _lf.write(f"\nDone: ok={_sa_ok} failed={_sa_fail} skipped={_sa_skip}\n")
         _lf.write(f"Finished: {datetime.datetime.now():%Y-%m-%d %H:%M:%S}\n")
         print(f"\n  Done: {_sa_ok} ok / {_sa_fail} failed / {_sa_skip} skipped")
-        if _sa_fail:
-            print("  FAILED modules: "
-                  + ", ".join(n for n, s, _ in _sa_results if s.startswith("FAILED")))
+        _bad = [(n, s) for n, s, _ in _sa_results
+                if s.startswith("FAILED") or s.startswith("EMPTY")]
+        if _bad:
+            print("  FAILED modules: " + ", ".join(f"{n} [{s}]" for n, s in _bad))
+            print("  NOTE: EMPTY means the module exited 0 but produced no "
+                  "results — do not cite its numbers as measured values.")
 
     _checkpoint(out_dir, "stage11_standout")
     stage_times["Standout analysis"] = time.time() - t0

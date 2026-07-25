@@ -10,6 +10,21 @@
 #   • clustering_visualization_expr.html produced with no expression data
 #   • motif failure aborting the job before primers + Stage 11 ran
 #
+# 2026-07-25 run (jobs 98374466/67) finished 10/10 but Stage 11 shipped garbage.
+# Fixed since, and reflected in the flags below:
+#   • te_overlay.load_loci keyed every locus on TE_name ("LTR5_Hs" on all 630
+#     rows), collapsing liftOver/bedtools results to one entry — hence
+#     "1/630 mapped" next to maps_hg19=True on every row.
+#   • panTro6/rheMac10/gorGor6/ponAbe3 were rejected by the module allow-lists
+#     and silently dropped; they are in the tables now (UCSC ships the chains).
+#   • bedtools closest -d returns -1 for "no feature on this contig"; that was
+#     read as 0 bp, so all 630 copies came out TAD-boundary-proximal.
+#   • Stage 11 now marks a module EMPTY (= failed) when it exits 0 with a zero
+#     headline count, instead of logging "15 ok / 0 failed" over a ColabFold run
+#     that folded nothing.
+# The K562 ENCODE fetches 404'd last run (CTCF/H3K9me3/ATAC) — that is upstream,
+# not ours; the epigenetic panel will report n/a rather than a measured 0%.
+#
 # Prereq (once, and worth doing first — it is what fixes the JASPAR failure):
 #   bash scripts/submit_fetch_jaspar.sh      # caches hg38/hg19/mm10/mm39
 #
@@ -100,8 +115,8 @@ python3 query.py \
   --min-cluster-size 100 --min-samples 5 --min-sequences 10 --random-state 42 \
   --primer-kmer 18 --top-global 8 --top-cluster 5 --primer-timeout 120 \
   --parallel-alignment --parallel-primers \
-  --target-assemblies hg19 panTro6 rheMac10 \
-  --ortholog-species panTro6 gorGor6 ponAbe3 \
+  --target-assemblies hg19 hs1 panTro6 rheMac10 \
+  --ortholog-species panTro6 gorGor6 ponAbe3 rheMac10 \
   --epigenetic-preset K562 --ctcf-preset K562 --tads-preset K562 \
   --grna-cas SpCas9 --grna-max-mm 2 \
   --clock-divisor 1 --intact-orf-aa 100 --min-ltr-identity 0.65 \

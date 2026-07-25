@@ -66,6 +66,28 @@ def load_loci(csv_path: str) -> pd.DataFrame:
                 df["name"] = df[c]; break
         else:
             df["name"] = [f"locus_{i}" for i in range(len(df))]
+    # `name` is the BED col-4 key that liftover()/bedtools_*() use to join results
+    # back onto rows, so it MUST be unique per locus. TE_name/repName hold the
+    # FAMILY name ("LTR5_Hs") — identical on every row — which silently collapses
+    # every result dict to a single entry: liftOver then reports 1/630 mapped
+    # while `n in mapped` is True for all 630, and bedtools closest gives every
+    # copy the same distance. Rebuild from coordinates whenever the chosen column
+    # is not unique.
+    if df["name"].duplicated().any():
+        if all(c in df.columns for c in ("chr", "start", "stop")):
+            df["name"] = [f"{c}:{s}-{e}" for c, s, e in
+                          zip(df["chr"], df["start"], df["stop"])]
+        else:
+            df["name"] = [f"locus_{i}" for i in range(len(df))]
+        # Coordinates can still repeat (duplicate rows); disambiguate the leftovers.
+        if df["name"].duplicated().any():
+            seen: dict = {}
+            uniq = []
+            for nm in df["name"]:
+                k = seen.get(nm, 0)
+                seen[nm] = k + 1
+                uniq.append(nm if k == 0 else f"{nm}#{k}")
+            df["name"] = uniq
     return df
 
 
@@ -131,7 +153,15 @@ def bedtools_closest_distance(loci_bed: Path, ref_bed: str) -> dict:
         for line in res.stdout.splitlines():
             f = line.split("\t")
             if len(f) >= 2 and f[-1].lstrip("-").isdigit():
-                dist[f[3]] = int(f[-1])
+                d = int(f[-1])
+                # bedtools closest -d emits -1 when there is NO feature on that
+                # chromosome at all (e.g. the reference BED is hg19 and the loci
+                # are hg38, or the contig is absent). That is "unknown", not
+                # "0 bp away" — keeping it made every copy compare <= the
+                # boundary window and be called boundary-proximal.
+                if d < 0:
+                    continue
+                dist[f[3]] = d
         return dist
 
 
