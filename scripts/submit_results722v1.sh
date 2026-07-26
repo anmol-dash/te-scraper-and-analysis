@@ -22,6 +22,12 @@
 #   • Stage 11 now marks a module EMPTY (= failed) when it exits 0 with a zero
 #     headline count, instead of logging "15 ok / 0 failed" over a ColabFold run
 #     that folded nothing.
+#   • run_benchmark read a "[TIMING] ..." log format the pipeline never emitted,
+#     so it only ever found the CHECKPOINT files (no durations) and wrote
+#     \benchTotalSec{0} over a 630 s run. It now reads stage_times.json, uses
+#     total_seconds (not the sum of stages — alignment and Stage 11 overlap
+#     under --parallel-alignment), and always writes fig_benchmark.png, which
+#     the completion banner has been advertising without producing.
 # The K562 ENCODE fetches 404'd last run (CTCF/H3K9me3/ATAC) — that is upstream,
 # not ours; the epigenetic panel will report n/a rather than a measured 0%.
 #
@@ -193,4 +199,48 @@ Status: cat $OUTPUT/{ltr5_hs,mt2_mm}/PIPELINE_STATUS.txt
  6. cluster_summary.csv strand columns are non-zero for MT2_Mm (recovered
     from TE_ID, which has no explicit strand column):
       cat $OUTPUT/mt2_mm/03_clustering/cluster_summary.csv
+
+── Checks added after the 2026-07-25 run (jobs 98374466/67) ────────────────
+ 7. Per-copy columns are NOT constant. This is the tell for the locus-key
+    collapse: every liftOver/bedtools result used to join on TE_name, which
+    is the family name on every row.
+      python3 - <<'PY'
+      import pandas as pd, glob
+      for f in sorted(glob.glob("$OUTPUT/*/reports/*_per_copy.csv")):
+          d = pd.read_csv(f)
+          if "name" in d and d["name"].nunique() == 1:
+              print("BAD (collapsed locus key):", f)
+          for c in d.columns:
+              if c.startswith(("maps_", "present_", "overlap_", "tad_")) \\
+                 and d[c].nunique(dropna=True) == 1:
+                  print("SUSPECT (constant column):", f, c, "=", d[c].iloc[0])
+      PY
+ 8. No Stage 11 module reported EMPTY (exited 0 but produced nothing).
+    Last run this would have caught LTR5_Hs fold and MT2_Mm epigenetic:
+      grep -E "EMPTY|FAILED" $OUTPUT/*/standout_analysis.log
+      grep "Done: ok=" $OUTPUT/*/standout_analysis.log
+ 9. Liftover actually mapped. Anything unavailable is listed as n/a with a
+    reason instead of vanishing; a real hg38->hg19 rate is >90%, not 0.2%:
+      cat $OUTPUT/ltr5_hs/reports/multiassembly_report.txt
+      cat $OUTPUT/ltr5_hs/reports/ortholog_report.txt
+10. TAD/epigenetic values are n/a, not a fabricated 0. "Boundary-proximal"
+    must never be 100% of copies at -0.0 kb:
+      cat $OUTPUT/*/reports/ctcf_tad_report.txt
+      cat $OUTPUT/*/reports/epigenetic_report.txt
+11. Benchmark total matches the run's real wall-clock (was 0s on a 630s run):
+      grep -E "TotalSec|TotalMin" $OUTPUT/*/reports/benchmark_values.tex
+      python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['total_seconds'])" \\
+        $OUTPUT/ltr5_hs/stage_times.json
+      ls -la $OUTPUT/*/reports/fig_benchmark.png   # now always written
+12. CIAlign: MT2_Mm lost all 11 cluster alignments last run while
+    whole_family passed, in the SAME container. The one clean discriminator
+    is alignment length — everything <= 1031 columns crashed, everything
+    >= 1117 passed; sequence count did not matter (105 crashed, 2573 passed).
+    Note the trimAl fallback SHORTENS the alignment, so if length is really
+    the trigger the retry cannot help, which matches 11/11 retries failing.
+    The traceback is no longer truncated, so this run should name the
+    exception. If any group failed, read:
+      grep -c "CIAlign failed" $LOGS/*.err $LOGS/*.out
+      cat $OUTPUT/*/04_alignments/logs/*_cialign_error.txt
+    and send that file — it has the exception plus the CIAlign version.
 EOF
