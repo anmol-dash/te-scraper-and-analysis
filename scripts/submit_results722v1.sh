@@ -91,10 +91,23 @@ if bjobs -w 2>/dev/null | grep -qE "gameca_(ltr5_hs|mt2_mm)"; then
   exit 1
 fi
 
-echo "Removing previous results:"
-for d in "$OUTPUT/ltr5_hs" "$OUTPUT/mt2_mm" "$OUTPUT/pipeline_info"; do
-  [ -e "$d" ] && { echo "  rm -rf $d"; rm -rf "$d"; } || echo "  (absent) $d"
-done
+# The 2026-07-26 run was launched WITHOUT this wrapper, so the tree was never
+# wiped: 60/254 files under ltr5_hs and 96/299 under mt2_mm were left over from
+# the run before, including a 3-cluster cluster_summary.csv sitting next to a
+# 0-cluster run, and stale subfamily/fold .tex for the two modules that failed.
+# Set KEEP_OUTPUT=1 to deliberately re-run into an existing tree; query.py then
+# lists everything it did not write in STALE_FILES.txt.
+KEEP_OUTPUT=${KEEP_OUTPUT:-0}
+if [ "$KEEP_OUTPUT" = "1" ]; then
+  echo "KEEP_OUTPUT=1 — NOT wiping $OUTPUT."
+  echo "  Outputs from this run will be mixed with whatever is already there."
+  echo "  Check STALE_FILES.txt in each family dir afterwards."
+else
+  echo "Removing previous results:"
+  for d in "$OUTPUT/ltr5_hs" "$OUTPUT/mt2_mm" "$OUTPUT/pipeline_info"; do
+    [ -e "$d" ] && { echo "  rm -rf $d"; rm -rf "$d"; } || echo "  (absent) $d"
+  done
+fi
 mkdir -p "$OUTPUT" "$LOGS"
 echo
 
@@ -232,15 +245,31 @@ Status: cat $OUTPUT/{ltr5_hs,mt2_mm}/PIPELINE_STATUS.txt
       python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['total_seconds'])" \\
         $OUTPUT/ltr5_hs/stage_times.json
       ls -la $OUTPUT/*/reports/fig_benchmark.png   # now always written
-12. CIAlign: MT2_Mm lost all 11 cluster alignments last run while
-    whole_family passed, in the SAME container. The one clean discriminator
-    is alignment length — everything <= 1031 columns crashed, everything
-    >= 1117 passed; sequence count did not matter (105 crashed, 2573 passed).
-    Note the trimAl fallback SHORTENS the alignment, so if length is really
-    the trigger the retry cannot help, which matches 11/11 retries failing.
-    The traceback is no longer truncated, so this run should name the
-    exception. If any group failed, read:
-      grep -c "CIAlign failed" $LOGS/*.err $LOGS/*.out
-      cat $OUTPUT/*/04_alignments/logs/*_cialign_error.txt
-    and send that file — it has the exception plus the CIAlign version.
+12. CIAlign: SOLVED on 2026-07-26. The alignment-length correlation was a
+    red herring. Real cause: Singularity binds \$HOME and Python's ~/.local
+    outranks the image, so a host NumPy 2.4 shadowed the container's. That
+    killed numba (=> UMAP => the whole clustering stage) and CIAlign 1.1.4
+    (np.in1d, removed in NumPy 2.0) at the same time. Fixed by
+    PYTHONNOUSERSITE=1 in the container block plus a np.in1d shim.
+    Confirm numpy now resolves INSIDE the image:
+      grep "Container numpy:" $LOGS/*.out     # must be /usr/local/...
+      grep -c "has no attribute 'in1d'" $LOGS/*.err   # must be 0
+      ls $OUTPUT/*/04_alignments/images/*.png | wc -l # must be > 0
+
+── Checks added after the 2026-07-26 run (jobs 98395637/38) ────────────────
+13. Clustering actually ran. It failed on both families last run and the
+    pipeline still printed 10/10 and exited 0:
+      grep -E "^\s+\[!\]|FAILED" $OUTPUT/*/PIPELINE_STATUS.txt
+      head -1 $OUTPUT/*/CHECKPOINT_STAGE5_CLUSTERING.txt   # COMPLETED, not FAILED
+      grep "n_clusters=" $OUTPUT/*/CHECKPOINT_STAGE5_CLUSTERING.txt
+    A critical-stage failure now exits non-zero, so also check:
+      grep "DONE rc=" $LOGS/*.out
+14. Benchmark sees the real total (it used to run before stage_times.json
+    existed, so it could only ever emit "---"):
+      grep -E "TotalSec|TotalMin" $OUTPUT/*/reports/benchmark_values.tex
+      python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['total_seconds'])" \\
+        $OUTPUT/ltr5_hs/stage_times.json
+15. No stale files, and nothing quarantined:
+      cat $OUTPUT/*/STALE_FILES.txt
+      ls $OUTPUT/*/reports/*.stale 2>/dev/null && echo "^ failed modules' old outputs"
 EOF

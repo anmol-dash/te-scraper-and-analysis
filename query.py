@@ -413,6 +413,42 @@ _PIPELINE_STAGES = [
 ]
 
 
+# Checkpoint key -> the stage string its log_error() call uses. Only stages that
+# can fail-and-continue need an entry; anything absent is never marked degraded.
+_STAGE_ERROR_ALIASES = {
+    "stage2_load_data":  ("LOAD DATA",),
+    "stage3_sequences":  ("FETCH SEQUENCES",),
+    "stage5_clustering": ("CLUSTERING",),
+    "stage7_alignment":  ("ALIGNMENT",),
+    "stage9_motif":      ("MOTIF / TFBS / GO", "TF BINDING ANALYSIS"),
+    "stage10_primers":   ("PRIMER DESIGN",),
+    "stage11_standout":  ("RESUME FROM STANDOUT",),
+}
+
+
+def _stage_error_for(key, ckpt_path=None):
+    """Return the error string for a stage, or "" if it did not fail.
+
+    Checks the in-process record first, then the checkpoint file — the file
+    matters for --resume-from runs, where the failure happened in an earlier
+    process and _FAILED_STAGES is empty.
+    """
+    for alias in _STAGE_ERROR_ALIASES.get(key, ()):
+        if alias in _FAILED_STAGES:
+            return _FAILED_STAGES[alias]
+    try:
+        if ckpt_path is not None and Path(ckpt_path).exists():
+            head = Path(ckpt_path).read_text(errors="replace").splitlines()
+            if head and head[0].startswith("FAILED:"):
+                for ln in head:
+                    if ln.startswith("Error:"):
+                        return ln.split(":", 1)[1].strip()
+                return "see pipeline_errors.log"
+    except Exception:
+        pass
+    return ""
+
+
 def _write_status_checklist(out_dir):
     """Rewrite PIPELINE_STATUS.txt — a live checklist of finished vs pending stages.
 
@@ -428,22 +464,47 @@ def _write_status_checklist(out_dir):
                  f"Updated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
                  ""]
         done = 0
+        failed_here = []
         for key, label in _PIPELINE_STAGES:
             ckpt = out_dir / f"CHECKPOINT_{key.upper().replace(' ', '_')}.txt"
             is_done = ckpt.exists()
+            # A checkpoint written by a stage that raised means "ran and
+            # degraded", not "completed" — mark it [!] and keep it out of the
+            # completed tally.
+            err = _stage_error_for(key, ckpt)
+            if err:
+                failed_here.append((label, err))
+                lines.append(f"  [!] {label}  — FAILED: {err}")
+                continue
             done += is_done
             lines.append(f"  [{'x' if is_done else ' '}] {label}")
         lines.append("")
         lines.append(f"  {done}/{len(_PIPELINE_STAGES)} stages complete")
+        if failed_here:
+            lines.append(f"  {len(failed_here)} stage(s) FAILED — results below are "
+                         f"degraded, do not cite them as measured:")
+            for label, err in failed_here:
+                lines.append(f"    - {label}: {err}")
         (out_dir / "PIPELINE_STATUS.txt").write_text("\n".join(lines) + "\n")
     except Exception:
         pass
 
 
 def _checkpoint(out_dir, stage_name, details=""):
-    """Write a STAGE_<name>_COMPLETE.txt checkpoint and log it."""
+    """Write a STAGE_<name>_COMPLETE.txt checkpoint and log it.
+
+    A stage that caught an exception and continued is written as FAILED, not
+    COMPLETED, so neither the checkpoint file nor PIPELINE_STATUS.txt can claim
+    a stage succeeded when it did not.
+    """
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    txt = f"COMPLETED: {stage_name}\nTimestamp: {ts}\n{details}\n"
+    _err = _stage_error_for(stage_name)
+    if _err:
+        txt = (f"FAILED: {stage_name}\nTimestamp: {ts}\nError: {_err}\n"
+               f"{details}\nNOTE: the stage continued with degraded output; "
+               f"downstream results derived from it are not measurements.\n")
+    else:
+        txt = f"COMPLETED: {stage_name}\nTimestamp: {ts}\n{details}\n"
     try:
         path = out_dir / f"CHECKPOINT_{stage_name.upper().replace(' ', '_')}.txt"
         path.write_text(txt)
@@ -489,9 +550,28 @@ def _orient_sequence(seq, row):
     return reverse_complement(seq).upper() if _row_strand(row) == "-" else seq
 
 
+# Stages that raised. A stage can catch its exception and carry on with degraded
+# output (clustering falls back to a single label), but the run must not then
+# report itself as clean: on 2026-07-26 clustering died on an ImportError, every
+# locus collapsed into "Cluster 0", and the job still wrote "[x] Clustering" /
+# "10/10 stages complete" and exited 0. Recorded here by log_error(), surfaced in
+# CHECKPOINT_*/PIPELINE_STATUS.txt, and turned into a non-zero exit at the end.
+_FAILED_STAGES: dict = {}
+
+# Stages whose failure invalidates the scientific result rather than degrading a
+# side output. A run that loses these should exit non-zero even though later
+# stages "succeeded" on top of the fallback.
+# Names must match the strings passed to log_error(); see _STAGE_ERROR_ALIASES.
+_CRITICAL_STAGES = {"CLUSTERING", "LOAD DATA", "FETCH SEQUENCES"}
+
+
 def log_error(stage, err, context=None):
     """Print a boxed error report (with traceback) and append it to
     pipeline_errors.log under OUT_DIR when available. Never raises."""
+    try:
+        _FAILED_STAGES[str(stage).strip().upper()] = f"{type(err).__name__}: {err}"
+    except Exception:
+        pass
     print("\n" + "=" * 70, flush=True)
     print(f"ERROR in stage: {stage}", flush=True)
     print(f"  {type(err).__name__}: {err}", flush=True)
@@ -2822,8 +2902,12 @@ def _run_standout_analysis(args, out_dir, dirs, family_name, stage_times):
          ["--assembly", _assembly_arg]
          + _opt("--cpg-omega", _cpg_omega)
          + (["--consensus-fasta", str(cons_fa)] if cons_fa.exists() else [])),
-        ("benchmark",     "run_benchmark.py",
-         ["--assembly", _assembly_arg]),
+        # NOTE: "benchmark" is deliberately NOT here. It reads stage_times.json,
+        # which run_pipeline writes only after Stage 11 returns, so running it
+        # inside this loop guaranteed it never saw the current run's timings —
+        # \benchTotalSec came out "---" (previously a fabricated 0) against a
+        # real 4603 s. It is invoked by _run_benchmark_module() instead, after
+        # the timings exist. See _MODULES_POST.
         ("motif_gain",    "run_motif_gain.py",
          ["--assembly", _assembly_arg]
          + (["--consensus-fasta", str(cons_fa)] if cons_fa.exists() else [])),
@@ -2923,6 +3007,7 @@ def _run_standout_analysis(args, out_dir, dirs, family_name, stage_times):
                 if _hl and not _hl[1]:
                     _shown = "missing" if _hl[1] is None else "0"
                     msg = f"EMPTY ({_hl[0]}={_shown})"
+                    _quarantine_stale_outputs(mod_name, reports_dir, t_mod)
                     print(f" {msg} ({elapsed:.0f}s)"); _sa_fail += 1
                     _diag(f"  STAGE 11 [{mod_name}]: {msg} — "
                           f"exited 0 but produced no results")
@@ -2937,6 +3022,7 @@ def _run_standout_analysis(args, out_dir, dirs, family_name, stage_times):
                     _sa_results.append((mod_name, "OK", elapsed))
             else:
                 print(f" FAILED rc={rc} ({elapsed:.0f}s)"); _sa_fail += 1
+                _quarantine_stale_outputs(mod_name, reports_dir, t_mod)
                 _diag(f"  STAGE 11 [{mod_name}]: FAILED rc={rc}")
                 _sa_results.append((mod_name, f"FAILED rc={rc}", elapsed))
 
@@ -2955,6 +3041,133 @@ def _run_standout_analysis(args, out_dir, dirs, family_name, stage_times):
 
     _checkpoint(out_dir, "stage11_standout")
     stage_times["Standout analysis"] = time.time() - t0
+
+
+# Files each Stage 11 module owns, relative to reports/. Used to quarantine a
+# previous run's outputs when the module fails or comes back EMPTY.
+_MODULE_OUTPUTS = {
+    "phylo":         ("phylo_measured_values.tex", "phylo_report.txt", "phylo_per_copy.csv"),
+    "grna":          ("grna_offtarget_measured_values.tex", "grna_offtarget_report.txt"),
+    "transduction":  ("transduction_measured_values.tex", "transduction_report.txt"),
+    "antisense":     ("antisense_measured_values.tex", "antisense_report.txt"),
+    "ctcf_tad":      ("ctcf_tad_measured_values.tex", "ctcf_tad_report.txt"),
+    "epigenetic":    ("epigenetic_measured_values.tex", "epigenetic_report.txt"),
+    "ortholog":      ("ortholog_measured_values.tex", "ortholog_report.txt"),
+    "multiassembly": ("multiassembly_measured_values.tex", "multiassembly_report.txt"),
+    "fold":          ("fold_measured_values.tex", "fold_report.txt"),
+    "divergence":    ("repeat_landscape_values.tex", "divergence_stats.csv"),
+    "ltr_struct":    ("ltr_struct_values.tex", "ltr_struct_summary.csv"),
+    "subfamily":     ("subfamily_values.tex", "subfamily_table.csv", "subfamily_tree.nwk"),
+    "benchmark":     ("benchmark_values.tex", "benchmark_table.csv"),
+    "motif_gain":    ("motif_gain_values.tex", "motif_gain_summary.csv"),
+}
+
+
+def _report_stale_outputs(out_dir, pipeline_start):
+    """List output files not written by this run into STALE_FILES.txt.
+
+    Re-running into an existing tree (instead of letting submit_results722v1.sh
+    wipe it) silently mixes two runs: on 2026-07-26, 60/254 files under ltr5_hs
+    and 96/299 under mt2_mm predated the job, including cluster_summary.csv from
+    a 3-cluster run sitting next to a 0-cluster one. Nothing here is deleted —
+    the point is that the mixture is visible instead of invisible.
+    """
+    try:
+        out_dir = Path(out_dir)
+        skip_names = {"PIPELINE_STATUS.txt", "STALE_FILES.txt",
+                      "pipeline_errors.log", "pipeline_diagnostic.log"}
+        stale = []
+        for p in out_dir.rglob("*"):
+            if not p.is_file() or p.name in skip_names or p.suffix == ".stale":
+                continue
+            try:
+                if p.stat().st_mtime < pipeline_start:
+                    stale.append(p.relative_to(out_dir))
+            except OSError:
+                continue
+        dest = out_dir / "STALE_FILES.txt"
+        if not stale:
+            dest.write_text("No stale files: every output was written by this run.\n")
+            return
+        stale.sort()
+        dest.write_text(
+            "Files under this output directory that were NOT written by this run.\n"
+            "They are left over from an earlier run into the same tree, and they\n"
+            "may contradict the current results. Do not cite them.\n"
+            f"Run started: {datetime.datetime.fromtimestamp(pipeline_start):%Y-%m-%d %H:%M:%S}\n"
+            f"Stale files: {len(stale)}\n\n"
+            + "\n".join(str(s) for s in stale) + "\n")
+        print(f"\n  WARNING: {len(stale)} file(s) here predate this run "
+              f"(earlier run into the same tree).")
+        print(f"           Listed in STALE_FILES.txt — they may contradict the "
+              f"results above.")
+        _diag(f"  STALE: {len(stale)} pre-existing files under {out_dir}")
+    except Exception as e:                                       # noqa: BLE001
+        _diag(f"  STALE: check failed: {e}")
+
+
+def _quarantine_stale_outputs(mod_name, reports_dir, started_at):
+    """Rename a failed/EMPTY module's leftover outputs to *.stale.
+
+    When the output tree is reused rather than wiped, a module that fails leaves
+    the PREVIOUS run's files in place — and generate_latex_report happily cites
+    them as this run's measurements. On 2026-07-26 subfamily (LTR5_Hs) and fold
+    (MT2_Mm) both came back EMPTY while their .tex from the run before sat right
+    there. Anything not rewritten since this module started is not from this run.
+    """
+    moved = []
+    for fname in _MODULE_OUTPUTS.get(mod_name, ()):
+        p = Path(reports_dir) / fname
+        try:
+            if p.exists() and p.stat().st_mtime < started_at:
+                p.rename(p.with_suffix(p.suffix + ".stale"))
+                moved.append(fname)
+        except OSError:
+            pass
+    if moved:
+        print(f"    [{mod_name}] quarantined {len(moved)} stale file(s) from an "
+              f"earlier run: {', '.join(moved)}")
+        _diag(f"  STAGE 11 [{mod_name}]: quarantined stale {moved}")
+    return moved
+
+
+def _run_benchmark_module(args, out_dir, dirs, family_name):
+    """Run run_benchmark.py after stage_times.json has been written.
+
+    Split out of Stage 11 because it is the one module that measures the run
+    rather than the family, so it can only be correct once the run's timings
+    are on disk. Appends to the same standout_analysis.log.
+    """
+    clustered_csv = dirs["data"] / f"{family_name.lower()}_clustered.csv"
+    reports_dir = out_dir / "reports"
+    if not clustered_csv.exists():
+        _diag("  BENCHMARK: clustered CSV not found — skipping")
+        return
+    _sdir = Path(os.environ.get("GAMECA_HOME") or Path(__file__).resolve().parent)
+    script = _sdir / "run_benchmark.py"
+    if not script.exists():
+        _diag(f"  BENCHMARK: script not found: {script}")
+        return
+    _py = shutil.which("python3") or shutil.which("python") or sys.executable
+    cmd = [_py, str(script),
+           "--input", str(clustered_csv),
+           "--reports-dir", str(reports_dir),
+           "--family", family_name,
+           "--assembly", getattr(args, "assembly", "hg38") or "hg38"]
+    _diag(f"  BENCHMARK: {' '.join(cmd)}")
+    print("  [benchmark] running...", end="", flush=True)
+    t_mod = time.time()
+    try:
+        with open(out_dir / "standout_analysis.log", "a", buffering=1) as _lf:
+            _lf.write(f"\n{'='*60}\n[benchmark] (post-timing)\n{'='*60}\n")
+            _lf.write(f"CMD: {' '.join(cmd)}\n\n")
+            rc = subprocess.run(cmd, stdout=_lf, stderr=subprocess.STDOUT).returncode
+            _lf.write(f"\n[EXIT {rc}  {time.time()-t_mod:.0f}s]\n")
+    except Exception as e:                                       # noqa: BLE001
+        print(f" FAILED ({e})"); _diag(f"  BENCHMARK: FAILED {e}")
+        return
+    print(f" {'ok' if rc == 0 else f'FAILED rc={rc}'} ({time.time()-t_mod:.0f}s)")
+    _diag(f"  BENCHMARK: rc={rc}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -3985,6 +4198,12 @@ def run_pipeline(args):
         print(f"  Stage timings:   stage_times.json")
     except Exception as _e:
         print(f"  WARNING: could not write stage_times.json: {_e}")
+
+    # Benchmark runs here, not in Stage 11, so it can read the timings above.
+    if not getattr(args, "skip_standout", False):
+        _run_benchmark_module(args, OUT_DIR, DIRS, FAMILY_NAME)
+
+    _report_stale_outputs(OUT_DIR, pipeline_start)
     print(f"  Sequences:       {FAMILY_NAME.lower()}_sequences.csv")
     print(f"  Dashboard:       07_visualizations/index.html")
     print(f"  Primers:         06_primers/selected_primers_summary.csv")
@@ -4022,6 +4241,24 @@ def run_pipeline(args):
               f"{DIRS['motif'] / 'MOTIF_ANALYSIS_FAILED.txt'} and pipeline_errors.log")
         print("[Pipeline] All other stages completed; their outputs above are valid.")
         if getattr(args, "motif_fatal", True):
+            sys.exit(1)
+
+    # Any stage that raised and continued is reported here and, when it is one of
+    # the stages the science depends on, made a non-zero exit. Otherwise a run
+    # that lost clustering entirely still looks like a clean success to whoever
+    # (or whatever) is reading the exit code.
+    if _FAILED_STAGES:
+        print("\n" + "=" * 60)
+        print(f"  {len(_FAILED_STAGES)} STAGE(S) FAILED — the outputs above are degraded")
+        print("=" * 60)
+        for _st, _msg in _FAILED_STAGES.items():
+            _crit = " [CRITICAL]" if _st in _CRITICAL_STAGES else ""
+            print(f"  {_st}{_crit}: {_msg}")
+        print("  See pipeline_errors.log and PIPELINE_STATUS.txt.")
+        _critical = [s for s in _FAILED_STAGES if s in _CRITICAL_STAGES]
+        if _critical:
+            print(f"\n[Pipeline] Exiting non-zero: {', '.join(_critical)} failed. "
+                  f"Results derived from the fallback are not measurements.")
             sys.exit(1)
 
     return df_family

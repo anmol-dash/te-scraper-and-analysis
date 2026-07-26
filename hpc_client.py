@@ -952,13 +952,35 @@ if [ ! -f "$GAMECA_SIF" ]; then
 fi
 echo "[GAMECA] Container mode: $GAMECA_RT exec $GAMECA_SIF"
 echo "[GAMECA] Binds: $GAMECA_BINDS"
+# Singularity bind-mounts $HOME, and Python's user site-packages (~/.local)
+# take precedence over the image's /usr/local/lib/pythonX/site-packages. A host
+# `pip install --user` therefore silently overrides the image's pinned deps for
+# every container process. On 2026-07-26 a host NumPy 2.4 shadowed the image's
+# numpy and broke two unrelated things at once: numba refused to import
+# ("Numba needs NumPy 2.2 or less"), killing UMAP and the whole clustering
+# stage, and CIAlign 1.1.4 died on np.in1d (removed in NumPy 2.0), losing every
+# alignment plot. PYTHONNOUSERSITE makes the interpreter ignore ~/.local so the
+# image is self-contained, which is the entire point of running in one.
+export PYTHONNOUSERSITE=1
 # Route bare `python`/`python3` into the image. --pwd keeps the working dir; the
 # bind-mounted work dir means the repo's own code is used (bake default, override).
-python()  {{ "$GAMECA_RT" exec $GAMECA_BINDS --pwd {shlex.quote(pwd_dir)} "$GAMECA_SIF" python "$@"; }}
+python()  {{ PYTHONNOUSERSITE=1 SINGULARITYENV_PYTHONNOUSERSITE=1 APPTAINERENV_PYTHONNOUSERSITE=1 \\
+             "$GAMECA_RT" exec $GAMECA_BINDS --pwd {shlex.quote(pwd_dir)} "$GAMECA_SIF" python "$@"; }}
 python3() {{ python "$@"; }}
 export GAMECA_SIF GAMECA_RT GAMECA_BINDS
 export -f python python3
 echo "[GAMECA] Container python: $(python --version 2>&1)"
+# Fail loudly here rather than three stages later: if numpy resolves outside the
+# image, every downstream import is running against unpinned host packages.
+_np_src="$(python -c 'import numpy,sys; sys.stdout.write(numpy.__file__)' 2>/dev/null || echo UNKNOWN)"
+echo "[GAMECA] Container numpy: $_np_src"
+case "$_np_src" in
+    /usr/local/*|/opt/*) : ;;
+    *) echo "[GAMECA] FATAL: numpy resolved to '$_np_src', outside the image." >&2
+       echo "[GAMECA]   A host ~/.local install is shadowing the container's." >&2
+       echo "[GAMECA]   PYTHONNOUSERSITE=1 should have prevented this." >&2
+       exit 1 ;;
+esac
 '''.strip()
 
     def _venv_setup_block(self):

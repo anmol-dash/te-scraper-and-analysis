@@ -6,7 +6,13 @@
 # under 2.x; query.py catches that and falls back to the numpy path, so this
 # costs the speedup, not correctness. Rebuild te_fast via setup_cython.py to
 # restore it.
-numpy>=1.24
+# Upper bound is set by numba, which hard-refuses to import above its supported
+# NumPy ("Numba needs NumPy 2.2 or less. Got NumPy 2.4") and takes umap-learn —
+# and therefore the whole clustering stage — down with it. The floor stays >=1.24
+# for colabfold (needs >=2.0.2), which is why this cannot also be capped <2.0 for
+# CIAlign 1.1.4's removed np.in1d: that conflict is resolved by the runtime shim
+# in te_alignment._cialign_compat_dir(), not by pinning. Bump only with numba.
+numpy>=1.24,<2.3
 pandas>=2.0,<3.0
 scipy>=1.10,<2.0
 statsmodels>=0.14,<1.0
