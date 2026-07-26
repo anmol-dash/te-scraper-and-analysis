@@ -14,6 +14,9 @@ Output:
     all_overlaps.tsv               raw bedtools overlap output
     overall_motif_counts.csv       motif frequency across all loci
     overall_top_motifs.png         top-20 bar chart
+    cluster_motif_counts.csv       per-cluster motif counts + sites_per_locus
+    cluster_motif_counts_matrix.csv  motif x cluster wide matrix (+ total)
+    cluster_N_top_motifs.png       top-20 bar chart per cluster
   <out_dir>/enrichment_results/
     cluster_N_enrichment.csv       Fisher p-values per cluster
     enrichment_heatmap.png         -log10(p) heatmap across clusters
@@ -1947,6 +1950,70 @@ def run_motif_analysis(input_csv, build, out_dir, jaspar_bed_arg,
             log.info("Saved %s", out_png)
         except Exception as exc:
             log.warning("Top-20 bar chart failed: %s", exc)
+            log.debug(traceback.format_exc())
+
+        # Per-cluster motif counts + charts. all_overlaps.tsv already carries a
+        # Cluster column, so the family-level rollup above was throwing away a
+        # breakdown that was sitting right there. The Fisher stage below reports
+        # ENRICHMENT (cluster vs rest); these are the raw per-cluster counts that
+        # enrichment is computed from, which is what you want when comparing
+        # absolute motif load between subfamilies.
+        loci_per_cluster = {}
+        try:
+            per_cluster = (df_ov.groupby([cl_col, "Motif_name"])
+                                .size().rename("count").reset_index()
+                                .sort_values([cl_col, "count"],
+                                             ascending=[True, False]))
+
+            # Wide motif x cluster matrix — the convenient shape for heatmaps
+            # and for diffing subfamilies side by side.
+            matrix = (per_cluster.pivot(index="Motif_name", columns=cl_col,
+                                        values="count")
+                                 .fillna(0).astype(int))
+            matrix.columns = [f"cluster_{c}" for c in matrix.columns]
+            matrix["total"] = matrix.sum(axis=1)
+            matrix.sort_values("total", ascending=False, inplace=True)
+            matrix.to_csv(motif_dir / "cluster_motif_counts_matrix.csv")
+            log.info("Saved cluster_motif_counts.csv + matrix (%d motifs x %d clusters)",
+                     len(matrix), max(len(matrix.columns) - 1, 0))
+
+            # Normalised per-cluster share: cluster sizes differ, so raw counts
+            # alone make the biggest cluster look motif-rich by construction.
+            loci_per_cluster = df.groupby(cl_col).size().to_dict()
+            per_cluster["sites_per_locus"] = [
+                (row["count"] / loci_per_cluster[row[cl_col]])
+                if loci_per_cluster.get(row[cl_col]) else float("nan")
+                for _, row in per_cluster.iterrows()
+            ]
+            per_cluster.to_csv(motif_dir / "cluster_motif_counts.csv", index=False)
+        except Exception as exc:
+            log.warning("cluster_motif_counts.csv failed: %s", exc)
+            log.debug(traceback.format_exc())
+
+        try:
+            _cids = sorted(df_ov[cl_col].dropna().unique())
+            for cid in _cids:
+                sub = (df_ov[df_ov[cl_col] == cid]["Motif_name"]
+                       .value_counts().head(20).reset_index())
+                if sub.empty:
+                    continue
+                sub.columns = ["Motif", "Count"]
+                fig, ax = plt.subplots(figsize=(12, 6))
+                ax.bar(range(len(sub)), sub["Count"], color="#E67E22", alpha=0.85)
+                ax.set_xticks(range(len(sub)))
+                ax.set_xticklabels(sub["Motif"], rotation=45, ha="right", fontsize=9)
+                ax.set_ylabel("Count")
+                _n = loci_per_cluster.get(cid, "?")
+                ax.set_title(f"Top 20 Motifs — cluster {cid} (n={_n} loci, {build})",
+                             fontweight="bold")
+                ax.spines[["top", "right"]].set_visible(False)
+                plt.tight_layout()
+                plt.savefig(motif_dir / f"cluster_{cid}_top_motifs.png",
+                            dpi=150, bbox_inches="tight")
+                plt.close()
+            log.info("Saved per-cluster top-motif charts for %d cluster(s)", len(_cids))
+        except Exception as exc:
+            log.warning("Per-cluster top-motif charts failed: %s", exc)
             log.debug(traceback.format_exc())
 
     # ── Fisher's exact test ───────────────────────────────────────────────────
