@@ -120,6 +120,13 @@ bsub -J gameca_ltr5_hs \
 set -euo pipefail
 cd '$GAMECA_HOME'
 echo \"[gameca] LTR5_Hs host=\$(hostname) start=\$(date)\"
+# These jobs run bare python3 on the compute node — NOT inside gameca.sif —
+# so hpc_client's container block never applies. Python's user site-packages
+# (~/.local) therefore outrank the system install, and on 2026-07-26 a
+# host-installed NumPy 2.4 there shadowed the system numpy: numba refused to
+# import (killing UMAP and the whole clustering stage) and CIAlign 1.1.4 died
+# on np.in1d. PYTHONNOUSERSITE makes this interpreter ignore ~/.local.
+export PYTHONNOUSERSITE=1
 export HTTPS_PROXY=\${HTTPS_PROXY:-\${https_proxy:-}}
 export HTTP_PROXY=\${HTTP_PROXY:-\${http_proxy:-}}
 python3 query.py \
@@ -159,6 +166,13 @@ bsub -J gameca_mt2_mm \
 set -euo pipefail
 cd '$GAMECA_HOME'
 echo \"[gameca] MT2_Mm host=\$(hostname) start=\$(date)\"
+# These jobs run bare python3 on the compute node — NOT inside gameca.sif —
+# so hpc_client's container block never applies. Python's user site-packages
+# (~/.local) therefore outrank the system install, and on 2026-07-26 a
+# host-installed NumPy 2.4 there shadowed the system numpy: numba refused to
+# import (killing UMAP and the whole clustering stage) and CIAlign 1.1.4 died
+# on np.in1d. PYTHONNOUSERSITE makes this interpreter ignore ~/.local.
+export PYTHONNOUSERSITE=1
 export HTTPS_PROXY=\${HTTPS_PROXY:-\${https_proxy:-}}
 export HTTP_PROXY=\${HTTP_PROXY:-\${http_proxy:-}}
 python3 query.py \

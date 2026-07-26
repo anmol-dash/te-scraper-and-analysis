@@ -48,6 +48,56 @@ from pathlib import Path
 # ── HPC-only guard ────────────────────────────────────────────────────────────
 # query.py is designed to run on a SLURM or LSF cluster.  Bypass with --local
 # for local execution or --test for CI/unit-test mode.
+def _check_numpy_stack():
+    """Fail fast if the clustering stack cannot import. Returns nothing.
+
+    Not hypothetical: on 2026-07-26 both jobs ran ~3 minutes of genome/sequence
+    work, then hit "ImportError: Numba needs NumPy 2.2 or less. Got NumPy 2.4"
+    inside stage 5, collapsed every locus into one cluster, and carried on for
+    another hour producing results derived from that collapse. The import costs
+    a couple of seconds here and turns a silently degraded run into a clear stop.
+
+    The cause was a host `pip install --user` NumPy landing in ~/.local, which
+    outranks the system/site install for every interpreter that does not set
+    PYTHONNOUSERSITE. Because that is exactly the shadowing case, the numpy
+    provenance is printed whenever anything is wrong.
+    """
+    # --help must never pay for (or fail on) a heavy import.
+    if "-h" in sys.argv or "--help" in sys.argv:
+        return
+    try:
+        import numpy as _np
+        np_file, np_ver = getattr(_np, "__file__", "?"), _np.__version__
+    except Exception as e:                                       # noqa: BLE001
+        print(f"\n  FATAL: numpy is not importable: {e}", flush=True)
+        sys.exit(1)
+
+    user_site = str(Path.home() / ".local")
+    from_user_site = str(np_file).startswith(user_site)
+    try:
+        import numba  # noqa: F401
+        import umap   # noqa: F401
+    except Exception as e:                                       # noqa: BLE001
+        print("\n" + "=" * 70, flush=True)
+        print("  FATAL: the clustering stack (numba/umap-learn) will not import.", flush=True)
+        print(f"    {type(e).__name__}: {e}", flush=True)
+        print(f"    numpy {np_ver} from {np_file}", flush=True)
+        if from_user_site:
+            print(f"\n  numpy is coming from your user site-packages ({user_site}),", flush=True)
+            print("  which overrides the system/container install. Either:", flush=True)
+            print("    export PYTHONNOUSERSITE=1        # ignore ~/.local for this run", flush=True)
+            print("    pip uninstall --user numpy       # or remove it entirely", flush=True)
+        print("\n  Refusing to start: clustering is the core of the pipeline, and", flush=True)
+        print("  continuing would collapse every locus into a single cluster.", flush=True)
+        print("=" * 70 + "\n", flush=True)
+        sys.exit(1)
+
+    if from_user_site:
+        print(f"  NOTE: numpy {np_ver} is loaded from {user_site} (user site-packages), "
+              f"not the system/container install. Set PYTHONNOUSERSITE=1 to ignore it.",
+              flush=True)
+
+
 def _check_hpc_environment():
     """Abort early with guidance unless we're on an HPC scheduler (LSF/Slurm).
 
@@ -4270,6 +4320,7 @@ def run_pipeline(args):
 
 if __name__ == "__main__":
     _check_hpc_environment()
+    _check_numpy_stack()
     args = parse_args()
     if args.run_stage:
         _run_single_stage(args)
