@@ -12,7 +12,7 @@
 set -euo pipefail
 
 WORK=${WORK:-$HOME/hervk_ccle}
-CONT=$WORK/containers
+CONT=${CONT:-$WORK/containers}   # override to reuse another study's containers
 TE_SIF=$CONT/tetranscripts.sif
 COUNTS=$WORK/counts
 sing() { singularity exec -B "$WORK" "$TE_SIF" "$@"; }
@@ -92,19 +92,28 @@ d <- read.delim(file.path(work,"hervk_cpm_long.tsv"))
 keep <- c("HERVK-int","HERVK9-int","HERVK11-int","HERVK22-int","LTR5_Hs","LTR5A","LTR5B","LTR5")
 d <- d[d$subfamily %in% keep,]
 d$subfamily <- factor(d$subfamily, levels=keep)
-d$cpm_floor <- pmax(d$cpm, 0.05)          # floor so log10 shows near-zero MCF-7 bars
-pal <- c("MCF-7"="#4C78A8","PANC-1"="#F58518","PC-3"="#54A24B")  # colorblind-safe
-p <- ggplot(d, aes(subfamily, cpm_floor, fill=cell_line)) +
-  geom_col(position=position_dodge(width=0.8), width=0.72) +
-  scale_y_log10() + scale_fill_manual(values=pal) +
-  labs(title="HERVK subfamily expression across cancer cell lines (CCLE RNA-seq)",
-       subtitle="TEcount multi-mapper CPM; y = log10(CPM, floored at 0.05). Raw depths differ ~35x.",
-       x=NULL, y="CPM (log10)", fill="cell line") +
-  theme_minimal(base_size=13) +
-  theme(axis.text.x=element_text(angle=35, hjust=1),
-        panel.grid.major.x=element_blank(), legend.position="top")
-ggsave(file.path(work,"hervk_cpm.png"), p, width=10, height=6, dpi=150)
-cat("wrote", file.path(work,"hervk_cpm.png"), "\n")
+d$cpm_floor <- pmax(d$cpm, 0.05)          # floor so log10 shows near-zero bars
+ncell <- length(unique(d$cell_line))
+if (ncell <= 5) {                          # few samples -> grouped bars
+  p <- ggplot(d, aes(subfamily, cpm_floor, fill=cell_line)) +
+    geom_col(position=position_dodge(width=0.8), width=0.72) +
+    scale_y_log10() +
+    labs(title="HERVK subfamily expression", x=NULL, y="CPM (log10)", fill="sample") +
+    theme_minimal(base_size=13) +
+    theme(axis.text.x=element_text(angle=35, hjust=1),
+          panel.grid.major.x=element_blank(), legend.position="top")
+  w <- 10; h <- 6
+} else {                                   # many samples -> heatmap
+  p <- ggplot(d, aes(cell_line, subfamily, fill=log10(cpm_floor))) +
+    geom_tile(color="grey90") +
+    scale_fill_viridis_c(option="magma") +
+    labs(title="HERVK subfamily expression (log10 CPM)", x=NULL, y=NULL, fill="log10 CPM") +
+    theme_minimal(base_size=12) +
+    theme(axis.text.x=element_text(angle=45, hjust=1))
+  w <- max(8, ncell*0.5); h <- 6
+}
+ggsave(file.path(work,"hervk_cpm.png"), p, width=w, height=h, dpi=150)
+cat("wrote", file.path(work,"hervk_cpm.png"), "(", ncell, "samples )\n")
 RS
 else
   echo "Rscript not in container -> skipped PNG; hervk_cpm.tsv has the numbers."

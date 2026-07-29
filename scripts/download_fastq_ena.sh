@@ -13,13 +13,13 @@
 set -uo pipefail   # no -e: retry loops handle non-zero exits
 
 WORK=${WORK:-$HOME/hervk_ccle}
-CONT=$WORK/containers
+CONT=${CONT:-$WORK/containers}   # override to reuse another study's containers
 QUEUE=${QUEUE:-rhel9}
 WALL=${WALL:-48:00}          # LSF wall clock HH:MM; downloads can be long
 THREADS=${THREADS:-8}
 DEPOT=https://depot.galaxyproject.org/singularity
 ARIA_SIF=$CONT/aria2.sif
-MANIFEST=$(cd "$(dirname "$0")" && pwd)/hervk_ccle_manifest.tsv
+MANIFEST=${MANIFEST:-$(cd "$(dirname "$0")" && pwd)/hervk_ccle_manifest.tsv}
 mkdir -p "$WORK/fastq" "$CONT"
 
 # ---- login side: ensure aria2 image, then submit self to a compute node ----
