@@ -22,15 +22,27 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 SIF=${SIF:-$REPO/gameca.sif}
 REF=${REF:-$HOME/hervk_ccle/ref}          # reuse the downloaded hg38.fa
 GENOME=${GENOME:-$REF/hg38.fa}
-WORK=${WORK:-$HOME/hervk_reagents}
+# Dedicated names (NOT generic WORK/JOB) so stale exports from the requant
+# pipeline can't redirect reagent outputs or clash with its job-array name.
+WORK=${REAGENT_WORK:-$HOME/hervk_reagents}
+JOB=${REAGENT_JOB:-reagents}
 CAS=${CAS:-SpCas9}
 FAMILIES=${FAMILIES:-"LTR5_Hs LTR5 HERVK-int"}   # add LTR5A LTR5B for full variant set
 QUEUE=${QUEUE:-rhel9}
 WALL=${WALL:-8:00}
-JOB=${JOB:-reagents}
+PYLIB="$WORK/pylib"                              # primer3-py installed here if the sif lacks it
 mkdir -p "$WORK"
 read -r -a FAM_ARR <<< "$FAMILIES"
 sing() { singularity exec -B "$HOME" "$SIF" "$@"; }
+
+ensure_primer3() {   # sif has numpy/pandas but not primer3; install into PYLIB once
+  sing python -c "import primer3" 2>/dev/null && return 0
+  SINGULARITYENV_PYTHONPATH="$PYLIB" sing python -c "import primer3" 2>/dev/null && return 0
+  echo "  primer3 not in sif -> installing primer3-py into $PYLIB"
+  sing pip install --quiet --target="$PYLIB" primer3-py 2>&1 | tail -2 || true
+  SINGULARITYENV_PYTHONPATH="$PYLIB" sing python -c "import primer3; print('  primer3 OK via PYLIB')" \
+    2>/dev/null || echo "  primer3-py install FAILED (qPCR step will be skipped)"
+}
 
 design_one() {
   local fam="$1" out="$WORK/$fam"
@@ -55,8 +67,9 @@ design_one() {
       --cas "$CAS" --reports-dir "$out" || echo "[$fam] grna_analysis step failed (see log)"
 
   echo "== [$fam] 4/4 primer3 qPCR pairs =="
-  sing python "$REPO/te_qpcr_primers.py" --input "$seqcsv" --family "$fam" \
-      --genome "$GENOME" --out "$out" || echo "[$fam] qpcr step failed (see log)"
+  SINGULARITYENV_PYTHONPATH="$PYLIB" sing python "$REPO/te_qpcr_primers.py" \
+      --input "$seqcsv" --family "$fam" --genome "$GENOME" --out "$out" \
+      || echo "[$fam] qpcr step failed (see log)"
 
   echo "[$fam] done -> $out"
 }
@@ -67,10 +80,12 @@ preflight() {
   [ -s "$GENOME" ] && echo "  genome OK: $GENOME" || { echo "  MISSING genome: $GENOME"; exit 1; }
   echo "  families: ${FAM_ARR[*]}"
   echo "  python deps in sif:"
-  for m in numpy pandas sklearn primer3; do
+  for m in numpy pandas sklearn; do
     sing python -c "import $m" 2>/dev/null && echo "    $m: OK" \
-      || echo "    $m: MISSING (needed for $( [ "$m" = primer3 ] && echo qPCR || echo pipeline ))"
+      || echo "    $m: MISSING (pipeline dep)"
   done
+  ensure_primer3
+  echo "  outputs -> $WORK   (job: $JOB)"
 }
 
 if [ "${1:-}" = "--run-one" ]; then
@@ -83,8 +98,8 @@ N=${#FAM_ARR[@]}
 bsub_args=( -n 4 -M 20000 -R "rusage[mem=20000]" -W "$WALL" -q "$QUEUE" )
 LOG="$WORK/${JOB}.%J_%I.log"
 bsub "${bsub_args[@]}" -J "${JOB}[1-$N]" -o "$LOG" -e "$LOG" \
-     env SIF="$SIF" REF="$REF" GENOME="$GENOME" WORK="$WORK" CAS="$CAS" \
-         FAMILIES="$FAMILIES" REPO="$REPO" \
+     env SIF="$SIF" REF="$REF" GENOME="$GENOME" REAGENT_WORK="$WORK" REAGENT_JOB="$JOB" \
+         CAS="$CAS" FAMILIES="$FAMILIES" \
      bash "$REPO/scripts/$(basename "$0")" --run-one
 echo "submitted ${JOB}[1-$N] for: ${FAM_ARR[*]}"
 echo "  watch: bjobs -J $JOB ; logs: $WORK/${JOB}.*_*.log ; outputs under $WORK/<family>/"
