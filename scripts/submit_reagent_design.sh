@@ -45,7 +45,8 @@ ensure_primer3() {   # sif has numpy/pandas but not primer3; install into PYLIB 
 }
 
 design_one() {
-  local fam="$1" out="$WORK/$fam"
+  local fam="$1"
+  local out="$WORK/$fam"       # separate line: $fam must be set before it's used (set -u)
   mkdir -p "$out"
   echo "== [$fam] 1/4 query.py primers + sequences =="
   sing python "$REPO/query.py" --local --family "$fam" --assembly hg38 \
