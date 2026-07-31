@@ -54,26 +54,26 @@ def _match_positions(primer, seq, max_mm):
     return pos
 
 
+def _amplifies(fwd, rev, s, lo, hi, max_mm):
+    """True if pair (fwd,rev) amplifies copy s (either strand)."""
+    revc = _rc(rev)
+    for strand in (s, _rc(s)):
+        F = _match_positions(fwd, strand, max_mm)
+        if not F: continue
+        R = _match_positions(revc, strand, max_mm)
+        if not R: continue
+        for f in F:
+            for r in R:
+                size = r + len(revc) - f
+                if r >= f and lo <= size <= hi:
+                    return True
+    return False
+
+
 def pair_coverage(fwd, rev, seqs, amp_min, amp_max, max_mm):
     """# family copies amplified by (fwd, rev): both primers, right orient+distance."""
-    revc = _rc(rev)
     lo, hi = int(amp_min * 0.6), int(amp_max * 1.6)   # tolerance around designed size
-    n = 0
-    for s in seqs:
-        done = False
-        for strand in (s, _rc(s)):
-            F = _match_positions(fwd, strand, max_mm)
-            if not F: continue
-            R = _match_positions(revc, strand, max_mm)
-            if not R: continue
-            for f in F:
-                for r in R:
-                    size = r + len(revc) - f
-                    if r >= f and lo <= size <= hi:
-                        n += 1; done = True; break
-                if done: break
-            if done: break
-    return n
+    return sum(1 for s in seqs if _amplifies(fwd, rev, s, lo, hi, max_mm))
 
 
 def annotate(pairs_csv, seqs, max_mm, amp_min, amp_max, out=None):
@@ -92,9 +92,16 @@ def annotate(pairs_csv, seqs, max_mm, amp_min, amp_max, out=None):
     with open(out, "w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=fields)
         w.writeheader(); w.writerows(rows)
+    # union: copies amplified by ANY pair (the real coverage of the assay set)
+    lo, hi = int(amp_min * 0.6), int(amp_max * 1.6)
+    pairs = [(r["fwd"].upper(), r["rev"].upper()) for r in rows]
+    union = sum(1 for s in seqs
+                if any(_amplifies(f, r, s, lo, hi, max_mm) for f, r in pairs))
+    upct = round(100.0 * union / tot, 1) if tot else 0.0
     best = max(rows, key=lambda r: r["copies_amplified"])
     print(f"[cov] {os.path.basename(pairs_csv)}: {len(rows)} pairs, family={tot} copies; "
-          f"best pair {best['pair']} covers {best['copies_amplified']} ({best['pct_family']}%)")
+          f"best pair {best['pair']} {best['copies_amplified']} ({best['pct_family']}%); "
+          f"UNION of all pairs {union} ({upct}%)")
 
 
 def main():
