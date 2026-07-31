@@ -22,6 +22,7 @@ NPAIRS=${NPAIRS:-3}        # max pairs in the greedy union set per family
 MAXMM=${MAXMM:-3}          # 5'-body mismatch tolerance (3' end stays exact)
 EXPR_COLS=${EXPR_COLS:-}   # per-locus expression column name(s) to weight by, if present
 EXPR_TSV=${EXPR_TSV:-}     # locus_expression.tsv: if set, attach per-copy expression first
+REAGENT_TAG=${REAGENT_TAG:-}  # output suffix to keep datasets separate (e.g. gse, ccle)
 QUEUE=${QUEUE:-rhel9}
 WALL=${WALL:-4:00}
 JOB=${JOB:-qpcr_multi}
@@ -39,21 +40,25 @@ do_work() {
         if echo "$h" | grep -qiw Cluster; then echo "2 $f"; else echo "1 $f"; fi
       done | sort -rn | head -1 | cut -d' ' -f2-)
     [ -z "$seqcsv" ] && { echo "[$fam] no sequences CSV under $out -- skip"; continue; }
-    # attach per-copy expression (in place) so the greedy step can weight by it
+    # REAGENT_TAG keeps datasets separate: e.g. TAG=gse -> LTR5_Hs_gse_qpcr_pairs.csv
+    local label="$fam"; [ -n "$REAGENT_TAG" ] && label="${fam}_${REAGENT_TAG}"
+    local designcsv="$seqcsv"
+    # attach per-copy expression to a TAGGED copy (not in place) so CCLE/GSE don't clobber
     if [ -n "$EXPR_TSV" ]; then
-      echo "[$fam] attaching per-locus expression from $EXPR_TSV"
+      designcsv="$out/${label}.seqs.csv"
+      echo "[$label] attaching per-locus expression from $EXPR_TSV"
       singularity exec -B "$HOME" "$SIF" python "$REPO/attach_locus_expression.py" \
-          --expr "$EXPR_TSV" --seqs "$seqcsv" --out "$seqcsv" \
-          || echo "[$fam] expression attach failed (continuing copy-count)"
+          --expr "$EXPR_TSV" --seqs "$seqcsv" --out "$designcsv" \
+          || { echo "[$label] expression attach failed"; designcsv="$seqcsv"; }
     fi
-    echo "== [$fam] greedy $NPAIRS-pair union (clusters=$NCLUST, max-mm=$MAXMM) seqs: $seqcsv =="
+    echo "== [$label] greedy $NPAIRS-pair union (clusters=$NCLUST, max-mm=$MAXMM) seqs: $designcsv =="
     local exprarg=()
     [ -n "$EXPR_COLS" ] && exprarg=(--expr-cols $EXPR_COLS)
     SINGULARITYENV_PYTHONPATH="$PYLIB" APPTAINERENV_PYTHONPATH="$PYLIB" \
       singularity exec -B "$HOME" "$SIF" python "$REPO/te_qpcr_primers.py" \
-        --input "$seqcsv" --family "$fam" --genome "$GENOME" --out "$out" \
+        --input "$designcsv" --family "$label" --genome "$GENOME" --out "$out" \
         --n-pairs "$NPAIRS" --n-clusters "$NCLUST" --max-mm "$MAXMM" "${exprarg[@]}" \
-        || { echo "[$fam] primer design failed"; continue; }
+        || { echo "[$label] primer design failed"; continue; }
   done
 }
 
@@ -65,7 +70,7 @@ bsub -q "$QUEUE" -n 4 -M 20000 -R "rusage[mem=20000]" -W "$WALL" \
      -J "$JOB" -o "$LOG" -e "$LOG" \
      env SIF="$SIF" REF="$REF" GENOME="$GENOME" REAGENT_WORK="$WORK" \
          FAMILIES="$FAMILIES" NCLUST="$NCLUST" NPAIRS="$NPAIRS" MAXMM="$MAXMM" \
-         EXPR_COLS="$EXPR_COLS" EXPR_TSV="$EXPR_TSV" \
+         EXPR_COLS="$EXPR_COLS" EXPR_TSV="$EXPR_TSV" REAGENT_TAG="$REAGENT_TAG" \
      bash "$REPO/scripts/$(basename "$0")" --run
 echo "submitted $JOB (-q $QUEUE) for: $FAMILIES  (NCLUST=$NCLUST)"
 echo "  watch: bjobs -J $JOB ; log: $WORK/${JOB}.*.log"
