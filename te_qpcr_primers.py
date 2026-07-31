@@ -143,28 +143,43 @@ def main():
         except Exception as e:
             print(f"[qpcr] genome cache unavailable ({e}); skipping specificity")
 
+    # Design from REAL copies (not a consensus, which is chimeric on divergent
+    # families) and keep the pair that maximizes actual family coverage.
+    from te_qpcr_coverage import pair_coverage
     per_group = a.pairs_per_cluster if a.n_clusters > 1 else a.n_return
     rows = []
     for label, gseqs in groups.items():
-        cons = majority_consensus(gseqs).replace("N", "")
-        if len(cons) < a.amp_min:
-            print(f"[qpcr]  cluster {label}: consensus too short ({len(cons)}bp) -> skip"); continue
-        res = design_on(cons, a.family, per_group, a.amp_min, a.amp_max, a.opt_tm)
-        n = int(res.get("PRIMER_PAIR_NUM_RETURNED", 0))
-        if n == 0:
+        reps = sorted(gseqs, key=len, reverse=True)[:min(5, len(gseqs))]  # longest real copies
+        cand = {}   # (fwd,rev) -> dict(size,tm_f,tm_r,gc_f,gc_r)
+        for rep in reps:
+            if len(rep) < a.amp_min:
+                continue
+            res = design_on(rep, a.family, 12, a.amp_min, a.amp_max, a.opt_tm)
+            for i in range(int(res.get("PRIMER_PAIR_NUM_RETURNED", 0))):
+                key = (res[f"PRIMER_LEFT_{i}_SEQUENCE"], res[f"PRIMER_RIGHT_{i}_SEQUENCE"])
+                cand.setdefault(key, {
+                    "size": res[f"PRIMER_PAIR_{i}_PRODUCT_SIZE"],
+                    "tm_f": round(res[f"PRIMER_LEFT_{i}_TM"], 1),
+                    "tm_r": round(res[f"PRIMER_RIGHT_{i}_TM"], 1),
+                    "gc_f": round(res[f"PRIMER_LEFT_{i}_GC_PERCENT"], 1),
+                    "gc_r": round(res[f"PRIMER_RIGHT_{i}_GC_PERCENT"], 1)})
+        if not cand:
             print(f"[qpcr]  cluster {label} ({len(gseqs)} copies): no primer3 pair"); continue
-        for i in range(min(n, per_group)):
-            fwd = res[f"PRIMER_LEFT_{i}_SEQUENCE"]; rev = res[f"PRIMER_RIGHT_{i}_SEQUENCE"]
+        # rank candidates by whole-family coverage; keep the top per_group
+        scored = sorted(
+            ((pair_coverage(f, r, seqs, a.amp_min, a.amp_max, 2), f, r) for (f, r) in cand),
+            key=lambda t: t[0], reverse=True)
+        print(f"[qpcr]  cluster {label} ({len(gseqs)} copies): {len(cand)} candidates, "
+              f"best covers {scored[0][0]}/{len(seqs)}")
+        for cov, f, r in scored[:per_group]:
+            m = cand[(f, r)]
             rows.append({
                 "pair": len(rows), "cluster": label, "cluster_size": len(gseqs),
-                "fwd": fwd, "rev": rev,
-                "amplicon_bp": res[f"PRIMER_PAIR_{i}_PRODUCT_SIZE"],
-                "tm_fwd": round(res[f"PRIMER_LEFT_{i}_TM"], 1),
-                "tm_rev": round(res[f"PRIMER_RIGHT_{i}_TM"], 1),
-                "gc_fwd": round(res[f"PRIMER_LEFT_{i}_GC_PERCENT"], 1),
-                "gc_rev": round(res[f"PRIMER_RIGHT_{i}_GC_PERCENT"], 1),
-                "fwd_genome_hits": genome_hits(fwd, a.genome, cache) if a.genome else "NA",
-                "rev_genome_hits": genome_hits(rev, a.genome, cache) if a.genome else "NA",
+                "fwd": f, "rev": r, "amplicon_bp": m["size"],
+                "tm_fwd": m["tm_f"], "tm_rev": m["tm_r"],
+                "gc_fwd": m["gc_f"], "gc_rev": m["gc_r"],
+                "fwd_genome_hits": genome_hits(f, a.genome, cache) if a.genome else "NA",
+                "rev_genome_hits": genome_hits(r, a.genome, cache) if a.genome else "NA",
             })
     if not rows:
         sys.exit(f"[qpcr] no pairs produced for {a.family}")

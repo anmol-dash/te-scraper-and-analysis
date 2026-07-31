@@ -28,8 +28,12 @@ do_work() {
   for fam in "${FAM_ARR[@]}"; do
     local out="$WORK/$fam"
     local seqcsv
-    seqcsv=$(find "$out" -name '*.csv' -print0 | xargs -0 -I{} sh -c \
-        'head -1 "{}" | grep -qiw Seq && echo "{}"' 2>/dev/null | head -1 || true)
+    # prefer a CSV with BOTH Seq and Cluster (the clustered file) over Seq-only
+    seqcsv=$(find "$out" -name '*.csv' | while read -r f; do
+        h=$(head -1 "$f" 2>/dev/null)
+        echo "$h" | grep -qiw Seq || continue
+        if echo "$h" | grep -qiw Cluster; then echo "2 $f"; else echo "1 $f"; fi
+      done | sort -rn | head -1 | cut -d' ' -f2-)
     [ -z "$seqcsv" ] && { echo "[$fam] no sequences CSV under $out -- skip"; continue; }
     echo "== [$fam] redesign as $NCLUST per-cluster pairs (seqs: $seqcsv) =="
     SINGULARITYENV_PYTHONPATH="$PYLIB" APPTAINERENV_PYTHONPATH="$PYLIB" \
