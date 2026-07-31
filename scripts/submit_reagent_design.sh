@@ -33,6 +33,10 @@ WALL=${WALL:-8:00}
 PYLIB="$WORK/pylib"                              # primer3-py installed here if the sif lacks it
 mkdir -p "$WORK"
 read -r -a FAM_ARR <<< "$FAMILIES"
+# The sif binds $HOME, so python inside picks up host ~/.local site-packages
+# (numpy 2.4 there breaks the container's numba/umap). Make every container
+# python ignore ~/.local; explicit PYTHONPATH (e.g. PYLIB) is still honored.
+export SINGULARITYENV_PYTHONNOUSERSITE=1
 sing() { singularity exec -B "$HOME" "$SIF" "$@"; }
 
 ensure_primer3() {   # sif has numpy/pandas but not primer3; install into PYLIB once
