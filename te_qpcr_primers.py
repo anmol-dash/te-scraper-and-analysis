@@ -78,10 +78,12 @@ def genome_hits(primer, genome_fa, cache):
     try:
         from te_primers import search_seq_chromosomal
         r = search_seq_chromosomal(primer, fasta=genome_fa, genome_cache=cache)
-        if isinstance(r, (list, tuple, set)): return len(r)
         if isinstance(r, dict): return int(r.get("hits", r.get("count", 0)))
         if isinstance(r, int): return r
-        return int(getattr(r, "hits", 0) or 0)
+        try:
+            return int(len(r))   # pandas DataFrame of hits (or list/tuple/set) -> row count
+        except TypeError:
+            return int(getattr(r, "hits", 0) or 0)
     except Exception as e:
         return f"NA({type(e).__name__})"
 
