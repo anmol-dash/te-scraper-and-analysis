@@ -40,27 +40,35 @@ def read_seqs(path):
     return [s for s in seqs if len(s) >= 40]
 
 
-def _match_positions(primer, seq, max_mm):
-    """Start indices where primer aligns to seq with <= max_mm mismatches."""
+PROTECT3 = 5   # last 5 bp of a primer's 3' end must match exactly (drives extension)
+
+def _match_positions(primer, seq, max_mm, protect="suffix"):
+    """Start indices where primer aligns with <= max_mm mismatches AND no mismatch
+    in the protected 3' end. protect='suffix' guards the primer's last PROTECT3 bp
+    (a forward primer as written); 'prefix' guards its first PROTECT3 bp (used when
+    matching revcomp(reverse primer), whose start = the reverse primer's 3' end)."""
     L = len(primer); pos = []
+    if protect == "suffix": prot = set(range(L - PROTECT3, L))
+    elif protect == "prefix": prot = set(range(0, PROTECT3))
+    else: prot = set()
     for i in range(len(seq) - L + 1):
-        mm = 0
-        for a, b in zip(primer, seq[i:i + L]):
-            if a != b:
+        mm = 0; ok = True
+        win = seq[i:i + L]
+        for j in range(L):
+            if primer[j] != win[j]:
+                if j in prot or mm >= max_mm: ok = False; break
                 mm += 1
-                if mm > max_mm: break
-        else:
-            pos.append(i)
+        if ok: pos.append(i)
     return pos
 
 
 def _amplifies(fwd, rev, s, lo, hi, max_mm):
-    """True if pair (fwd,rev) amplifies copy s (either strand)."""
+    """True if pair (fwd,rev) amplifies copy s (either strand), 3' ends protected."""
     revc = _rc(rev)
     for strand in (s, _rc(s)):
-        F = _match_positions(fwd, strand, max_mm)
+        F = _match_positions(fwd, strand, max_mm, "suffix")     # fwd 3' end = suffix
         if not F: continue
-        R = _match_positions(revc, strand, max_mm)
+        R = _match_positions(revc, strand, max_mm, "prefix")    # rev 3' end = revc's start
         if not R: continue
         for f in F:
             for r in R:
@@ -110,7 +118,8 @@ def main():
     ap.add_argument("--pairs", required=True, help="<family>_qpcr_pairs.csv to annotate")
     ap.add_argument("--seqs", required=True, help="family sequences CSV/FASTA (Seq column)")
     ap.add_argument("--out", default=None, help="output (default: overwrite --pairs)")
-    ap.add_argument("--max-mm", type=int, default=2)
+    ap.add_argument("--max-mm", type=int, default=3,
+                    help="mismatches allowed in the 5' body (3' end always exact)")
     ap.add_argument("--amp-min", type=int, default=80)
     ap.add_argument("--amp-max", type=int, default=150)
     a = ap.parse_args()

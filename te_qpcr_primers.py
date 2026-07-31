@@ -120,6 +120,8 @@ def main():
     ap.add_argument("--amp-min", type=int, default=80)
     ap.add_argument("--amp-max", type=int, default=150)
     ap.add_argument("--opt-tm", type=float, default=60.0)
+    ap.add_argument("--max-mm", type=int, default=3,
+                    help="mismatch tolerance for coverage scoring (3' end kept exact)")
     a = ap.parse_args()
 
     seqs, clusters = read_records(a.input)
@@ -167,7 +169,7 @@ def main():
             print(f"[qpcr]  cluster {label} ({len(gseqs)} copies): no primer3 pair"); continue
         # rank candidates by whole-family coverage; keep the top per_group
         scored = sorted(
-            ((pair_coverage(f, r, seqs, a.amp_min, a.amp_max, 2), f, r) for (f, r) in cand),
+            ((pair_coverage(f, r, seqs, a.amp_min, a.amp_max, a.max_mm), f, r) for (f, r) in cand),
             key=lambda t: t[0], reverse=True)
         print(f"[qpcr]  cluster {label} ({len(gseqs)} copies): {len(cand)} candidates, "
               f"best covers {scored[0][0]}/{len(seqs)}")

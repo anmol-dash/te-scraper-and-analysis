@@ -18,6 +18,7 @@ WORK=${REAGENT_WORK:-$HOME/hervk_reagents}
 PYLIB="$WORK/pylib"
 FAMILIES=${FAMILIES:-"LTR5 HERVK-int"}
 NCLUST=${NCLUST:-3}
+MAXMM=${MAXMM:-3}          # mismatch tolerance (3' end stays exact); raise to broaden coverage
 QUEUE=${QUEUE:-rhel9}
 WALL=${WALL:-4:00}
 JOB=${JOB:-qpcr_multi}
@@ -39,9 +40,9 @@ do_work() {
     SINGULARITYENV_PYTHONPATH="$PYLIB" APPTAINERENV_PYTHONPATH="$PYLIB" \
       singularity exec -B "$HOME" "$SIF" python "$REPO/te_qpcr_primers.py" \
         --input "$seqcsv" --family "$fam" --genome "$GENOME" --out "$out" \
-        --n-clusters "$NCLUST" || { echo "[$fam] primer design failed"; continue; }
+        --n-clusters "$NCLUST" --max-mm "$MAXMM" || { echo "[$fam] primer design failed"; continue; }
     singularity exec -B "$HOME" "$SIF" python "$REPO/te_qpcr_coverage.py" \
-        --pairs "$out/${fam}_qpcr_pairs.csv" --seqs "$seqcsv" \
+        --pairs "$out/${fam}_qpcr_pairs.csv" --seqs "$seqcsv" --max-mm "$MAXMM" \
         || echo "[$fam] coverage annotation failed"
   done
 }
@@ -53,7 +54,7 @@ LOG="$WORK/${JOB}.%J.log"
 bsub -q "$QUEUE" -n 4 -M 20000 -R "rusage[mem=20000]" -W "$WALL" \
      -J "$JOB" -o "$LOG" -e "$LOG" \
      env SIF="$SIF" REF="$REF" GENOME="$GENOME" REAGENT_WORK="$WORK" \
-         FAMILIES="$FAMILIES" NCLUST="$NCLUST" \
+         FAMILIES="$FAMILIES" NCLUST="$NCLUST" MAXMM="$MAXMM" \
      bash "$REPO/scripts/$(basename "$0")" --run
 echo "submitted $JOB (-q $QUEUE) for: $FAMILIES  (NCLUST=$NCLUST)"
 echo "  watch: bjobs -J $JOB ; log: $WORK/${JOB}.*.log"
