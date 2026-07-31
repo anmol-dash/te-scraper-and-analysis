@@ -116,6 +116,8 @@ def main():
     ap.add_argument("--amp-max", type=int, default=150)
     ap.add_argument("--opt-tm", type=float, default=60.0)
     ap.add_argument("--max-mm", type=int, default=3, help="5'-body mismatch tolerance (3' end exact)")
+    ap.add_argument("--w-seq", type=float, default=1.0, help="greedy weight on copy coverage")
+    ap.add_argument("--w-expr", type=float, default=1.0, help="greedy weight on expression coverage")
     a = ap.parse_args()
 
     seqs, clusters, weights = read_records(a.input, a.expr_cols)
@@ -168,17 +170,24 @@ def main():
     if not cand:
         sys.exit(f"[qpcr] no primer3 pairs for {a.family}")
 
-    # greedy set-cover: add the pair with the largest marginal (weighted) gain
+    # greedy set-cover maximizing BOTH: marginal score = w_seq * (new copies / all
+    # copies) + w_expr * (new expression / all expression). With uniform weights
+    # (no per-locus expression) the two terms coincide -> pure copy coverage.
+    tot_c = float(len(seqs))
+    def gain(new):
+        cg = len(new) / tot_c
+        eg = (sum(w[i] for i in new) / total_w) if weighted else cg
+        return a.w_seq * cg + a.w_expr * eg
     covered, chosen = set(), []
     for _ in range(a.n_pairs):
-        best, best_gain = None, 0.0
+        best, best_score = None, 0.0
         for key, m in cand.items():
             if key in chosen:
                 continue
-            gain = sum(w[i] for i in (m["covered"] - covered))
-            if gain > best_gain:
-                best, best_gain = key, gain
-        if best is None or best_gain <= 0:
+            sc = gain(m["covered"] - covered)
+            if sc > best_score:
+                best, best_score = key, sc
+        if best is None or best_score <= 0:
             break
         chosen.append(best); covered |= cand[best]["covered"]
 
