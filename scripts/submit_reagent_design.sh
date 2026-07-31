@@ -76,6 +76,13 @@ design_one() {
       --input "$seqcsv" --family "$fam" --genome "$GENOME" --out "$out" \
       || echo "[$fam] qpcr step failed (see log)"
 
+  # annotate each pair with family coverage (copies_amplified / %family)
+  if [ -s "$out/${fam}_qpcr_pairs.csv" ]; then
+    sing python "$REPO/te_qpcr_coverage.py" \
+        --pairs "$out/${fam}_qpcr_pairs.csv" --seqs "$seqcsv" \
+        || echo "[$fam] coverage annotation failed"
+  fi
+
   echo "[$fam] done -> $out"
 }
 
