@@ -21,6 +21,7 @@ NCLUST=${NCLUST:-3}
 NPAIRS=${NPAIRS:-3}        # max pairs in the greedy union set per family
 MAXMM=${MAXMM:-3}          # 5'-body mismatch tolerance (3' end stays exact)
 EXPR_COLS=${EXPR_COLS:-}   # per-locus expression column name(s) to weight by, if present
+EXPR_TSV=${EXPR_TSV:-}     # locus_expression.tsv: if set, attach per-copy expression first
 QUEUE=${QUEUE:-rhel9}
 WALL=${WALL:-4:00}
 JOB=${JOB:-qpcr_multi}
@@ -38,6 +39,13 @@ do_work() {
         if echo "$h" | grep -qiw Cluster; then echo "2 $f"; else echo "1 $f"; fi
       done | sort -rn | head -1 | cut -d' ' -f2-)
     [ -z "$seqcsv" ] && { echo "[$fam] no sequences CSV under $out -- skip"; continue; }
+    # attach per-copy expression (in place) so the greedy step can weight by it
+    if [ -n "$EXPR_TSV" ]; then
+      echo "[$fam] attaching per-locus expression from $EXPR_TSV"
+      singularity exec -B "$HOME" "$SIF" python "$REPO/attach_locus_expression.py" \
+          --expr "$EXPR_TSV" --seqs "$seqcsv" --out "$seqcsv" \
+          || echo "[$fam] expression attach failed (continuing copy-count)"
+    fi
     echo "== [$fam] greedy $NPAIRS-pair union (clusters=$NCLUST, max-mm=$MAXMM) seqs: $seqcsv =="
     local exprarg=()
     [ -n "$EXPR_COLS" ] && exprarg=(--expr-cols $EXPR_COLS)
@@ -57,7 +65,7 @@ bsub -q "$QUEUE" -n 4 -M 20000 -R "rusage[mem=20000]" -W "$WALL" \
      -J "$JOB" -o "$LOG" -e "$LOG" \
      env SIF="$SIF" REF="$REF" GENOME="$GENOME" REAGENT_WORK="$WORK" \
          FAMILIES="$FAMILIES" NCLUST="$NCLUST" NPAIRS="$NPAIRS" MAXMM="$MAXMM" \
-         EXPR_COLS="$EXPR_COLS" \
+         EXPR_COLS="$EXPR_COLS" EXPR_TSV="$EXPR_TSV" \
      bash "$REPO/scripts/$(basename "$0")" --run
 echo "submitted $JOB (-q $QUEUE) for: $FAMILIES  (NCLUST=$NCLUST)"
 echo "  watch: bjobs -J $JOB ; log: $WORK/${JOB}.*.log"
