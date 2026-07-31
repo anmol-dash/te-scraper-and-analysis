@@ -18,7 +18,9 @@ WORK=${REAGENT_WORK:-$HOME/hervk_reagents}
 PYLIB="$WORK/pylib"
 FAMILIES=${FAMILIES:-"LTR5 HERVK-int"}
 NCLUST=${NCLUST:-3}
-MAXMM=${MAXMM:-3}          # mismatch tolerance (3' end stays exact); raise to broaden coverage
+NPAIRS=${NPAIRS:-3}        # max pairs in the greedy union set per family
+MAXMM=${MAXMM:-3}          # 5'-body mismatch tolerance (3' end stays exact)
+EXPR_COLS=${EXPR_COLS:-}   # per-locus expression column name(s) to weight by, if present
 QUEUE=${QUEUE:-rhel9}
 WALL=${WALL:-4:00}
 JOB=${JOB:-qpcr_multi}
@@ -36,14 +38,14 @@ do_work() {
         if echo "$h" | grep -qiw Cluster; then echo "2 $f"; else echo "1 $f"; fi
       done | sort -rn | head -1 | cut -d' ' -f2-)
     [ -z "$seqcsv" ] && { echo "[$fam] no sequences CSV under $out -- skip"; continue; }
-    echo "== [$fam] redesign as $NCLUST per-cluster pairs (seqs: $seqcsv) =="
+    echo "== [$fam] greedy $NPAIRS-pair union (clusters=$NCLUST, max-mm=$MAXMM) seqs: $seqcsv =="
+    local exprarg=()
+    [ -n "$EXPR_COLS" ] && exprarg=(--expr-cols $EXPR_COLS)
     SINGULARITYENV_PYTHONPATH="$PYLIB" APPTAINERENV_PYTHONPATH="$PYLIB" \
       singularity exec -B "$HOME" "$SIF" python "$REPO/te_qpcr_primers.py" \
         --input "$seqcsv" --family "$fam" --genome "$GENOME" --out "$out" \
-        --n-clusters "$NCLUST" --max-mm "$MAXMM" || { echo "[$fam] primer design failed"; continue; }
-    singularity exec -B "$HOME" "$SIF" python "$REPO/te_qpcr_coverage.py" \
-        --pairs "$out/${fam}_qpcr_pairs.csv" --seqs "$seqcsv" --max-mm "$MAXMM" \
-        || echo "[$fam] coverage annotation failed"
+        --n-pairs "$NPAIRS" --n-clusters "$NCLUST" --max-mm "$MAXMM" "${exprarg[@]}" \
+        || { echo "[$fam] primer design failed"; continue; }
   done
 }
 
@@ -54,7 +56,8 @@ LOG="$WORK/${JOB}.%J.log"
 bsub -q "$QUEUE" -n 4 -M 20000 -R "rusage[mem=20000]" -W "$WALL" \
      -J "$JOB" -o "$LOG" -e "$LOG" \
      env SIF="$SIF" REF="$REF" GENOME="$GENOME" REAGENT_WORK="$WORK" \
-         FAMILIES="$FAMILIES" NCLUST="$NCLUST" MAXMM="$MAXMM" \
+         FAMILIES="$FAMILIES" NCLUST="$NCLUST" NPAIRS="$NPAIRS" MAXMM="$MAXMM" \
+         EXPR_COLS="$EXPR_COLS" \
      bash "$REPO/scripts/$(basename "$0")" --run
 echo "submitted $JOB (-q $QUEUE) for: $FAMILIES  (NCLUST=$NCLUST)"
 echo "  watch: bjobs -J $JOB ; log: $WORK/${JOB}.*.log"

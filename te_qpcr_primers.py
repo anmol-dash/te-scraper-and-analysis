@@ -1,79 +1,75 @@
 #!/usr/bin/env python3
-"""te_qpcr_primers.py --- true qPCR primer PAIRS for a TE family.
+"""te_qpcr_primers.py --- true qPCR primer PAIRS for a TE family, coverage-optimized.
 
-te_primers.py designs specificity-vetted *candidate* primer sequences but does
-not pair them into amplicons. This adds that: build a majority-rule consensus
-from the family copies, run primer3 for short qPCR amplicons (Tm ~60C, 80-150 bp),
-then reuse the existing GAMECA genome search (te_genome.GenomeCache /
-te_primers.search_seq_chromosomal) to count genome hits per primer.
+Consensus of divergent copies makes chimeric primers, so instead we run primer3
+on real copies, then GREEDILY pick a set of pairs that maximizes the UNION of
+family copies amplified (each pair's covered-copy set is computed with
+te_qpcr_coverage, incl. 3'-end-protected mismatch tolerance). If per-locus
+expression columns are present (--expr-cols, or auto-detected), the greedy step
+maximizes covered EXPRESSION instead of copy count -- so a few pairs can capture
+most of the expressed signal even in a divergent family.
 
-Divergent families (e.g. HERVK-int) are poorly covered by one consensus pair.
-With --n-clusters K, design one pair per sub-cluster (reusing the 'Cluster'
-labels query.py already assigned) so K pairs together cover more of the family;
-te_qpcr_coverage.py then reports each pair's coverage and the union.
+Input : CSV with 'Seq' (+ optional 'Cluster' and expression columns) OR FASTA.
+Output: <out>/<family>_qpcr_pairs.csv  (per pair: Tm, amplicon, genome hits,
+        copies_amplified, pct_family; + cumulative union printed to stdout)
 
-Input : a CSV with a 'Seq' column (+ optional 'Cluster') OR a FASTA.
-Output: <out>/<family>_qpcr_pairs.csv
-
-  python te_qpcr_primers.py --input LTR5_Hs_sequences.csv --family LTR5_Hs \
-      --genome /path/hg38.fa --out results [--n-clusters 3]
+  python te_qpcr_primers.py --input LTR5_Hs_clustered.csv --family LTR5_Hs \
+      --genome hg38.fa --out results --n-pairs 3 [--expr-cols TPM]
 """
 import argparse, csv, os, sys
 
+_EXPR_HINTS = ("total_expr", "expression", "tpm", "fpkm", "cpm", "expr")
 
-def read_records(path):
-    """Return (seqs, clusters): clusters is a parallel list or None (FASTA/no col)."""
-    seqs, clusters = [], []
-    have_cluster = False
+
+def read_records(path, expr_cols=None):
+    """Return (seqs, clusters, weights). clusters/weights are parallel lists or None."""
+    seqs, clusters, weights = [], [], []
     if path.lower().endswith((".fa", ".fasta", ".fna")):
         cur = []
         with open(path) as fh:
             for line in fh:
                 if line.startswith(">"):
-                    if cur: seqs.append("".join(cur)); clusters.append(None); cur = []
-                else:
-                    cur.append(line.strip())
-        if cur: seqs.append("".join(cur)); clusters.append(None)
+                    if cur: seqs.append("".join(cur)); clusters.append(None); weights.append(1.0); cur = []
+                else: cur.append(line.strip())
+        if cur: seqs.append("".join(cur)); clusters.append(None); weights.append(1.0)
+        return seqs, None, None
+    with open(path, newline="") as fh:
+        sniff = fh.read(2048); fh.seek(0)
+        delim = "\t" if sniff.count("\t") > sniff.count(",") else ","
+        rdr = csv.DictReader(fh, delimiter=delim)
+        cols = rdr.fieldnames or []
+        scol = next((c for c in cols if c.lower() == "seq"), None)
+        ccol = next((c for c in cols if c.lower() == "cluster"), None)
+        if not scol:
+            sys.exit(f"no 'Seq' column in {path} (cols: {cols})")
+        if expr_cols:
+            ecols = [c for c in cols if c in expr_cols]
+        else:
+            ecols = [c for c in cols if c.lower() in _EXPR_HINTS]
+        for row in rdr:
+            s = (row.get(scol) or "").strip().upper()
+            if not (s and set(s) <= set("ACGTN") and len(s) >= 40):
+                continue
+            seqs.append(s)
+            clusters.append(row.get(ccol) if ccol else None)
+            w = 0.0
+            for c in ecols:
+                try: w += float(row.get(c) or 0)
+                except ValueError: pass
+            weights.append(w if ecols else 1.0)
+    if ecols and sum(weights) > 0:
+        print(f"[qpcr] expression-weighted using columns: {ecols}")
     else:
-        with open(path, newline="") as fh:
-            sniff = fh.read(2048); fh.seek(0)
-            delim = "\t" if sniff.count("\t") > sniff.count(",") else ","
-            rdr = csv.DictReader(fh, delimiter=delim)
-            cols = rdr.fieldnames or []
-            scol = next((c for c in cols if c.lower() == "seq"), None)
-            ccol = next((c for c in cols if c.lower() == "cluster"), None)
-            have_cluster = ccol is not None
-            if not scol:
-                sys.exit(f"no 'Seq' column in {path} (cols: {cols})")
-            for row in rdr:
-                s = (row.get(scol) or "").strip().upper()
-                if s and set(s) <= set("ACGTN") and len(s) >= 40:
-                    seqs.append(s)
-                    clusters.append(row.get(ccol) if have_cluster else None)
-    return seqs, (clusters if have_cluster else None)
-
-
-def majority_consensus(seqs):
-    if not seqs:
-        return ""
-    L = max(len(s) for s in seqs)
-    out = []
-    for i in range(L):
-        cnt = {}
-        for s in seqs:
-            if i < len(s) and s[i] != "N":
-                cnt[s[i]] = cnt.get(s[i], 0) + 1
-        out.append(max(cnt, key=cnt.get) if cnt else "N")
-    return "".join(out)
+        weights = None
+    return seqs, (clusters if ccol else None), weights
 
 
 def pick_groups(seqs, clusters, k):
-    """{label: [seqs]} for the k largest clusters; whole family if k<=1/no labels."""
     if k <= 1 or clusters is None:
-        return {"all": seqs}
+        return {"all": list(range(len(seqs)))}
     groups = {}
-    for s, c in zip(seqs, clusters):
-        groups.setdefault(str(c), []).append(s)
+    for i, c in enumerate(clusters):
+        groups.setdefault(str(c), []).append(i)
     top = sorted(groups, key=lambda c: len(groups[c]), reverse=True)[:k]
     return {c: groups[c] for c in top}
 
@@ -113,29 +109,33 @@ def main():
     ap.add_argument("--family", default="FAMILY")
     ap.add_argument("--out", default="results")
     ap.add_argument("--genome", default=None)
-    ap.add_argument("--n-clusters", type=int, default=1,
-                    help="design one pair per sub-cluster (K largest); default 1 = whole family")
-    ap.add_argument("--pairs-per-cluster", type=int, default=1)
-    ap.add_argument("--n-return", type=int, default=10, help="pairs when --n-clusters<=1")
+    ap.add_argument("--n-pairs", type=int, default=3, help="max pairs in the greedy union set")
+    ap.add_argument("--n-clusters", type=int, default=1, help="draw candidates from K largest sub-clusters")
+    ap.add_argument("--expr-cols", nargs="+", default=None, help="per-locus expression columns to weight by")
     ap.add_argument("--amp-min", type=int, default=80)
     ap.add_argument("--amp-max", type=int, default=150)
     ap.add_argument("--opt-tm", type=float, default=60.0)
-    ap.add_argument("--max-mm", type=int, default=3,
-                    help="mismatch tolerance for coverage scoring (3' end kept exact)")
+    ap.add_argument("--max-mm", type=int, default=3, help="5'-body mismatch tolerance (3' end exact)")
     a = ap.parse_args()
 
-    seqs, clusters = read_records(a.input)
+    seqs, clusters, weights = read_records(a.input, a.expr_cols)
     if not seqs:
         sys.exit("no usable sequences")
     try:
         import primer3  # noqa: F401
     except ImportError:
         sys.exit("primer3-py not available (pip install primer3-py or run in a container that has it)")
+    from te_qpcr_coverage import _amplifies
 
+    w = weights if weights else [1.0] * len(seqs)
+    total_w = sum(w) or 1.0
+    weighted = weights is not None
+    lo, hi = int(a.amp_min * 0.6), int(a.amp_max * 1.6)
     groups = pick_groups(seqs, clusters, a.n_clusters)
     if a.n_clusters > 1 and clusters is None:
-        print(f"[qpcr] {a.family}: no Cluster column -> designing from whole family instead")
-    print(f"[qpcr] {a.family}: {len(seqs)} copies, {len(groups)} group(s)")
+        print(f"[qpcr] {a.family}: no Cluster column -> whole family")
+    print(f"[qpcr] {a.family}: {len(seqs)} copies, {len(groups)} group(s), "
+          f"{'expression-weighted' if weighted else 'copy-count'}")
 
     cache = None
     if a.genome:
@@ -145,53 +145,65 @@ def main():
         except Exception as e:
             print(f"[qpcr] genome cache unavailable ({e}); skipping specificity")
 
-    # Design from REAL copies (not a consensus, which is chimeric on divergent
-    # families) and keep the pair that maximizes actual family coverage.
-    from te_qpcr_coverage import pair_coverage
-    per_group = a.pairs_per_cluster if a.n_clusters > 1 else a.n_return
-    rows = []
-    for label, gseqs in groups.items():
-        reps = sorted(gseqs, key=len, reverse=True)[:min(5, len(gseqs))]  # longest real copies
-        cand = {}   # (fwd,rev) -> dict(size,tm_f,tm_r,gc_f,gc_r)
+    # candidate pairs from real copies, each with its covered-copy set over the WHOLE family
+    cand = {}
+    for label, idxs in groups.items():
+        reps = sorted((seqs[i] for i in idxs), key=len, reverse=True)[:min(5, len(idxs))]
         for rep in reps:
             if len(rep) < a.amp_min:
                 continue
             res = design_on(rep, a.family, 12, a.amp_min, a.amp_max, a.opt_tm)
             for i in range(int(res.get("PRIMER_PAIR_NUM_RETURNED", 0))):
-                key = (res[f"PRIMER_LEFT_{i}_SEQUENCE"], res[f"PRIMER_RIGHT_{i}_SEQUENCE"])
-                cand.setdefault(key, {
+                f = res[f"PRIMER_LEFT_{i}_SEQUENCE"]; r = res[f"PRIMER_RIGHT_{i}_SEQUENCE"]
+                if (f, r) in cand:
+                    continue
+                covered = frozenset(j for j, s in enumerate(seqs) if _amplifies(f, r, s, lo, hi, a.max_mm))
+                cand[(f, r)] = {
+                    "cluster": label, "covered": covered,
                     "size": res[f"PRIMER_PAIR_{i}_PRODUCT_SIZE"],
                     "tm_f": round(res[f"PRIMER_LEFT_{i}_TM"], 1),
                     "tm_r": round(res[f"PRIMER_RIGHT_{i}_TM"], 1),
                     "gc_f": round(res[f"PRIMER_LEFT_{i}_GC_PERCENT"], 1),
-                    "gc_r": round(res[f"PRIMER_RIGHT_{i}_GC_PERCENT"], 1)})
-        if not cand:
-            print(f"[qpcr]  cluster {label} ({len(gseqs)} copies): no primer3 pair"); continue
-        # rank candidates by whole-family coverage; keep the top per_group
-        scored = sorted(
-            ((pair_coverage(f, r, seqs, a.amp_min, a.amp_max, a.max_mm), f, r) for (f, r) in cand),
-            key=lambda t: t[0], reverse=True)
-        print(f"[qpcr]  cluster {label} ({len(gseqs)} copies): {len(cand)} candidates, "
-              f"best covers {scored[0][0]}/{len(seqs)}")
-        for cov, f, r in scored[:per_group]:
-            m = cand[(f, r)]
-            rows.append({
-                "pair": len(rows), "cluster": label, "cluster_size": len(gseqs),
-                "fwd": f, "rev": r, "amplicon_bp": m["size"],
-                "tm_fwd": m["tm_f"], "tm_rev": m["tm_r"],
-                "gc_fwd": m["gc_f"], "gc_rev": m["gc_r"],
-                "fwd_genome_hits": genome_hits(f, a.genome, cache) if a.genome else "NA",
-                "rev_genome_hits": genome_hits(r, a.genome, cache) if a.genome else "NA",
-            })
-    if not rows:
-        sys.exit(f"[qpcr] no pairs produced for {a.family}")
+                    "gc_r": round(res[f"PRIMER_RIGHT_{i}_GC_PERCENT"], 1)}
+    if not cand:
+        sys.exit(f"[qpcr] no primer3 pairs for {a.family}")
+
+    # greedy set-cover: add the pair with the largest marginal (weighted) gain
+    covered, chosen = set(), []
+    for _ in range(a.n_pairs):
+        best, best_gain = None, 0.0
+        for key, m in cand.items():
+            if key in chosen:
+                continue
+            gain = sum(w[i] for i in (m["covered"] - covered))
+            if gain > best_gain:
+                best, best_gain = key, gain
+        if best is None or best_gain <= 0:
+            break
+        chosen.append(best); covered |= cand[best]["covered"]
+
+    rows = []
+    for pid, key in enumerate(chosen):
+        f, r = key; m = cand[key]
+        cov = len(m["covered"])
+        rows.append({
+            "pair": pid, "cluster": m["cluster"], "fwd": f, "rev": r,
+            "amplicon_bp": m["size"], "tm_fwd": m["tm_f"], "tm_rev": m["tm_r"],
+            "gc_fwd": m["gc_f"], "gc_rev": m["gc_r"],
+            "fwd_genome_hits": genome_hits(f, a.genome, cache) if a.genome else "NA",
+            "rev_genome_hits": genome_hits(r, a.genome, cache) if a.genome else "NA",
+            "copies_amplified": cov, "pct_family": round(100.0 * cov / len(seqs), 1)})
 
     os.makedirs(a.out, exist_ok=True)
     out_csv = os.path.join(a.out, f"{a.family}_qpcr_pairs.csv")
     with open(out_csv, "w", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
-        w.writeheader(); w.writerows(rows)
-    print(f"[qpcr] wrote {len(rows)} pairs -> {out_csv}")
+        wtr = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+        wtr.writeheader(); wtr.writerows(rows)
+    uc = len(covered); uw = sum(w[i] for i in covered)
+    msg = f"[qpcr] {a.family}: {len(rows)} pairs -> UNION {uc}/{len(seqs)} copies ({round(100*uc/len(seqs),1)}%)"
+    if weighted:
+        msg += f", {round(100*uw/total_w,1)}% of family expression"
+    print(msg + f" -> {out_csv}")
 
 
 if __name__ == "__main__":
