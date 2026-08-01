@@ -113,6 +113,7 @@ def main():
     ap.add_argument("--genome", default=None)
     ap.add_argument("--n-pairs", type=int, default=3, help="max pairs in the greedy union set")
     ap.add_argument("--n-clusters", type=int, default=1, help="draw candidates from K largest sub-clusters")
+    ap.add_argument("--max-reps", type=int, default=15, help="real copies per group to seed primer3 (more = larger candidate pool)")
     ap.add_argument("--expr-cols", nargs="+", default=None, help="per-locus expression columns to weight by")
     ap.add_argument("--amp-min", type=int, default=80)
     ap.add_argument("--amp-max", type=int, default=150)
@@ -146,13 +147,15 @@ def main():
         try:
             from te_genome import GenomeCache
             cache = GenomeCache(a.genome)
+            cache.load()   # into memory -> fast specificity searches (else slow file scans)
         except Exception as e:
             print(f"[qpcr] genome cache unavailable ({e}); skipping specificity")
+            cache = None
 
     # candidate pairs from real copies, each with its covered-copy set over the WHOLE family
     cand = {}
     for label, idxs in groups.items():
-        reps = sorted((seqs[i] for i in idxs), key=len, reverse=True)[:min(5, len(idxs))]
+        reps = sorted((seqs[i] for i in idxs), key=len, reverse=True)[:min(a.max_reps, len(idxs))]
         for rep in reps:
             if len(rep) < a.amp_min:
                 continue

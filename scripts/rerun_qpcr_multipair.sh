@@ -23,6 +23,7 @@ MAXMM=${MAXMM:-3}          # 5'-body mismatch tolerance (3' end stays exact)
 EXPR_COLS=${EXPR_COLS:-}   # per-locus expression column name(s) to weight by, if present
 EXPR_TSV=${EXPR_TSV:-}     # locus_expression.tsv: if set, attach per-copy expression first
 REAGENT_TAG=${REAGENT_TAG:-}  # output suffix to keep datasets separate (e.g. gse, ccle)
+TOP_N=${TOP_N:-}          # if set, also write <family>_top<N>_primers.csv (ranked list)
 QUEUE=${QUEUE:-rhel9}
 WALL=${WALL:-4:00}
 JOB=${JOB:-qpcr_multi}
@@ -59,6 +60,14 @@ do_work() {
         --input "$designcsv" --family "$label" --genome "$GENOME" --out "$out" \
         --n-pairs "$NPAIRS" --n-clusters "$NCLUST" --max-mm "$MAXMM" "${exprarg[@]}" \
         || { echo "[$label] primer design failed"; continue; }
+    if [ -n "$TOP_N" ]; then
+      echo "[$label] ranking top-$TOP_N primers"
+      SINGULARITYENV_PYTHONPATH="$PYLIB" APPTAINERENV_PYTHONPATH="$PYLIB" \
+        singularity exec -B "$HOME" "$SIF" python "$REPO/top_primers.py" \
+          --input "$designcsv" --family "$label" --genome "$GENOME" --out "$out" \
+          --top-n "$TOP_N" --max-mm "$MAXMM" "${exprarg[@]}" \
+          || echo "[$label] top-primers ranking failed"
+    fi
   done
 }
 
@@ -70,7 +79,7 @@ bsub -q "$QUEUE" -n 4 -M 20000 -R "rusage[mem=20000]" -W "$WALL" \
      -J "$JOB" -o "$LOG" -e "$LOG" \
      env SIF="$SIF" REF="$REF" GENOME="$GENOME" REAGENT_WORK="$WORK" \
          FAMILIES="$FAMILIES" NCLUST="$NCLUST" NPAIRS="$NPAIRS" MAXMM="$MAXMM" \
-         EXPR_COLS="$EXPR_COLS" EXPR_TSV="$EXPR_TSV" REAGENT_TAG="$REAGENT_TAG" \
+         EXPR_COLS="$EXPR_COLS" EXPR_TSV="$EXPR_TSV" REAGENT_TAG="$REAGENT_TAG" TOP_N="$TOP_N" \
      bash "$REPO/scripts/$(basename "$0")" --run
 echo "submitted $JOB (-q $QUEUE) for: $FAMILIES  (NCLUST=$NCLUST)"
 echo "  watch: bjobs -J $JOB ; log: $WORK/${JOB}.*.log"
