@@ -22,9 +22,8 @@
 #
 #     bash scripts/submit_grna_combos.sh
 #
-# The guide spreadsheet is git-ignored, so copy it to the cluster first:
-#     scp "HERVK-int_LTR5_Hs_guide candidates.xlsx" <cluster>:~/hervk_reagents/
-# or point at it explicitly:  GUIDES=/path/to/guides.xlsx bash scripts/submit_grna_combos.sh
+# The guide spreadsheet is tracked in the repo, so a git pull is all it takes.
+# To use a different one:  GUIDES=/path/to/guides.xlsx bash scripts/submit_grna_combos.sh
 #
 # Env overrides: SIF GENOME REF GUIDES COMBO_WORK COMBO_JOB FAMILIES TARGET_COV
 #                COV_MM OT_MM RMSK_DIR QUEUE WALL RUN_LOCAL
@@ -108,9 +107,8 @@ preflight() {
 
   local guides
   if ! guides=$(find_guides); then
-    echo "  MISSING the guide spreadsheet."
-    echo "  Copy it over from your laptop, then re-run:"
-    echo "    scp \"HERVK-int_LTR5_Hs_guide candidates.xlsx\" \$USER@<cluster>:$WORK/"
+    echo "  MISSING the guide spreadsheet. It is tracked in the repo, so:"
+    echo "    git -C $REPO pull        # then re-run this script"
     echo "  (or run with GUIDES=/path/to/guides.xlsx)"
     exit 1
   fi

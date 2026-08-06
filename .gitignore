@@ -82,10 +82,7 @@ grna_design_report.pdf
 *.docx
 ~$*
 
-# ── Ordered-reagent spreadsheets (unpublished designs; this repo is public) ─
-*.xlsx
-HERVK-int_LTR5_Hs_guide?candidates.xlsx
-HERVK-int_LTR5_Hs_guide_candidates.xlsx
-
 # ── Reagent design outputs: guide/primer sequences for unpublished experiments
+# (the ordered-guide spreadsheet at the repo root is deliberately TRACKED, so a
+#  git pull puts it on the cluster and the submit scripts find it themselves)
 hervk_reagents/

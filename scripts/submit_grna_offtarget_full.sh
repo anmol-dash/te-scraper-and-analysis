@@ -24,8 +24,9 @@
 # comprehensive site list (run_grna_combos.py --reuse-sites), so the combination
 # rankings account for bulged and non-canonical off-targets too.
 #
-# The guide spreadsheet is git-ignored; copy it over first:
-#     scp "HERVK-int_LTR5_Hs_guide candidates.xlsx" <cluster>:~/hervk_reagents/
+# The guide spreadsheet is tracked in the repo, so a git pull is all it takes:
+#     git pull && bash scripts/submit_grna_offtarget_full.sh
+# (GUIDES=/path/to/other.xlsx overrides which spreadsheet is used.)
 #
 # Env overrides: SIF GENOME REF GUIDES COMBO_WORK OTFULL_JOB FAMILIES OT_MM
 #                BULGE BULGE_MM PAM_SET WORKERS RMSK_DIR QUEUE WALL MEM
@@ -121,16 +122,28 @@ preflight() {
 
   local guides
   if ! guides=$(find_guides); then
-    echo "  MISSING the guide spreadsheet. Copy it over, then re-run:"
-    echo "    scp \"HERVK-int_LTR5_Hs_guide candidates.xlsx\" \$USER@<cluster>:$WORK/"
+    echo "  MISSING the guide spreadsheet. It is tracked in the repo, so:"
+    echo "    git -C $REPO pull        # then re-run this script"
+    echo "  (or point at one explicitly: GUIDES=/path/to/guides.xlsx bash \$0)"
     exit 1
   fi
   echo "  guides OK: $guides"
 
+  # Everything below is advisory. Only the sif, the genome and the guides are
+  # required to submit --- a flaky self-test, a failed annotation download or a
+  # missing copies CSV must NOT stop the job from reaching the queue, so each is
+  # allowed to fail with a warning (the compute node has internet too).
   echo "  self-test (bulge maths, non-canonical PAMs, strands, tiers):"
-  sing python "$REPO/run_grna_offtarget_full.py" --self-test | tail -2
+  if sing python "$REPO/run_grna_offtarget_full.py" --self-test >"$OUT/.selftest.log" 2>&1; then
+    tail -2 "$OUT/.selftest.log"
+  else
+    echo "  !! SELF-TEST FAILED --- see $OUT/.selftest.log (submitting anyway)"
+  fi
 
-  for fam in "${FAM_ARR[@]}"; do ensure_copies "$fam"; done
+  for fam in "${FAM_ARR[@]}"; do
+    ensure_copies "$fam" || echo "  WARNING: no copies for $fam; the combination"\
+      "step will skip it, the off-target scan is unaffected"
+  done
 
   echo "  annotations -> $RMSK_DIR (fetched here; the login node has internet)"
   sing python -c "
@@ -139,12 +152,13 @@ from te_prep import get_rmsk_path
 from run_grna_combos import download_refgene
 print('  rmsk:   ', get_rmsk_path('$ASSEMBLY', '$RMSK_DIR'))
 print('  refGene:', download_refgene('$ASSEMBLY', '$RMSK_DIR'))
-"
+" || echo "  WARNING: annotation prefetch failed; the job will fetch them itself"
 
   echo "== job size =="
   local args=()
   while IFS= read -r a; do args+=("$a"); done < <(scan_args "$guides")
-  sing python "$REPO/run_grna_offtarget_full.py" "${args[@]}" --estimate
+  sing python "$REPO/run_grna_offtarget_full.py" "${args[@]}" --estimate \
+    || echo "  WARNING: could not size the job (submitting anyway)"
 
   printf '%s' "$guides" > "$OUT/.guides_path"
   echo "  outputs -> $OUT   (job: $JOB)"
@@ -158,16 +172,35 @@ fi
 preflight
 [ "${ESTIMATE_ONLY:-0}" = "1" ] && { echo "ESTIMATE_ONLY=1 --- not submitting."; exit 0; }
 
+command -v bsub >/dev/null 2>&1 || {
+  echo "ERROR: bsub not found --- run this on an LSF submit/login node."
+  echo "       There is no local fallback here on purpose: this scan is ~9"
+  echo "       core-hours. To override anyway, call the scanner directly with"
+  echo "       --force-local (see --estimate first)."
+  exit 1
+}
+
 LOG="$OUT/${JOB}.%J.log"
-bsub -n "$WORKERS" -M "$MEM" -R "rusage[mem=$MEM]" -W "$WALL" -q "$QUEUE" \
+set +e
+SUB=$(bsub -n "$WORKERS" -M "$MEM" -R "rusage[mem=$MEM]" -W "$WALL" -q "$QUEUE" \
      -J "$JOB" -o "$LOG" -e "$LOG" \
      env SIF="$SIF" GENOME="$GENOME" REF="$REF" COMBO_WORK="$WORK" OTFULL_JOB="$JOB" \
          FAMILIES="$FAMILIES" ASSEMBLY="$ASSEMBLY" OT_MM="$OT_MM" BULGE="$BULGE" \
          BULGE_MM="$BULGE_MM" \
          PAM_SET="$PAM_SET" WORKERS="$WORKERS" RMSK_DIR="$RMSK_DIR" \
          TARGET_COV="$TARGET_COV" \
-     bash "$REPO/scripts/$(basename "$0")" --run-one
-echo "submitted $JOB (-n $WORKERS, -M $MEM, -W $WALL) for: ${FAM_ARR[*]}"
+     bash "$REPO/scripts/$(basename "$0")" --run-one 2>&1)
+RC=$?
+set -e
+echo "$SUB"
+# Confirm a job really entered the queue rather than assuming bsub worked.
+JOBID=$(printf '%s' "$SUB" | sed -n 's/.*[Jj]ob <\([0-9][0-9]*\)>.*/\1/p' | head -1)
+if [ "$RC" -ne 0 ] || [ -z "$JOBID" ]; then
+  echo "ERROR: bsub did not submit a job (exit $RC). Nothing is queued."
+  exit 1
+fi
+echo "submitted job $JOBID as '$JOB' (-n $WORKERS, -M $MEM, -W $WALL) for: ${FAM_ARR[*]}"
+bjobs "$JOBID" 2>/dev/null || true
 echo "  watch:   bjobs -J $JOB"
 echo "  log:     $OUT/${JOB}.*.log"
 echo "  results: $OUT/offtarget_full_report.txt   (comprehensive off-target)"
