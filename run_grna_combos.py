@@ -718,6 +718,8 @@ def _combo_ot(combo_guides, per_guide_sites, target_fams):
     counted once.
     """
     loci, off_fam, exon, exon_off_fam, uniq, gene_names = set(), set(), set(), set(), set(), set()
+    perfect_off = set()
+    off_rep = defaultdict(set)
     for g in combo_guides:
         df = per_guide_sites.get(g)
         if df is None or df.empty:
@@ -728,6 +730,10 @@ def _combo_ot(combo_guides, per_guide_sites, target_fams):
             related = r.repFamily in target_fams and r.repFamily != ""
             if not related:
                 off_fam.add(key)
+                if r.repName:
+                    off_rep[r.repName].add(key)
+                if r.n_mm == 0:
+                    perfect_off.add(key)
             if not r.repName:
                 uniq.add(key)
             if r.hits_coding_exon:
@@ -736,7 +742,13 @@ def _combo_ot(combo_guides, per_guide_sites, target_fams):
                     gene_names.update(r.genes.split(","))
                 if not related:
                     exon_off_fam.add(key)
+    top_rep, top_n = "", 0
+    if off_rep:
+        top_rep = max(off_rep, key=lambda k: len(off_rep[k]))
+        top_n = len(off_rep[top_rep])
     return {"ot_sites": len(loci), "ot_offfamily": len(off_fam),
+            "ot_offfamily_perfect": len(perfect_off),
+            "ot_top_offfamily_rep": top_rep, "ot_top_offfamily_n": top_n,
             "ot_nonrepeat": len(uniq), "ot_coding_exon": len(exon),
             "ot_coding_exon_offfamily": len(exon_off_fam),
             "ot_genes": ";".join(sorted(gene_names))}
@@ -919,6 +931,9 @@ def parse_args():
     p.add_argument("--all-contigs", action="store_true",
                    help="Scan alts/scaffolds too (default: chr1-22,X,Y,M)")
     p.add_argument("--skip-offtarget", action="store_true")
+    p.add_argument("--reuse-sites", action="store_true",
+                   help="Reuse offtarget_sites_all.csv in --out instead of rescanning "
+                        "the genome (only valid if the guide set is unchanged)")
     p.add_argument("--self-test", action="store_true",
                    help="Run synthetic controls and exit")
     return p.parse_args()
@@ -979,7 +994,12 @@ def main():
     # ── genome-wide off-target (one pass, all families) ─────────────────────
     sites = pd.DataFrame()
     rmsk_ix = gene_ix = None
-    if not args.skip_offtarget and args.genome and Path(args.genome).exists():
+    cached = out / "offtarget_sites_all.csv"
+    if args.reuse_sites and cached.exists():
+        sites = pd.read_csv(cached).fillna({"repName": "", "repClass": "",
+                                            "repFamily": "", "genes": ""})
+        _pp(f"Reusing {cached} ({len(sites):,} annotated sites) --- no genome rescan")
+    elif not args.skip_offtarget and args.genome and Path(args.genome).exists():
         all_guides = sorted({g for d in data.values() for g in d["guides"]})
         chroms = None if args.all_contigs else STD_CHROMS
         _pp(f"Genome-wide scan: {len(all_guides)} guides vs {Path(args.genome).name} "
@@ -1034,6 +1054,9 @@ def main():
             for (nm, cl, fm) in rmsk_ix.payload:
                 if nm.lower() == fam.lower():
                     target_fams.add(fm)
+        elif len(sites):        # --reuse-sites: recover it from the annotated table
+            m = sites[sites.repName.str.lower() == fam.lower()]
+            target_fams = set(m["repFamily"].unique()) - {""}
 
         # per-guide table
         gt = []
@@ -1129,32 +1152,57 @@ def main():
 
         answer.append("-- best 2-guide combinations " + "-" * 47)
         answer.append(f"{'ranks':>7} {'copies':>7} {'%cov':>7} {'gain':>6} {'minOTS':>7} "
-                      f"{'OT':>6} {'exonic':>7}  guides")
+                      f"{'OT':>6} {'offFam':>7} {'0mm':>5} {'exon':>5}  "
+                      f"{'biggest off-family hit':<26} guides")
         singles = dict(zip(gt["guide"], gt["cov_pct"]))
         for _, r in pairs.head(10).iterrows():
             g1, g2 = r["guides"].split(" + ")
             gain = r["cov_pct"] - max(singles.get(g1, 0), singles.get(g2, 0))
+            top = (f"{r['ot_top_offfamily_rep']} x{int(r['ot_top_offfamily_n'])}"
+                   if r["ot_top_offfamily_rep"] else "-")
             answer.append(f"{r['ranks']:>7} {int(r['covered']):>7} {r['cov_pct']:>6.1f}% "
                           f"{gain:>+5.1f} {r['min_on_target']:>7.2f} {int(r['ot_sites']):>6} "
-                          f"{int(r['ot_coding_exon_offfamily']):>7}  {r['guides']}")
+                          f"{int(r['ot_offfamily']):>7} {int(r['ot_offfamily_perfect']):>5} "
+                          f"{int(r['ot_coding_exon_offfamily']):>5}  {top:<26} {r['guides']}")
         answer.append("  (gain = percentage points added over the better single guide;")
         answer.append("   minOTS = worst on-target quality score in the pair --- a low value")
-        answer.append("   means one member is AT-rich / homopolymeric and may cut poorly)")
-        clean = pairs[pairs.min_on_target >= 0.8]
-        if len(clean) and clean.iloc[0]["ranks"] != pairs.iloc[0]["ranks"]:
-            c0 = clean.iloc[0]
-            answer.append(f"  best pair with NO low-quality guide: ranks {c0['ranks']} "
-                          f"= {int(c0['covered'])}/{n_copies} ({c0['cov_pct']:.1f}%), "
-                          f"minOTS {c0['min_on_target']:.2f} --- "
-                          f"{pairs.iloc[0]['cov_pct'] - c0['cov_pct']:.1f} pp below the top pair")
+        answer.append("   means one member is AT-rich / homopolymeric and may cut poorly;")
+        answer.append("   offFam = genome sites outside the target repeat family, 0mm = how")
+        answer.append("   many of those are PERFECT matches and so will actually be cut)")
+        # The top-coverage pair is often not the one to build: rank it by safety
+        # first (no perfect-match off-family cuts, no coding-exon hits, decent
+        # on-target quality) and report what that costs in coverage.
+        tiers = [("no perfect-match off-family cuts, no coding-exon hits, "
+                  "good on-target quality",
+                  lambda d: (d.min_on_target >= 0.8) & (d.ot_offfamily_perfect == 0)
+                  & (d.ot_coding_exon_offfamily == 0)),
+                 ("no perfect-match off-family cuts",
+                  lambda d: d.ot_offfamily_perfect == 0),
+                 ("good on-target quality", lambda d: d.min_on_target >= 0.8)]
+        if len(pairs):
+            for label, filt in (tiers if len(sites) else tiers[2:]):
+                sub = pairs[filt(pairs)]
+                if not len(sub):
+                    continue
+                c0 = sub.iloc[0]
+                cost = pairs.iloc[0]["cov_pct"] - c0["cov_pct"]
+                same = c0["ranks"] == pairs.iloc[0]["ranks"]
+                answer.append(f"  >> RECOMMENDED pair: ranks {c0['ranks']} = "
+                              f"{int(c0['covered'])}/{n_copies} ({c0['cov_pct']:.1f}%) --- "
+                              f"{label}" + (" (also the top-coverage pair)" if same else
+                                            f"; costs {cost:.1f} pp vs the top-coverage pair"))
+                answer.append(f"     {c0['guides']}")
+                break
         answer.append("")
 
         answer.append("-- coverage vs number of guides (best set at each size) " + "-" * 21)
-        answer.append(f"{'n':>2} {'copies':>7} {'%cov':>7} {'OT':>6} {'exonic':>7}  ranks")
+        answer.append(f"{'n':>2} {'copies':>7} {'%cov':>7} {'OT':>6} {'offFam':>7} "
+                      f"{'0mm':>5} {'exon':>5}  ranks")
         for _, r in best_by_size.iterrows():
             answer.append(f"{int(r['n_guides']):>2} {int(r['covered']):>7} "
                           f"{r['cov_pct']:>6.1f}% {int(r['ot_sites']):>6} "
-                          f"{int(r['ot_coding_exon_offfamily']):>7}  {r['ranks']}")
+                          f"{int(r['ot_offfamily']):>7} {int(r['ot_offfamily_perfect']):>5} "
+                          f"{int(r['ot_coding_exon_offfamily']):>5}  {r['ranks']}")
         answer.append("")
 
         # Are the copies a guide set misses just short fragments? rmsk splits
