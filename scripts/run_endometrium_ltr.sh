@@ -80,6 +80,19 @@ TOP_N=${TOP_N:-100}
 AMP_MIN=${AMP_MIN:-70}
 AMP_MAX=${AMP_MAX:-140}
 MAX_REPS=${MAX_REPS:-30}
+# gRNA. run_grna_offtarget.py scores coverage WITHOUT requiring a PAM, which
+# overstates what is actually cuttable (measured Aug 2026 on the ordered HERVK
+# guides: two of them have no NGG in any copy). Stage 7 therefore re-scores the
+# shortlist with run_grna_combos.py, which requires a PAM and also checks the
+# whole genome for gene hits. GRNA_LEN is forced to 20 because the three gRNA
+# scripts disagree by default (18 / 20 / 20) and mixing lengths is silent.
+GRNA_LEN=${GRNA_LEN:-20}
+TOP_GUIDES=${TOP_GUIDES:-12}   # per family; combos enumerates 2^N subsets
+COV_MM=${COV_MM:-2}            # on-family coverage: PAM-distal mismatches allowed
+OT_MM=${OT_MM:-3}              # off-target scan: mismatches anywhere
+TARGET_COV=${TARGET_COV:-0.5}
+RMSK_DIR=${RMSK_DIR:-$HOME/te_analysis/rmsk}
+COMBO_OUT="$REAGENT_WORK/combos"
 
 # per-study LSF job names so this never collides with the HERVK jobs
 J_DL=${J_DL:-endo_dl}
@@ -87,6 +100,7 @@ J_ALIGN=${J_ALIGN:-endo_align}
 J_MERGE=${J_MERGE:-endo_merge}
 J_REAGENT=${J_REAGENT:-endo_reagents}
 J_QPCR=${J_QPCR:-endo_qpcr}
+J_COMBO=${J_COMBO:-endo_combos}
 
 DRY=0; STATUS_ONLY=0
 for arg in "$@"; do
@@ -170,6 +184,19 @@ else
       bash "$SCRIPTS/setup_hervk_ccle.sh"
 fi
 
+# rmsk + refGene for the stage-7 off-target annotation. Fetched here, on the
+# login node, so the scan job never depends on outbound network.
+if [ "$DRY" = 0 ]; then
+  mkdir -p "$RMSK_DIR"
+  singularity exec -B "$HOME" "$SIF" python -c "
+import sys; sys.path.insert(0, '$REPO')
+from te_prep import get_rmsk_path
+from run_grna_combos import download_refgene
+print('  rmsk:   ', get_rmsk_path('hg38', '$RMSK_DIR'))
+print('  refGene:', download_refgene('hg38', '$RMSK_DIR'))
+" || echo "  WARNING: annotation prefetch failed; stage 7 will retry on the node"
+fi
+
 # Which upstream jobs must stage 2 wait for? Decide from the FILESYSTEM, not from
 # `bjobs` exit codes: a dependency on a job that does not exist leaves the whole
 # chain PEND forever, and `bjobs -J` also stops matching once a job is DONE.
@@ -246,7 +273,7 @@ say "stage 5/6: qPCR primers + CRISPR guides  (job '$J_REAGENT', parallel)"
 run env SIF="$SIF" REF="$REF" GENOME="$GENOME" \
         REAGENT_WORK="$REAGENT_WORK" REAGENT_JOB="$J_REAGENT" \
         FAMILIES="$FAMILIES" CAS="$CAS" QUEUE="$QUEUE" \
-        MCS_LTR66="$MCS_LTR66" MCS_LTR10G="$MCS_LTR10G" \
+        MCS_LTR66="$MCS_LTR66" MCS_LTR10G="$MCS_LTR10G" GRNA_LEN="$GRNA_LEN" \
         bash "$SCRIPTS/submit_reagent_design.sh"
 
 # ============================================================================
@@ -261,14 +288,76 @@ run env SIF="$SIF" REF="$REF" GENOME="$GENOME" REAGENT_WORK="$REAGENT_WORK" \
         BSUB_DEP="done($J_MERGE) && done($J_REAGENT)" \
         bash "$SCRIPTS/rerun_qpcr_multipair.sh"
 
+# ============================================================================
+# STAGE 7: PAM-REQUIRED guide verification + genome-wide gene safety
+# The Pareto coverage from stage 5 does not require a PAM, so it overstates
+# what can actually be cut. Nothing should be ordered on stage 5's numbers.
+# ============================================================================
+say "stage 7/7: PAM-required guide combinations + gene safety  (job '$J_COMBO')"
+COMBO_SH="$WORK/grna_combos.sh"
+if [ "$DRY" = 0 ]; then
+  mkdir -p "$COMBO_OUT"
+  # explicit --seqs per family: the combos tool otherwise guesses at a
+  # *_with_sequences.csv name that this layout does not necessarily use
+  seqs_args=""
+  for fam in $FAMILIES; do
+    seqs_args="$seqs_args --family $fam"
+  done
+  cat > "$COMBO_SH" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+export SINGULARITYENV_PYTHONNOUSERSITE=1 APPTAINERENV_PYTHONNOUSERSITE=1
+sing() { singularity exec -B "\$HOME" "$SIF" "\$@"; }
+
+python3 "$SCRIPTS/collect_grna_candidates.py" \\
+    --reagent-dir "$REAGENT_WORK" --families $FAMILIES \\
+    --top-n $TOP_GUIDES --grna-len $GRNA_LEN \\
+    --out "$COMBO_OUT/combo_input_guides.csv"
+
+# point each family at the copies CSV the reagent stage actually produced
+seqargs=()
+for fam in $FAMILIES; do
+  csv=\$(find "$REAGENT_WORK/\$fam" -name '*.csv' 2>/dev/null | while read -r f; do
+      h=\$(head -1 "\$f" 2>/dev/null)
+      echo "\$h" | grep -qiw Seq || continue
+      if echo "\$h" | grep -qiw Cluster; then echo "2 \$f"; else echo "1 \$f"; fi
+    done | sort -rn | head -1 | cut -d' ' -f2-)
+  [ -n "\$csv" ] || { echo "[\$fam] no copies CSV -- skipping"; continue; }
+  echo "[\$fam] copies: \$csv"
+  seqargs+=( --seqs "\$fam=\$csv" )
+done
+
+[ \${#seqargs[@]} -gt 0 ] || { echo "no copies CSV for any family -- aborting"; exit 1; }
+sing python "$REPO/run_grna_combos.py" \\
+    --guides "$COMBO_OUT/combo_input_guides.csv" \\
+    $seqs_args \\
+    "\${seqargs[@]}" \\
+    --genome "$GENOME" --assembly hg38 --rmsk-dir "$RMSK_DIR" \\
+    --cas "$CAS" --grna-len $GRNA_LEN \\
+    --cov-mm $COV_MM --ot-mm $OT_MM --target-cov $TARGET_COV \\
+    --out "$COMBO_OUT"
+echo "ANSWER: $COMBO_OUT/ANSWER.txt"
+EOF
+  chmod +x "$COMBO_SH"
+fi
+run bsub -q "$QUEUE" -n 4 -M 24000 -R "rusage[mem=24000]" -W 8:00 \
+     -w "done($J_REAGENT)" -J "$J_COMBO" \
+     -o "$COMBO_OUT/${J_COMBO}.%J.log" -e "$COMBO_OUT/${J_COMBO}.%J.log" \
+     bash "$COMBO_SH"
+
 say "submitted"
 cat <<EOF
   pipeline : $J_DL -> $J_ALIGN -> $J_MERGE -> $J_QPCR
              $J_REAGENT ------------------------^
+             $J_REAGENT -> $J_COMBO
   watch    : bjobs -w        |  bash scripts/run_endometrium_ltr.sh --status
   logs     : $WORK/*.log  and  $REAGENT_WORK/*.log
 
-  when it finishes, the two files to look at first:
+  when it finishes, the files to look at first:
     $WORK/te_timepoint_summary.tsv        is LTR66/LTR10G expressed, and does it move TP1->TP2
     $REAGENT_WORK/<family>/<family>_${TAG}_qpcr_pairs.csv   the primers to order
+    $COMBO_OUT/ANSWER.txt                 which guide COMBINATION to order (PAM required)
+
+  Do not order guides off stage 5's Pareto numbers -- that coverage does not
+  require a PAM. $COMBO_OUT/ANSWER.txt is the one that does.
 EOF

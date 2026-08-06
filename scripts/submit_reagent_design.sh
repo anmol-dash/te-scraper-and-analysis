@@ -33,6 +33,11 @@ FAMILIES=${FAMILIES:-"LTR5_Hs LTR5 HERVK-int"}   # add LTR5A LTR5B for full vari
 # (everything below 100 becomes one cluster + noise). Set MCS for all families,
 # or MCS_<FAMILY> per family (non-alphanumerics -> '_', e.g. MCS_HERVK_int).
 MCS=${MCS:-}
+# Guide length. The two gRNA scripts disagree by default -- run_grna_analysis.py
+# uses 18 and run_grna_offtarget.py 20 -- and run_grna_combos.py assumes 20.
+# Empty keeps each tool's own default (existing HERVK behaviour); set GRNA_LEN=20
+# for standard SpCas9 spacers that are consistent across all three.
+GRNA_LEN=${GRNA_LEN:-}
 QUEUE=${QUEUE:-rhel9}
 WALL=${WALL:-8:00}
 PYLIB="$WORK/pylib"                              # primer3-py installed here if the sif lacks it
@@ -76,13 +81,20 @@ design_one() {
   [ -z "$seqcsv" ] && { echo "[$fam] no sequences CSV with a Seq column under $out"; return 1; }
   echo "[$fam] sequences CSV: $seqcsv"
 
+  local lenarg=(); [ -n "$GRNA_LEN" ] && lenarg=( --grna-len "$GRNA_LEN" )
+
+  # NOTE: run_grna_offtarget.py's coverage is PAM-FREE and overstates what is
+  # actually cuttable -- treat its numbers as a Pareto screen only, and confirm
+  # with run_grna_combos.py (PAM required) before ordering anything.
   echo "== [$fam] 2/4 gRNA off-target/coverage Pareto ($CAS) =="
   sing python "$REPO/run_grna_offtarget.py" --input "$seqcsv" --family "$fam" \
-      --cas "$CAS" --reports-dir "$out" || echo "[$fam] offtarget step failed (see log)"
+      --cas "$CAS" --reports-dir "$out" ${lenarg[@]+"${lenarg[@]}"} \
+      || echo "[$fam] offtarget step failed (see log)"
 
   echo "== [$fam] 3/4 gRNA greedy set ($CAS) =="
   sing python "$REPO/run_grna_analysis.py" --input "$seqcsv" --family "$fam" \
-      --cas "$CAS" --reports-dir "$out" || echo "[$fam] grna_analysis step failed (see log)"
+      --cas "$CAS" --reports-dir "$out" ${lenarg[@]+"${lenarg[@]}"} \
+      || echo "[$fam] grna_analysis step failed (see log)"
 
   echo "== [$fam] 4/4 primer3 qPCR pairs =="
   SINGULARITYENV_PYTHONPATH="$PYLIB" sing python "$REPO/te_qpcr_primers.py" \
@@ -131,7 +143,7 @@ LOG="$WORK/${JOB}.%J_%I.log"
 bsub "${bsub_args[@]}" ${dep_args[@]+"${dep_args[@]}"} \
      -J "${JOB}[1-$N]" -o "$LOG" -e "$LOG" \
      env SIF="$SIF" REF="$REF" GENOME="$GENOME" REAGENT_WORK="$WORK" REAGENT_JOB="$JOB" \
-         CAS="$CAS" FAMILIES="$FAMILIES" "${mcs_env[@]}" \
+         CAS="$CAS" FAMILIES="$FAMILIES" GRNA_LEN="$GRNA_LEN" "${mcs_env[@]}" \
      bash "$REPO/scripts/$(basename "$0")" --run-one
 echo "submitted ${JOB}[1-$N] for: ${FAM_ARR[*]}"
 echo "  watch: bjobs -J $JOB ; logs: $WORK/${JOB}.*_*.log ; outputs under $WORK/<family>/"
