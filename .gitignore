@@ -81,3 +81,8 @@ grna_design_report.pdf
 # ── Review documents + Office lock files (not part of the program) ─────────
 *.docx
 ~$*
+
+# ── Ordered-reagent spreadsheets (unpublished designs; this repo is public) ─
+*.xlsx
+HERVK-int_LTR5_Hs_guide?candidates.xlsx
+HERVK-int_LTR5_Hs_guide_candidates.xlsx
