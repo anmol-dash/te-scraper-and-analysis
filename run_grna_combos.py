@@ -732,7 +732,14 @@ def _combo_ot(combo_guides, per_guide_sites, target_fams):
                 off_fam.add(key)
                 if r.repName:
                     off_rep[r.repName].add(key)
-                if r.n_mm == 0:
+                # "perfect" means a site that will actually be cut: exact match,
+                # canonical PAM, no bulge. The comprehensive scanner
+                # (run_grna_offtarget_full.py) adds pam_class/bulge_type; when
+                # those columns are absent every site is already canonical and
+                # unbulged, so the getattr defaults are correct.
+                if (r.n_mm == 0
+                        and getattr(r, "pam_class", "NGG") == "NGG"
+                        and getattr(r, "bulge_type", "none") == "none"):
                     perfect_off.add(key)
             if not r.repName:
                 uniq.add(key)

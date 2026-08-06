@@ -86,3 +86,6 @@ grna_design_report.pdf
 *.xlsx
 HERVK-int_LTR5_Hs_guide?candidates.xlsx
 HERVK-int_LTR5_Hs_guide_candidates.xlsx
+
+# ── Reagent design outputs: guide/primer sequences for unpublished experiments
+hervk_reagents/
