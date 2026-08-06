@@ -24,6 +24,12 @@ EXPR_COLS=${EXPR_COLS:-}   # per-locus expression column name(s) to weight by, i
 EXPR_TSV=${EXPR_TSV:-}     # locus_expression.tsv: if set, attach per-copy expression first
 REAGENT_TAG=${REAGENT_TAG:-}  # output suffix to keep datasets separate (e.g. gse, ccle)
 TOP_N=${TOP_N:-}          # if set, also write <family>_top<N>_primers.csv (ranked list)
+# Amplicon window and primer3 seed depth. Matter most for FRAGMENTED families:
+# a copy shorter than AMP_MIN can never be amplified, so it caps achievable
+# coverage. Empty = each tool's own default (80/150/15).
+AMP_MIN=${AMP_MIN:-}
+AMP_MAX=${AMP_MAX:-}
+MAX_REPS=${MAX_REPS:-}    # real copies per group used to seed primer3
 QUEUE=${QUEUE:-rhel9}
 WALL=${WALL:-4:00}
 JOB=${JOB:-qpcr_multi}
@@ -55,17 +61,20 @@ do_work() {
     echo "== [$label] greedy $NPAIRS-pair union (clusters=$NCLUST, max-mm=$MAXMM) seqs: $designcsv =="
     local exprarg=()
     [ -n "$EXPR_COLS" ] && exprarg=(--expr-cols $EXPR_COLS)
+    [ -n "$AMP_MIN" ]  && exprarg+=(--amp-min "$AMP_MIN")
+    [ -n "$AMP_MAX" ]  && exprarg+=(--amp-max "$AMP_MAX")
+    [ -n "$MAX_REPS" ] && exprarg+=(--max-reps "$MAX_REPS")
     SINGULARITYENV_PYTHONPATH="$PYLIB" APPTAINERENV_PYTHONPATH="$PYLIB" \
       singularity exec -B "$HOME" "$SIF" python "$REPO/te_qpcr_primers.py" \
         --input "$designcsv" --family "$label" --genome "$GENOME" --out "$out" \
-        --n-pairs "$NPAIRS" --n-clusters "$NCLUST" --max-mm "$MAXMM" "${exprarg[@]}" \
+        --n-pairs "$NPAIRS" --n-clusters "$NCLUST" --max-mm "$MAXMM" ${exprarg[@]+"${exprarg[@]}"} \
         || { echo "[$label] primer design failed"; continue; }
     if [ -n "$TOP_N" ]; then
       echo "[$label] ranking top-$TOP_N primers"
       SINGULARITYENV_PYTHONPATH="$PYLIB" APPTAINERENV_PYTHONPATH="$PYLIB" \
         singularity exec -B "$HOME" "$SIF" python "$REPO/top_primers.py" \
           --input "$designcsv" --family "$label" --genome "$GENOME" --out "$out" \
-          --top-n "$TOP_N" --max-mm "$MAXMM" "${exprarg[@]}" \
+          --top-n "$TOP_N" --max-mm "$MAXMM" ${exprarg[@]+"${exprarg[@]}"} \
           || echo "[$label] top-primers ranking failed"
     fi
   done
@@ -74,12 +83,17 @@ do_work() {
 if [ "${1:-}" = "--run" ]; then do_work; exit 0; fi
 
 # submit to rhel9 batch (interactive nodes FIPS-panic the apptainer binary)
+# BSUB_DEP: LSF dependency expression, e.g. 'done(a) && done(b)'. Kept as ONE
+# argument -- word-splitting it would hand bsub a broken '-w done(a)' plus junk.
+dep_args=(); [ -n "${BSUB_DEP:-}" ] && dep_args=( -w "$BSUB_DEP" )
 LOG="$WORK/${JOB}.%J.log"
 bsub -q "$QUEUE" -n 4 -M 20000 -R "rusage[mem=20000]" -W "$WALL" \
+     ${dep_args[@]+"${dep_args[@]}"} \
      -J "$JOB" -o "$LOG" -e "$LOG" \
      env SIF="$SIF" REF="$REF" GENOME="$GENOME" REAGENT_WORK="$WORK" \
          FAMILIES="$FAMILIES" NCLUST="$NCLUST" NPAIRS="$NPAIRS" MAXMM="$MAXMM" \
          EXPR_COLS="$EXPR_COLS" EXPR_TSV="$EXPR_TSV" REAGENT_TAG="$REAGENT_TAG" TOP_N="$TOP_N" \
+         AMP_MIN="$AMP_MIN" AMP_MAX="$AMP_MAX" MAX_REPS="$MAX_REPS" \
      bash "$REPO/scripts/$(basename "$0")" --run
 echo "submitted $JOB (-q $QUEUE) for: $FAMILIES  (NCLUST=$NCLUST)"
 echo "  watch: bjobs -J $JOB ; log: $WORK/${JOB}.*.log"

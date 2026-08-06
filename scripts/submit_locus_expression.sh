@@ -21,12 +21,24 @@ QUEUE=${QUEUE:-rhel9}
 WALL=${WALL:-24:00}
 JOB=${JOB:-locus_expr}
 FILTER=${FILTER:-'HERVK|LTR5'}    # keep only these loci in the merged table
+# ALSO_TECOUNT=1 runs TEcount on the SAME BAM before it is deleted, so one STAR
+# pass yields both per-locus counts and the subfamily-level .cntTable. Without
+# it you must also run submit_hervk_ccle_requant.sh, i.e. align every sample
+# twice. Default off so the existing HERVK flow is unchanged.
+ALSO_TECOUNT=${ALSO_TECOUNT:-0}
+# Strandedness. Both defaults below are the tools' own defaults (unstranded);
+# set STRANDED=reverse + FC_STRAND=2 for a dUTP/TruSeq-stranded library.
+STRANDED=${STRANDED:-no}          # TEcount: no | forward | reverse
+FC_STRAND=${FC_STRAND:-0}         # featureCounts -s: 0 | 1 | 2
 STAR_SIF=$CONT/star.sif
 SUB_SIF=$CONT/subread.sif
+TE_SIF=$CONT/tetranscripts.sif
 STAR_INDEX=$REF/star_hg38
 TE_GTF=$REF/hg38_rmsk_TE.gtf
+GENE_GTF=$REF/hg38.knownGene.gtf
 MANIFEST=${MANIFEST:-$(cd "$(dirname "$0")" && pwd)/hervk_ccle_manifest.tsv}
 mkdir -p "$WORK/locus" "$WORK/bam" "$CONT"
+[ "$ALSO_TECOUNT" = "1" ] && mkdir -p "$WORK/counts"
 sing() { singularity exec -B "$WORK" "$@"; }
 
 # --- merge mode: combine per-sample featureCounts into locus_expression.tsv ---
@@ -76,30 +88,74 @@ run_one() {
   local fq1="$WORK/fastq/${run}_1.fastq.gz" fq2="$WORK/fastq/${run}_2.fastq.gz"
   local pref="$WORK/bam/${cl}.locus." bam="$WORK/bam/${cl}.locus.Aligned.out.bam"
   local out="$WORK/locus/${cl}.featureCounts.txt"
-  [ -s "$out" ] && { echo "[$cl] featureCounts exists -> skip"; exit 0; }
+  local cnt="$WORK/counts/${cl}.cntTable"
+  # only skip when EVERY requested output is already there
+  if [ -s "$out" ] && { [ "$ALSO_TECOUNT" != "1" ] || [ -s "$cnt" ]; }; then
+    echo "[$cl] outputs exist -> skip"; exit 0
+  fi
   echo "[$cl] STAR align"
   sing "$STAR_SIF" STAR --runThreadN "$THREADS" --genomeDir "$STAR_INDEX" \
       --readFilesIn "$fq1" "$fq2" --readFilesCommand zcat \
       --outSAMtype BAM Unsorted --outFileNamePrefix "$pref" \
       --outFilterMultimapNmax 100 --winAnchorMultimapNmax 100 --outSAMprimaryFlag AllBestScore
-  echo "[$cl] featureCounts per locus"
-  sing "$SUB_SIF" featureCounts -a "$TE_GTF" -o "$out" \
-      -M --fraction -O -T "$THREADS" -p --countReadPairs \
-      -t exon -g transcript_id "$bam"
+  if [ ! -s "$out" ]; then
+    echo "[$cl] featureCounts per locus (-s $FC_STRAND)"
+    sing "$SUB_SIF" featureCounts -a "$TE_GTF" -o "$out" \
+        -M --fraction -O -T "$THREADS" -p --countReadPairs -s "$FC_STRAND" \
+        -t exon -g transcript_id "$bam"
+  fi
+  if [ "$ALSO_TECOUNT" = "1" ] && [ ! -s "$cnt" ]; then
+    echo "[$cl] TEcount subfamily level (--stranded $STRANDED) on the same BAM"
+    sing "$TE_SIF" TEcount --mode multi --format BAM --sortByPos \
+        --stranded "$STRANDED" -b "$bam" --GTF "$GENE_GTF" --TE "$TE_GTF" \
+        --project "$WORK/counts/${cl}"
+  fi
   rm -f "$bam"
-  echo "[$cl] done -> $out"
+  if [ "$ALSO_TECOUNT" = "1" ]; then echo "[$cl] done -> $out + $cnt"
+  else echo "[$cl] done -> $out"; fi
 }
 if [ "${1:-}" = "--run-one" ]; then run_one; exit 0; fi
 
 # --- submit ----------------------------------------------------------------
 [ -s "$SUB_SIF" ] || { echo "pulling subread container..."; \
   curl -fSL -o "$SUB_SIF" https://depot.galaxyproject.org/singularity/subread:2.0.6--he4a0461_2; }
-for f in "$STAR_SIF" "$SUB_SIF" "$STAR_INDEX/SAindex" "$TE_GTF"; do
+# Containers and GTFs come from the (synchronous) setup step, so they must
+# exist now no matter what.
+for f in "$STAR_SIF" "$SUB_SIF" "$TE_GTF"; do
   [ -e "$f" ] || { echo "MISSING $f"; exit 1; }
 done
+if [ "$ALSO_TECOUNT" = "1" ]; then
+  for f in "$TE_SIF" "$GENE_GTF"; do
+    [ -e "$f" ] || { echo "MISSING $f"; exit 1; }
+  done
+fi
+# The STAR index and the FASTQ, by contrast, are produced by OTHER LSF jobs.
+# REQUIRE_INPUTS=0 downgrades them to warnings so this array can be submitted
+# with a -w dependency on those jobs before they have run.
+REQUIRE_INPUTS=${REQUIRE_INPUTS:-${REQUIRE_FASTQ:-1}}
+miss=0
+[ -e "$STAR_INDEX/SAindex" ] || { echo "  STAR index not built yet: $STAR_INDEX"; miss=1; }
+while IFS=$'\t' read -r cl _ run _; do
+  [ -z "${run:-}" ] && continue
+  { [ -s "$WORK/fastq/${run}_1.fastq.gz" ] && [ -s "$WORK/fastq/${run}_2.fastq.gz" ]; } \
+    || { echo "  fastq not yet present: $cl $run"; miss=1; }
+done < <(tail -n +2 "$MANIFEST")
+if [ "$miss" = 1 ]; then
+  [ "$REQUIRE_INPUTS" = "1" ] && \
+    { echo "build the index / download the FASTQ first (or REQUIRE_INPUTS=0)"; exit 1; }
+  echo "  REQUIRE_INPUTS=0 -> submitting anyway (expects upstream jobs to produce these)"
+fi
 N=$(($(grep -c . "$MANIFEST") - 1))
 LOG="$WORK/${JOB}.%J_%I.log"
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+# BSUB_DEP: an LSF dependency EXPRESSION, e.g. 'done(ena_dl) && done(star_index)'.
+# It must reach bsub as a single argument, so it is never word-split.
+dep_args=(); [ -n "${BSUB_DEP:-}" ] && dep_args=( -w "$BSUB_DEP" )
 bsub -q "$QUEUE" -n "$THREADS" -M "$MEM_MB" -R "rusage[mem=$MEM_MB]" -W "$WALL" \
-     -J "${JOB}[1-$N]" -o "$LOG" -e "$LOG" bash "$SELF" --run-one
-echo "submitted ${JOB}[1-$N]; when DONE run: bash scripts/submit_locus_expression.sh --merge"
+     ${dep_args[@]+"${dep_args[@]}"} \
+     -J "${JOB}[1-$N]" -o "$LOG" -e "$LOG" \
+     env WORK="$WORK" REF="$REF" CONT="$CONT" MANIFEST="$MANIFEST" \
+         THREADS="$THREADS" ALSO_TECOUNT="$ALSO_TECOUNT" \
+         STRANDED="$STRANDED" FC_STRAND="$FC_STRAND" FILTER="$FILTER" \
+     bash "$SELF" --run-one
+echo "submitted ${JOB}[1-$N]; when DONE run: MANIFEST=$MANIFEST WORK=$WORK bash scripts/submit_locus_expression.sh --merge"

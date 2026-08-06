@@ -19,15 +19,21 @@
 set -euo pipefail
 
 WORK=${WORK:-$HOME/hervk_ccle}
-REF=$WORK/ref
-CONT=$WORK/containers
+# REF/CONT are overridable so a second study can point at an already-built
+# hg38 + STAR index + container set instead of downloading its own copy.
+REF=${REF:-$WORK/ref}
+CONT=${CONT:-$WORK/containers}
 THREADS=${THREADS:-12}
 MEM_MB=${MEM_MB:-45000}
 # QUEUE: PennHPC/PMACS post-2026-Q3-maintenance default is 'rhel9' (lowercase).
 # LSF_SELECT: optional LSF select[] expr; not needed on PennHPC (rhel9 is a queue).
 QUEUE=${QUEUE:-rhel9}
 LSF_SELECT=${LSF_SELECT:-}
-MANIFEST=$(cd "$(dirname "$0")" && pwd)/hervk_ccle_manifest.tsv
+JOB=${JOB:-ena_dl}          # name of the download job (inherited by download_fastq_ena.sh)
+MANIFEST=${MANIFEST:-$(cd "$(dirname "$0")" && pwd)/hervk_ccle_manifest.tsv}
+# Subfamilies to report as a sanity check on the generated TE GTF (ERE-style
+# regex). Override per study, e.g. FAM_GREP='^(LTR66|LTR10G)$'.
+FAM_GREP=${FAM_GREP:-'^(HERVK.*-int|LTR5|LTR5_Hs|LTR5A|LTR5B)$'}
 # assemble bsub resource/queue args once
 bsub_args=( -n "$THREADS" -M "$MEM_MB" -R "rusage[mem=$MEM_MB]" )
 [ -n "$QUEUE" ]      && bsub_args+=( -q "$QUEUE" )
@@ -71,9 +77,18 @@ if [ ! -s hg38_rmsk_TE.gtf ]; then
       printf "%s\trmsk\texon\t%d\t%d\t.\t%s\t.\tgene_id \"%s\"; transcript_id \"%s_dup%d\"; family_id \"%s\"; class_id \"%s\";\n",
              $6,$7+1,$8,$10,$11,$11,n[$11],$13,$12 }' > hg38_rmsk_TE.gtf
 fi
-echo "  TE GTF: $(wc -l < hg38_rmsk_TE.gtf) lines; HERVK subfamilies present:"
-awk -F'gene_id "' '{split($2,a,"\"");print a[1]}' hg38_rmsk_TE.gtf \
-  | grep -E '^(HERVK.*-int|LTR5|LTR5_Hs|LTR5A|LTR5B)$' | sort | uniq -c
+echo "  TE GTF: $(wc -l < hg38_rmsk_TE.gtf) lines; subfamilies of interest present:"
+# `|| true`: with pipefail a non-matching grep would otherwise abort the script.
+# A miss here means the repName is wrong or was dropped by the class filter --
+# report it loudly rather than dying three lines later for no obvious reason.
+fam_counts=$(awk -F'gene_id "' '{split($2,a,"\"");print a[1]}' hg38_rmsk_TE.gtf \
+  | grep -E "$FAM_GREP" | sort | uniq -c || true)
+if [ -n "$fam_counts" ]; then
+  echo "$fam_counts" | sed 's/^/  /'
+else
+  echo "  WARNING: no gene_id in the TE GTF matches /$FAM_GREP/ --"
+  echo "  check the repName spelling; downstream counting will find nothing."
+fi
 
 # --- 3. submit STAR index build first (runs on a node while we download) ---
 IDX=$REF/star_hg38
@@ -105,9 +120,12 @@ fi
 # compute node via bsub (aria2c -x16, native resume; curl fallback).
 DL=$(cd "$(dirname "$0")" && pwd)/download_fastq_ena.sh
 echo "[setup] submitting ENA FASTQ download job ..."
-bash "$DL"
+# these are plain shell vars here, so hand them over explicitly -- otherwise the
+# download job silently falls back to its own default (CCLE) manifest/WORK.
+env MANIFEST="$MANIFEST" WORK="$WORK" CONT="$CONT" QUEUE="$QUEUE" bash "$DL"
 
-echo; echo "[setup] DONE. Two jobs are now running: star_index + ena_dl."
+n_runs=$(($(grep -c . "$MANIFEST") - 1))
+echo; echo "[setup] DONE. Two jobs are now running: star_index + $JOB."
 echo "  watch:  bjobs"
-echo "  when the index is built AND all 6 fastq.gz are present, run:"
+echo "  when the index is built AND all $((n_runs * 2)) fastq.gz are present, run:"
 echo "  bash scripts/submit_hervk_ccle_requant.sh"

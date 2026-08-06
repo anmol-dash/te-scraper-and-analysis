@@ -28,6 +28,11 @@ WORK=${REAGENT_WORK:-$HOME/hervk_reagents}
 JOB=${REAGENT_JOB:-reagents}
 CAS=${CAS:-SpCas9}
 FAMILIES=${FAMILIES:-"LTR5_Hs LTR5 HERVK-int"}   # add LTR5A LTR5B for full variant set
+# HDBSCAN min_cluster_size for query.py. Its argparse default is 100, which is
+# fine for the ~1000-copy HERVK families but silently collapses a small family
+# (everything below 100 becomes one cluster + noise). Set MCS for all families,
+# or MCS_<FAMILY> per family (non-alphanumerics -> '_', e.g. MCS_HERVK_int).
+MCS=${MCS:-}
 QUEUE=${QUEUE:-rhel9}
 WALL=${WALL:-8:00}
 PYLIB="$WORK/pylib"                              # primer3-py installed here if the sif lacks it
@@ -52,9 +57,17 @@ design_one() {
   local fam="$1"
   local out="$WORK/$fam"       # separate line: $fam must be set before it's used (set -u)
   mkdir -p "$out"
-  echo "== [$fam] 1/4 query.py primers + sequences =="
+  # per-family MCS_<FAM> wins over the global MCS; unset = query.py's own default
+  local famkey mcs mcsarg=()
+  famkey="MCS_$(printf '%s' "$fam" | tr -c '[:alnum:]' '_')"
+  mcs="${!famkey:-$MCS}"
+  [ -n "$mcs" ] && mcsarg=( --min-cluster-size "$mcs" )
+  echo "== [$fam] 1/4 query.py primers + sequences ${mcs:+(min_cluster_size=$mcs)} =="
+  # ${a[@]+"${a[@]}"}: expanding an empty array unquoted-guarded is the portable
+  # form; a bare "${a[@]}" is an 'unbound variable' error on bash < 4.4 + set -u
   sing python "$REPO/query.py" --local --family "$fam" --assembly hg38 \
-      --genome "$GENOME" --output "$out" --stop-after primers
+      --genome "$GENOME" --output "$out" --stop-after primers \
+      ${mcsarg[@]+"${mcsarg[@]}"}
 
   # locate the family sequences CSV (the one with a 'Seq' column)
   local seqcsv
@@ -108,10 +121,17 @@ fi
 preflight
 N=${#FAM_ARR[@]}
 bsub_args=( -n 4 -M 20000 -R "rusage[mem=20000]" -W "$WALL" -q "$QUEUE" )
+# BSUB_DEP: LSF dependency expression, e.g. 'done(other_job)'. Passed to bsub as
+# a single -w argument so multi-term expressions survive intact.
+dep_args=(); [ -n "${BSUB_DEP:-}" ] && dep_args=( -w "$BSUB_DEP" )
+# forward every MCS / MCS_<FAM> so the compute node clusters as configured
+mcs_env=( MCS="$MCS" )
+for v in $(compgen -v | grep '^MCS_' || true); do mcs_env+=( "$v=${!v}" ); done
 LOG="$WORK/${JOB}.%J_%I.log"
-bsub "${bsub_args[@]}" -J "${JOB}[1-$N]" -o "$LOG" -e "$LOG" \
+bsub "${bsub_args[@]}" ${dep_args[@]+"${dep_args[@]}"} \
+     -J "${JOB}[1-$N]" -o "$LOG" -e "$LOG" \
      env SIF="$SIF" REF="$REF" GENOME="$GENOME" REAGENT_WORK="$WORK" REAGENT_JOB="$JOB" \
-         CAS="$CAS" FAMILIES="$FAMILIES" \
+         CAS="$CAS" FAMILIES="$FAMILIES" "${mcs_env[@]}" \
      bash "$REPO/scripts/$(basename "$0")" --run-one
 echo "submitted ${JOB}[1-$N] for: ${FAM_ARR[*]}"
 echo "  watch: bjobs -J $JOB ; logs: $WORK/${JOB}.*_*.log ; outputs under $WORK/<family>/"

@@ -17,6 +17,7 @@ CONT=${CONT:-$WORK/containers}   # override to reuse another study's containers
 QUEUE=${QUEUE:-rhel9}
 WALL=${WALL:-48:00}          # LSF wall clock HH:MM; downloads can be long
 THREADS=${THREADS:-8}
+JOB=${JOB:-ena_dl}           # per-study name so concurrent studies don't collide
 DEPOT=https://depot.galaxyproject.org/singularity
 ARIA_SIF=$CONT/aria2.sif
 MANIFEST=${MANIFEST:-$(cd "$(dirname "$0")" && pwd)/hervk_ccle_manifest.tsv}
@@ -28,12 +29,13 @@ if [ "${1:-}" != "--run" ]; then
     echo "[dl] pulling aria2 image ..."
     curl -fSL -o "$ARIA_SIF" "$DEPOT/aria2:1.36.0" || echo "[dl] aria2 pull failed; will use curl fallback"
   fi
-  LOG="$WORK/ena_dl.%J.log"
-  echo "[dl] submitting download job (-q $QUEUE -W $WALL) ..."
+  LOG="$WORK/${JOB}.%J.log"
+  echo "[dl] submitting download job (-q $QUEUE -W $WALL) as '$JOB' ..."
   bsub -q "$QUEUE" -n "$THREADS" -W "$WALL" -M 6000 -R "rusage[mem=6000]" \
-       -J ena_dl -o "$LOG" -e "$LOG" \
+       -J "$JOB" -o "$LOG" -e "$LOG" \
+       env WORK="$WORK" CONT="$CONT" MANIFEST="$MANIFEST" JOB="$JOB" \
        bash "$(cd "$(dirname "$0")" && pwd)/$(basename "$0")" --run
-  echo "[dl] submitted; watch: bjobs -J ena_dl ; tail -f $WORK/ena_dl.*.log"
+  echo "[dl] submitted; watch: bjobs -J $JOB ; tail -f $WORK/${JOB}.*.log"
   exit 0
 fi
 
