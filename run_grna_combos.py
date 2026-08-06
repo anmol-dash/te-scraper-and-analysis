@@ -1055,16 +1055,19 @@ def main():
         # combinations
         combos = enumerate_combos(cov_sets, n_copies,
                                   args.max_combo_size or len(guides))
-        crows = []
+        crows, combo_idx = [], {}
         for c in combos:
             row = {"family": fam, "n_guides": c["n_guides"],
                    "guides": _fmt_combo(guides, c["guides"]),
                    "ranks": "+".join(str(d["rows"][i]["rank"]) for i in c["guides"]),
                    "covered": c["covered"], "cov_pct": c["cov_pct"],
                    "cov_exact": len(set().union(*[cov_set(d["pam"][i], 0)
-                                                  for i in c["guides"]]))}
+                                                  for i in c["guides"]])),
+                   "min_on_target": min(on_target_score(guides[i])
+                                        for i in c["guides"])}
             row.update(_combo_ot([guides[i] for i in c["guides"]],
                                  per_guide_sites, target_fams))
+            combo_idx[row["ranks"]] = c["guides"]
             crows.append(row)
         cdf = pd.DataFrame(crows).sort_values(
             ["n_guides", "covered"], ascending=[True, False])
@@ -1125,16 +1128,25 @@ def main():
             answer.append("")
 
         answer.append("-- best 2-guide combinations " + "-" * 47)
-        answer.append(f"{'ranks':>7} {'copies':>7} {'%cov':>7} {'gain':>6} "
+        answer.append(f"{'ranks':>7} {'copies':>7} {'%cov':>7} {'gain':>6} {'minOTS':>7} "
                       f"{'OT':>6} {'exonic':>7}  guides")
         singles = dict(zip(gt["guide"], gt["cov_pct"]))
         for _, r in pairs.head(10).iterrows():
             g1, g2 = r["guides"].split(" + ")
             gain = r["cov_pct"] - max(singles.get(g1, 0), singles.get(g2, 0))
             answer.append(f"{r['ranks']:>7} {int(r['covered']):>7} {r['cov_pct']:>6.1f}% "
-                          f"{gain:>+5.1f} {int(r['ot_sites']):>6} "
+                          f"{gain:>+5.1f} {r['min_on_target']:>7.2f} {int(r['ot_sites']):>6} "
                           f"{int(r['ot_coding_exon_offfamily']):>7}  {r['guides']}")
-        answer.append("  (gain = percentage points added over the better single guide)")
+        answer.append("  (gain = percentage points added over the better single guide;")
+        answer.append("   minOTS = worst on-target quality score in the pair --- a low value")
+        answer.append("   means one member is AT-rich / homopolymeric and may cut poorly)")
+        clean = pairs[pairs.min_on_target >= 0.8]
+        if len(clean) and clean.iloc[0]["ranks"] != pairs.iloc[0]["ranks"]:
+            c0 = clean.iloc[0]
+            answer.append(f"  best pair with NO low-quality guide: ranks {c0['ranks']} "
+                          f"= {int(c0['covered'])}/{n_copies} ({c0['cov_pct']:.1f}%), "
+                          f"minOTS {c0['min_on_target']:.2f} --- "
+                          f"{pairs.iloc[0]['cov_pct'] - c0['cov_pct']:.1f} pp below the top pair")
         answer.append("")
 
         answer.append("-- coverage vs number of guides (best set at each size) " + "-" * 21)
@@ -1144,6 +1156,37 @@ def main():
                           f"{r['cov_pct']:>6.1f}% {int(r['ot_sites']):>6} "
                           f"{int(r['ot_coding_exon_offfamily']):>7}  {r['ranks']}")
         answer.append("")
+
+        # Are the copies a guide set misses just short fragments? rmsk splits
+        # old elements into many small pieces that cannot contain the target
+        # site at all, which drags the whole-family percentage down.
+        ref_row = need.iloc[0] if len(need) else best_by_size.iloc[-1]
+        sel = combo_idx.get(ref_row["ranks"], tuple(range(len(guides))))
+        sel_cov = set().union(*[cov_sets[i] for i in sel]) if sel else set()
+        Lc = np.array([len(s) for s in seqs])
+        ref_len = float(np.percentile(Lc, 95)) if len(Lc) else 0.0
+        if ref_len > 0:
+            answer.append(f"-- coverage by copy length (set {ref_row['ranks']}; "
+                          f"full length ~= {ref_len:,.0f} bp) " + "-" * 12)
+            answer.append(f"{'copy length':>16} {'copies':>7} {'covered':>8} {'%':>7}")
+            edges = [(0.0, 0.10), (0.10, 0.25), (0.25, 0.50), (0.50, 0.90), (0.90, 9.9)]
+            labels = ["<10% (fragment)", "10-25%", "25-50%", "50-90%", ">=90% (full)"]
+            for (lo, hi), lab in zip(edges, labels):
+                idx = [i for i in range(len(seqs)) if lo <= Lc[i] / ref_len < hi]
+                if not idx:
+                    continue
+                cv = sum(1 for i in idx if i in sel_cov)
+                answer.append(f"{lab:>16} {len(idx):>7} {cv:>8} "
+                              f"{100.0*cv/len(idx):>6.1f}%")
+            full_idx = [i for i in range(len(seqs)) if Lc[i] / ref_len >= 0.90]
+            if full_idx:
+                fc = sum(1 for i in full_idx if i in sel_cov)
+                answer.append(f"  >> near-full-length elements: {fc}/{len(full_idx)} "
+                              f"({100.0*fc/len(full_idx):.1f}%) covered. These are the "
+                              "copies that can still be transcriptionally/coding active;")
+                answer.append("     the short fragments cannot contain the target site "
+                              "at all, so they cap the whole-family percentage.")
+            answer.append("")
 
         tgt_pct = args.target_cov * 100
         if len(need):
