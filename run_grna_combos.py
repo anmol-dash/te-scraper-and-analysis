@@ -1193,6 +1193,7 @@ def main():
         # The top-coverage pair is often not the one to build: rank it by safety
         # first (no perfect-match off-family cuts, no coding-exon hits, decent
         # on-target quality) and report what that costs in coverage.
+        rec_row = alt_row = None
         tiers = [("no perfect-match off-family cuts, no coding-exon hits, "
                   "good on-target quality",
                   lambda d: (d.min_on_target >= 0.8) & (d.ot_offfamily_perfect == 0)
@@ -1213,6 +1214,7 @@ def main():
                               f"{label}" + (" (also the top-coverage pair)" if same else
                                             f"; costs {cost:.1f} pp vs the top-coverage pair"))
                 answer.append(f"     {c0['guides']}")
+                rec_row = c0
                 # Coverage alone decides between pairs that tie on the safety
                 # filter, which can pick a pair carrying several times the
                 # off-family burden for one or two extra copies. Surface the
@@ -1233,6 +1235,7 @@ def main():
                         f"on-target {alt['min_on_target']:.2f} vs {c0['min_on_target']:.2f},"
                         f" for {c0['covered'] - alt['covered']} fewer copies")
                     answer.append(f"     {alt['guides']}")
+                    alt_row = alt
                 break
         answer.append("")
 
@@ -1293,11 +1296,21 @@ def main():
 
         # off-target detail for the recommended sets
         if len(sites):
-            rec = []
+            rec, seen_ranks = [], set()
+
+            def _add(label, row):
+                if row is not None and row["ranks"] not in seen_ranks:
+                    seen_ranks.add(row["ranks"])
+                    rec.append((label, row))
+
+            # the recommended pair comes first: it is the one that gets cloned,
+            # so its gene hits are the ones that actually need checking
+            _add("RECOMMENDED pair", rec_row)
+            _add("lower-burden alternative", alt_row)
             if len(pairs):
-                rec.append(("best pair", pairs.iloc[0]))
+                _add("top-coverage pair", pairs.iloc[0])
             if len(need):
-                rec.append((f"smallest set >={tgt_pct:.0f}%", need.iloc[0]))
+                _add(f"smallest set >={tgt_pct:.0f}%", need.iloc[0])
             for label, row in rec:
                 gl = row["guides"].split(" + ")
                 sub = sites[sites.guide.isin(gl)]
