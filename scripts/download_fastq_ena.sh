@@ -54,12 +54,27 @@ get_curl() {  # $1=url $2=out
 }
 
 fetch() {  # $1=url $2=out $3=want_bytes
-  local url="$1" out="$2" want="$3" have attempt
+  local url="$1" out="$2" want="$3" have attempt prev=-1 stalled=0
   for attempt in $(seq 1 200); do
     have=$(size "$out")
     if [ -n "$want" ] && [ "$want" -gt 0 ] && [ "$have" -ge "$want" ]; then
       echo "  OK $(basename "$out") ($have bytes)"; return 0
     fi
+    # Give up early if nothing is being transferred at all. Retrying is for
+    # dropped connections; against a broken tool or a blocked network it just
+    # produces 200 identical failures and hides the real error.
+    if [ "$have" -le "$prev" ]; then
+      stalled=$((stalled + 1))
+    else
+      stalled=0
+    fi
+    if [ "$stalled" -ge 5 ]; then
+      echo "  STALLED $(basename "$out"): 5 attempts with no bytes transferred."
+      echo "  The transfer tool or the network is failing -- see the errors above;"
+      echo "  retrying further would only repeat them."
+      return 1
+    fi
+    prev=$have
     echo "  [$attempt] $(basename "$out"): have $have / want ${want:-?}"
     if [ -s "$ARIA_SIF" ]; then
       get_aria "$url" "$(dirname "$out")" "$(basename "$out")" && true
@@ -80,9 +95,16 @@ echo "== ENA download start on $(hostname) =="
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_container.sh"
 CONTAINER_BIND="${CONTAINER_BIND:-}${CONTAINER_BIND:+:}$WORK"
 container_module_load
-if ! container_init; then
-  echo "  no container runtime -> using curl for every transfer"
+# aria2 is only a SPEED optimisation (16 parallel streams); curl needs no
+# container at all. So probe the runtime for real and fall back rather than
+# retrying into an apptainer that panics -- that is what burned 200 attempts
+# per file and downloaded nothing while looking like a network failure.
+if ! container_init || ! container_probe "$ARIA_SIF"; then
+  echo "  container runtime unusable here -> using curl for every transfer"
+  echo "  (slower, but it needs nothing but the host)"
   ARIA_SIF=""
+else
+  echo "  aria2 container OK -> parallel transfers"
 fi
 tail -n +2 "$MANIFEST" | while IFS=$'\t' read -r cl smp run rest; do
   [ -z "${run:-}" ] && continue

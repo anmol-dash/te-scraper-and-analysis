@@ -65,6 +65,18 @@ container_module_load() {
   module load $CONTAINER_MODULE || echo "  WARNING: module load failed; continuing"
 }
 
+# container_probe <image.sif> -- does the runtime ACTUALLY start on this host?
+# `command -v` is not enough: apptainer can be present and still panic before the
+# container starts (the Go FIPS/OpenSSL panic). GOFIPS=0 is meant to prevent that,
+# but it is a mitigation, not a guarantee -- so anything with a non-container
+# fallback should probe first rather than retry into a wall.
+container_probe() {
+  local img="$1"
+  [ -n "${GAMECA_RT:-}" ] || return 1
+  [ -s "$img" ] || return 1
+  sing "$img" true >/dev/null 2>&1
+}
+
 # sing <image.sif> <command...>
 sing() {
   local img="$1"; shift
