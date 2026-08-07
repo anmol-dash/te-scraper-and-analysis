@@ -106,11 +106,36 @@ if ! container_init || ! container_probe "$ARIA_SIF"; then
 else
   echo "  aria2 container OK -> parallel transfers"
 fi
+# Look up a run's FASTQ URLs, with retries. A bare `curl -s` here is a silent
+# sample-dropper: one transient ENA hiccup returns nothing, the run is skipped
+# entirely, and the only evidence is a missing pair 2 hours later.
+ena_lookup() {   # $1=run accession -> prints "urls<TAB>bytes"
+  local run="$1" info attempt
+  for attempt in 1 2 3 4 5; do
+    info=$(curl -sS --fail --connect-timeout 20 --max-time 120 --retry 3 \
+             "https://www.ebi.ac.uk/ena/portal/api/filereport?accession=${run}&result=read_run&fields=fastq_ftp,fastq_bytes&format=tsv" \
+           2>/dev/null | awk 'NR==2')
+    if [ -n "$info" ] && [ -n "$(printf '%s' "$info" | cut -f2)" ]; then
+      printf '%s' "$info"; return 0
+    fi
+    echo "  ENA lookup for $run failed (attempt $attempt/5); retrying in $((attempt * 10))s" >&2
+    sleep $((attempt * 10))
+  done
+  return 1
+}
+
 tail -n +2 "$MANIFEST" | while IFS=$'\t' read -r cl smp run rest; do
   [ -z "${run:-}" ] && continue
-  info=$(curl -s "https://www.ebi.ac.uk/ena/portal/api/filereport?accession=${run}&result=read_run&fields=fastq_ftp,fastq_bytes&format=tsv" | awk 'NR==2')
+  # already complete? skip the lookup entirely
+  if [ -s "$WORK/fastq/${run}_1.fastq.gz" ] && [ -s "$WORK/fastq/${run}_2.fastq.gz" ]; then
+    echo "== $cl $run == already present, skipping"; continue
+  fi
+  if ! info=$(ena_lookup "$run"); then
+    echo "  NO ENA METADATA for $cl $run after 5 attempts -- it will be reported"
+    echo "  as missing by the verification below; re-run to retry."
+    continue
+  fi
   urls=$(echo "$info" | cut -f2); bytes=$(echo "$info" | cut -f3)
-  [ -z "$urls" ] && { echo "no ENA FASTQ for $run"; continue; }
   IFS=';' read -r u1 u2 <<< "$urls"
   IFS=';' read -r b1 b2 <<< "$bytes"
   echo "== $cl $run =="
