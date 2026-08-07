@@ -24,15 +24,35 @@ mkdir -p "$OUT"
 
 if [ "${1:-}" = "--report" ]; then
   echo "== container probe results =="
-  ok=$(grep -l 'RESULT=ok' "$OUT"/*.res 2>/dev/null | wc -l | tr -d ' ')
-  un=$(grep -l 'RESULT=userns' "$OUT"/*.res 2>/dev/null | wc -l | tr -d ' ')
-  bad=$(grep -l 'RESULT=broken' "$OUT"/*.res 2>/dev/null | wc -l | tr -d ' ')
-  printf '  plain exec works : %s\n  needs --userns   : %s\n  broken entirely  : %s\n' "$ok" "$un" "$bad"
+  # NB: every count below is guarded. A bare `grep ... | wc -l` inside $( ) exits
+  # non-zero when nothing matches, and under `set -e` that kills the script --
+  # which is exactly why this printed a bare header and quit.
+  shopt -s nullglob
+  res=( "$OUT"/*.res )
+  shopt -u nullglob
+  if [ ${#res[@]} -eq 0 ]; then
+    echo "  no results in $OUT"
+    echo
+    if bjobs -J "$JOB" >/dev/null 2>&1; then
+      echo "  the probe jobs are still queued/running:"
+      bjobs -J "$JOB" 2>/dev/null | head -5 | sed 's/^/    /'
+      echo "  re-run --report when they clear."
+    else
+      echo "  no probe jobs are queued either -- you need to submit them first:"
+      echo "      bash scripts/probe_container_nodes.sh"
+      echo "  (then wait ~1 min and re-run --report)"
+    fi
+    exit 0
+  fi
+  count() { grep -l "RESULT=$1" "${res[@]}" 2>/dev/null | wc -l | tr -d ' '; }
+  ok=$(count ok); un=$(count userns); bad=$(count broken)
+  printf '  plain exec works : %s\n  needs --userns   : %s\n  broken entirely  : %s\n' \
+    "${ok:-0}" "${un:-0}" "${bad:-0}"
   echo
   echo "  by node:"
-  cat "$OUT"/*.res 2>/dev/null | sort -u | sed 's/^/    /'
+  sort -u "${res[@]}" 2>/dev/null | sed 's/^/    /' || true
   echo
-  broken=$(grep -h 'RESULT=broken' "$OUT"/*.res 2>/dev/null | sed 's/ .*//' | sort -u | tr '\n' ' ')
+  broken=$(grep -h 'RESULT=broken' "${res[@]}" 2>/dev/null | sed 's/ .*//' | sort -u | paste -sd' ' - || true)
   if [ -n "$broken" ]; then
     echo "  exclude these when submitting:"
     echo "    EXCLUDE_HOSTS='$broken' bash scripts/run_endometrium_ltr.sh --clean --go"
