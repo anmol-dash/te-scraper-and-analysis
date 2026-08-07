@@ -236,6 +236,9 @@ command -v bsub >/dev/null || { echo "FATAL: bsub not on PATH -- run this on the
 . "$SCRIPTS/lib_container.sh"
 container_module_load
 container_init || exit 1
+container_probe "$SIF" \
+  || echo "  WARNING: the container cannot start HERE; compute nodes are probed separately"
+[ -n "$CONTAINER_EXEC_FLAGS" ] && echo "  container exec flags: $CONTAINER_EXEC_FLAGS"
 echo "  manifest: $MANIFEST ($N_SAMPLES paired total-RNA runs)"
 echo "  families: $FAMILIES   (min_cluster_size: LTR66=$MCS_LTR66 LTR10G=$MCS_LTR10G)"
 echo "  strandedness: TEcount=$STRANDED featureCounts=-s $FC_STRAND"
@@ -271,7 +274,7 @@ fi
 # login node, so the scan job never depends on outbound network.
 if [ "$DRY" = 0 ]; then
   mkdir -p "$RMSK_DIR"
-  "$GAMECA_RT" exec -B "$HOME" "$SIF" python -c "
+  "$GAMECA_RT" exec $CONTAINER_EXEC_FLAGS -B "$HOME" "$SIF" python -c "
 import sys; sys.path.insert(0, '$REPO')
 from te_prep import get_rmsk_path
 from run_grna_combos import download_refgene
@@ -392,7 +395,8 @@ set -euo pipefail
 . "$SCRIPTS/lib_container.sh"
 container_module_load
 container_init || exit 1
-sing() { "\$GAMECA_RT" exec -B "\$HOME" "$SIF" "\$@"; }
+container_probe "$SIF" || true
+sing() { "\$GAMECA_RT" exec \$CONTAINER_EXEC_FLAGS -B "\$HOME" "$SIF" "\$@"; }
 
 python3 "$SCRIPTS/collect_grna_candidates.py" \\
     --reagent-dir "$REAGENT_WORK" --families $FAMILIES \\

@@ -29,6 +29,8 @@ export GOFIPS=0 GOLANG_FIPS=0
 
 # Extra bind paths (colon-separated) for filesystems outside $HOME
 CONTAINER_BIND=${CONTAINER_BIND:-}
+# Extra flags every exec needs on this host; container_probe() discovers them.
+CONTAINER_EXEC_FLAGS=${CONTAINER_EXEC_FLAGS:-}
 
 container_init() {
   if [ -n "${GAMECA_RT:-}" ] && command -v "$GAMECA_RT" >/dev/null 2>&1; then
@@ -74,7 +76,26 @@ container_probe() {
   local img="$1"
   [ -n "${GAMECA_RT:-}" ] || return 1
   [ -s "$img" ] || return 1
-  sing "$img" true >/dev/null 2>&1
+  # 1. the normal path
+  CONTAINER_EXEC_FLAGS=""
+  "$GAMECA_RT" exec "$img" true >/dev/null 2>&1 && return 0
+  # 2. --userns: runs the container in a user namespace instead of going through
+  #    the setuid starter. On these nodes `apptainer --version` succeeds while
+  #    `apptainer exec` panics in the Go FIPS/OpenSSL backend -- consistent with
+  #    the privileged path, which sanitises the environment and so discards the
+  #    GOFIPS=0 that suppresses the panic everywhere else.
+  if "$GAMECA_RT" exec --userns "$img" true >/dev/null 2>&1; then
+    CONTAINER_EXEC_FLAGS="--userns"
+    echo "  NOTE: plain 'exec' fails on $(hostname -s); using --userns" >&2
+    return 0
+  fi
+  # 3. --userns without setuid help at all
+  if APPTAINER_MESSAGELEVEL=0 "$GAMECA_RT" exec --userns --no-init "$img" true >/dev/null 2>&1; then
+    CONTAINER_EXEC_FLAGS="--userns --no-init"
+    echo "  NOTE: using --userns --no-init on $(hostname -s)" >&2
+    return 0
+  fi
+  return 1
 }
 
 # sing <image.sif> <command...>
@@ -85,5 +106,6 @@ sing() {
     local IFS=':'
     for p in $CONTAINER_BIND; do [ -n "$p" ] && binds+=( -B "$p" ); done
   fi
-  "$GAMECA_RT" exec "${binds[@]}" "$img" "$@"
+  # shellcheck disable=SC2086 -- CONTAINER_EXEC_FLAGS is a deliberate word list
+  "$GAMECA_RT" exec $CONTAINER_EXEC_FLAGS "${binds[@]}" "$img" "$@"
 }

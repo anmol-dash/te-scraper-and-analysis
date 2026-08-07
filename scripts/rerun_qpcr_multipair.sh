@@ -38,6 +38,7 @@ JOB=${JOB:-qpcr_multi}
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_container.sh"
 container_module_load
 container_init || exit 1
+container_probe "$SIF" || echo "  WARNING: container unusable on $(hostname -s); this will fail"
 
 do_work() {
   read -r -a FAM_ARR <<< "$FAMILIES"
@@ -58,7 +59,7 @@ do_work() {
     if [ -n "$EXPR_TSV" ]; then
       designcsv="$out/${label}.seqs.csv"
       echo "[$label] attaching per-locus expression from $EXPR_TSV"
-      "$GAMECA_RT" exec -B "$HOME" "$SIF" python "$REPO/attach_locus_expression.py" \
+      "$GAMECA_RT" exec $CONTAINER_EXEC_FLAGS -B "$HOME" "$SIF" python "$REPO/attach_locus_expression.py" \
           --expr "$EXPR_TSV" --seqs "$seqcsv" --out "$designcsv" \
           || { echo "[$label] expression attach failed"; designcsv="$seqcsv"; }
     fi
@@ -69,14 +70,14 @@ do_work() {
     [ -n "$AMP_MAX" ]  && exprarg+=(--amp-max "$AMP_MAX")
     [ -n "$MAX_REPS" ] && exprarg+=(--max-reps "$MAX_REPS")
     SINGULARITYENV_PYTHONPATH="$PYLIB" APPTAINERENV_PYTHONPATH="$PYLIB" \
-      "$GAMECA_RT" exec -B "$HOME" "$SIF" python "$REPO/te_qpcr_primers.py" \
+      "$GAMECA_RT" exec $CONTAINER_EXEC_FLAGS -B "$HOME" "$SIF" python "$REPO/te_qpcr_primers.py" \
         --input "$designcsv" --family "$label" --genome "$GENOME" --out "$out" \
         --n-pairs "$NPAIRS" --n-clusters "$NCLUST" --max-mm "$MAXMM" ${exprarg[@]+"${exprarg[@]}"} \
         || { echo "[$label] primer design failed"; continue; }
     if [ -n "$TOP_N" ]; then
       echo "[$label] ranking top-$TOP_N primers"
       SINGULARITYENV_PYTHONPATH="$PYLIB" APPTAINERENV_PYTHONPATH="$PYLIB" \
-        "$GAMECA_RT" exec -B "$HOME" "$SIF" python "$REPO/top_primers.py" \
+        "$GAMECA_RT" exec $CONTAINER_EXEC_FLAGS -B "$HOME" "$SIF" python "$REPO/top_primers.py" \
           --input "$designcsv" --family "$label" --genome "$GENOME" --out "$out" \
           --top-n "$TOP_N" --max-mm "$MAXMM" ${exprarg[@]+"${exprarg[@]}"} \
           || echo "[$label] top-primers ranking failed"

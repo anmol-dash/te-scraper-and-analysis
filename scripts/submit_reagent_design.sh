@@ -50,9 +50,11 @@ read -r -a FAM_ARR <<< "$FAMILIES"
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_container.sh"
 container_module_load
 container_init || exit 1
+# discover any per-node exec workaround (e.g. --userns) before doing real work
+container_probe "$SIF" || echo "  WARNING: container unusable on $(hostname -s); this will fail"
 # this script's sing() bakes in $SIF (call sites pass only the command), so it
 # overrides the generic two-argument helper from the library
-sing() { "$GAMECA_RT" exec -B "$HOME" "$SIF" "$@"; }
+sing() { "$GAMECA_RT" exec $CONTAINER_EXEC_FLAGS -B "$HOME" "$SIF" "$@"; }
 
 ensure_primer3() {   # sif has numpy/pandas but not primer3; install into PYLIB once
   sing python -c "import primer3" 2>/dev/null && return 0
