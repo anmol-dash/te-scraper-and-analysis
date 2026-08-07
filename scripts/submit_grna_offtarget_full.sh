@@ -60,8 +60,48 @@ MEM=${MEM:-64000}
 mkdir -p "$WORK" "$OUT" "$RMSK_DIR"
 read -r -a FAM_ARR <<< "$FAMILIES"
 
+# host ~/.local numpy breaks the container stack; apptainer prefers APPTAINERENV_*
 export SINGULARITYENV_PYTHONNOUSERSITE=1
+export APPTAINERENV_PYTHONNOUSERSITE=1
+# Some pennhpc nodes ship apptainer as a Go binary built against a FIPS OpenSSL it
+# cannot initialise, and it panics BEFORE the container starts:
+#   panic: opensslcrypto: can't enable FIPS mode for OpenSSL 3.2.2
+# Disabling the Go FIPS backend avoids it and is harmless where it is absent.
+# (This is node-dependent, not queue-dependent: node188/rhel9 panics even though
+#  other rhel9 batch nodes run the same image fine.)
+export GOFIPS=0 GOLANG_FIPS=0
+
+PYBIN=${PYBIN:-python3}
+USE_CONTAINER=${USE_CONTAINER:-auto}   # auto | 1 (container only) | 0 (host only)
+MODE=""
+
 sing() { singularity exec -B "$HOME" "$SIF" "$@"; }
+
+# Decide once, on whichever host we are actually running on -- the login node and
+# the compute node can differ, so this is called again inside the job.
+select_runtime() {
+  local need='import numpy, pandas'
+  if [ "$USE_CONTAINER" != "0" ] && [ -s "$SIF" ] \
+     && sing python -c "$need" >/dev/null 2>&1; then
+    MODE=container
+  elif [ "$USE_CONTAINER" != "1" ] && "$PYBIN" -c "$need" >/dev/null 2>&1; then
+    MODE=host
+    echo "  NOTE: container unusable on $(hostname -s); using host $PYBIN"
+    echo "        (this scan needs only numpy + pandas, so the container is optional)"
+  else
+    echo "ERROR: no usable Python on $(hostname -s)."
+    echo "  container ($SIF): $(sing python -c "$need" 2>&1 | tail -1)"
+    echo "  host ($PYBIN):    $("$PYBIN" -c "$need" 2>&1 | tail -1)"
+    echo "  Fix one of them, or set PYBIN=/path/to/python with numpy+pandas."
+    exit 1
+  fi
+}
+
+# Run python under whichever runtime was selected.
+pyrun() {
+  [ -n "$MODE" ] || select_runtime
+  if [ "$MODE" = container ]; then sing python "$@"; else "$PYBIN" "$@"; fi
+}
 
 find_guides() {
   local c
@@ -83,18 +123,19 @@ scan_args() {
 
 run_scan() {
   local guides="$1"
+  select_runtime          # compute node may differ from the login node
   local args=()
   while IFS= read -r a; do args+=("$a"); done < <(scan_args "$guides")
 
   echo "== 1/2 comprehensive genome scan =="
-  sing python "$REPO/run_grna_offtarget_full.py" "${args[@]}"
+  pyrun "$REPO/run_grna_offtarget_full.py" "${args[@]}"
 
   # Re-rank the guide COMBINATIONS on the comprehensive site list. --reuse-sites
   # reads offtarget_sites_all.csv instead of rescanning, so this is seconds.
   echo "== 2/2 combination tables on the comprehensive sites =="
   local famargs=() f
   for f in "${FAM_ARR[@]}"; do famargs+=(--family "$f"); done
-  sing python "$REPO/run_grna_combos.py" \
+  pyrun "$REPO/run_grna_combos.py" \
       --guides "$guides" "${famargs[@]}" \
       --seqs-dir "$WORK" --out "$OUT" --reuse-sites \
       --target-cov "$TARGET_COV" --rmsk-dir "$RMSK_DIR"
@@ -108,7 +149,7 @@ ensure_copies() {   # family copies CSV (Seq column); regenerate if absent
   if [ -n "$csv" ]; then echo "  [$fam] copies: $csv"; return 0; fi
   echo "  [$fam] no sequences CSV --- regenerating with query.py"
   mkdir -p "$out"
-  sing python "$REPO/query.py" --local --family "$fam" --assembly "$ASSEMBLY" \
+  pyrun "$REPO/query.py" --local --family "$fam" --assembly "$ASSEMBLY" \
       --genome "$GENOME" --output "$out" --stop-after primers
   csv=$(find "$out" -name '*_with_sequences.csv' 2>/dev/null | head -1 || true)
   [ -n "$csv" ] || { echo "  [$fam] FAILED to produce a sequences CSV"; return 1; }
@@ -117,7 +158,12 @@ ensure_copies() {   # family copies CSV (Seq column); regenerate if absent
 
 preflight() {
   echo "== preflight =="
-  [ -s "$SIF" ]    && echo "  sif OK:    $SIF"    || { echo "  MISSING sif: $SIF"; exit 1; }
+  select_runtime          # sets MODE, or exits if no python has numpy+pandas
+  if [ "$MODE" = container ]; then
+    echo "  runtime:   container $SIF"
+  else
+    echo "  runtime:   host $PYBIN ($($PYBIN -V 2>&1))"
+  fi
   [ -s "$GENOME" ] && echo "  genome OK: $GENOME" || { echo "  MISSING genome: $GENOME"; exit 1; }
 
   local guides
@@ -134,7 +180,7 @@ preflight() {
   # missing copies CSV must NOT stop the job from reaching the queue, so each is
   # allowed to fail with a warning (the compute node has internet too).
   echo "  self-test (bulge maths, non-canonical PAMs, strands, tiers):"
-  if sing python "$REPO/run_grna_offtarget_full.py" --self-test >"$OUT/.selftest.log" 2>&1; then
+  if pyrun "$REPO/run_grna_offtarget_full.py" --self-test >"$OUT/.selftest.log" 2>&1; then
     tail -2 "$OUT/.selftest.log"
   else
     echo "  !! SELF-TEST FAILED --- see $OUT/.selftest.log (submitting anyway)"
@@ -146,7 +192,7 @@ preflight() {
   done
 
   echo "  annotations -> $RMSK_DIR (fetched here; the login node has internet)"
-  sing python -c "
+  pyrun -c "
 import sys; sys.path.insert(0,'$REPO')
 from te_prep import get_rmsk_path
 from run_grna_combos import download_refgene
@@ -157,7 +203,7 @@ print('  refGene:', download_refgene('$ASSEMBLY', '$RMSK_DIR'))
   echo "== job size =="
   local args=()
   while IFS= read -r a; do args+=("$a"); done < <(scan_args "$guides")
-  sing python "$REPO/run_grna_offtarget_full.py" "${args[@]}" --estimate \
+  pyrun "$REPO/run_grna_offtarget_full.py" "${args[@]}" --estimate \
     || echo "  WARNING: could not size the job (submitting anyway)"
 
   printf '%s' "$guides" > "$OUT/.guides_path"

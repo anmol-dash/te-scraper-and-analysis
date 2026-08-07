@@ -48,9 +48,42 @@ WALL=${WALL:-4:00}
 mkdir -p "$WORK" "$OUT" "$RMSK_DIR"
 read -r -a FAM_ARR <<< "$FAMILIES"
 
-# host ~/.local numpy breaks the container's stack (see submit_reagent_design.sh)
+# host ~/.local numpy breaks the container's stack (see submit_reagent_design.sh);
+# apptainer prefers APPTAINERENV_* over SINGULARITYENV_*
 export SINGULARITYENV_PYTHONNOUSERSITE=1
+export APPTAINERENV_PYTHONNOUSERSITE=1
+# Some pennhpc nodes ship apptainer as a Go binary built against a FIPS OpenSSL it
+# cannot initialise; it panics BEFORE the container starts ("panic: opensslcrypto:
+# can't enable FIPS mode"). Node-dependent, not queue-dependent. Disabling the Go
+# FIPS backend avoids it and is harmless elsewhere.
+export GOFIPS=0 GOLANG_FIPS=0
+
+PYBIN=${PYBIN:-python3}
+USE_CONTAINER=${USE_CONTAINER:-auto}   # auto | 1 (container only) | 0 (host only)
+MODE=""
+
 sing() { singularity exec -B "$HOME" "$SIF" "$@"; }
+
+select_runtime() {   # login node and compute node can differ; called on both
+  local need='import numpy, pandas'
+  if [ "$USE_CONTAINER" != "0" ] && [ -s "$SIF" ] \
+     && sing python -c "$need" >/dev/null 2>&1; then
+    MODE=container
+  elif [ "$USE_CONTAINER" != "1" ] && "$PYBIN" -c "$need" >/dev/null 2>&1; then
+    MODE=host
+    echo "  NOTE: container unusable on $(hostname -s); using host $PYBIN"
+  else
+    echo "ERROR: no usable Python on $(hostname -s)."
+    echo "  container ($SIF): $(sing python -c "$need" 2>&1 | tail -1)"
+    echo "  host ($PYBIN):    $("$PYBIN" -c "$need" 2>&1 | tail -1)"
+    exit 1
+  fi
+}
+
+pyrun() {
+  [ -n "$MODE" ] || select_runtime
+  if [ "$MODE" = container ]; then sing python "$@"; else "$PYBIN" "$@"; fi
+}
 
 find_guides() {   # the .xlsx is git-ignored, so look in the usual landing spots
   local c
@@ -74,7 +107,7 @@ ensure_copies() {  # the family copies CSV (Seq column) --- regenerate if absent
   fi
   echo "  [$fam] no sequences CSV --- regenerating with query.py (--stop-after primers)"
   mkdir -p "$out"
-  sing python "$REPO/query.py" --local --family "$fam" --assembly "$ASSEMBLY" \
+  pyrun "$REPO/query.py" --local --family "$fam" --assembly "$ASSEMBLY" \
       --genome "$GENOME" --output "$out" --stop-after primers
   csv=$(find "$out" -name '*_with_sequences.csv' 2>/dev/null | head -1 || true)
   [ -n "$csv" ] || { echo "  [$fam] FAILED to produce a sequences CSV"; return 1; }
@@ -83,10 +116,11 @@ ensure_copies() {  # the family copies CSV (Seq column) --- regenerate if absent
 
 run_analysis() {
   local guides="$1"
+  select_runtime          # compute node may differ from the login node
   local famargs=()
   local f
   for f in "${FAM_ARR[@]}"; do famargs+=(--family "$f"); done
-  sing python "$REPO/run_grna_combos.py" \
+  pyrun "$REPO/run_grna_combos.py" \
       --guides "$guides" \
       "${famargs[@]}" \
       --seqs-dir "$WORK" \
@@ -102,7 +136,9 @@ run_analysis() {
 
 preflight() {
   echo "== preflight =="
-  [ -s "$SIF" ]    && echo "  sif OK:    $SIF"    || { echo "  MISSING sif: $SIF"; exit 1; }
+  select_runtime
+  [ "$MODE" = container ] && echo "  runtime:   container $SIF" \
+                          || echo "  runtime:   host $PYBIN"
   [ -s "$GENOME" ] && echo "  genome OK: $GENOME" || { echo "  MISSING genome: $GENOME"; exit 1; }
 
   local guides
@@ -115,13 +151,13 @@ preflight() {
   echo "  guides OK: $guides"
 
   echo "  self-test (synthetic controls for coverage / scan / annotation):"
-  sing python "$REPO/run_grna_combos.py" --self-test | sed -n '/SELF-TEST/,$p' | tail -3
+  pyrun "$REPO/run_grna_combos.py" --self-test | sed -n '/SELF-TEST/,$p' | tail -3
 
   for fam in "${FAM_ARR[@]}"; do ensure_copies "$fam"; done
 
   # fetch annotations here: the login node definitely has internet
   echo "  annotations -> $RMSK_DIR"
-  sing python -c "
+  pyrun -c "
 import sys; sys.path.insert(0,'$REPO')
 from te_prep import get_rmsk_path
 from run_grna_combos import download_refgene
