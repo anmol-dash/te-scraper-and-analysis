@@ -3,9 +3,10 @@
 # for already-designed families, reusing their existing query.py sequences CSV
 # (no re-run of clustering or gRNA). Then annotate per-pair + union coverage.
 #
-# Submits to the rhel9 BATCH queue: the interactive nodes panic the apptainer
-# binary with a FIPS/OpenSSL error, but singularity works on rhel9 batch (that's
-# where the first pass ran). Do NOT run this inside an interactive session.
+# Submits to the rhel9 BATCH queue. NOTE: the apptainer FIPS/OpenSSL panic is
+# NODE-dependent, not queue-dependent -- node188/rhel9 panics on the same image
+# other rhel9 nodes run fine. lib_container.sh sets GOFIPS=0 to avoid it and
+# resolves singularity-or-apptainer, since the compute nodes may have only one.
 #
 #   FAMILIES="LTR5 HERVK-int" NCLUST=3 bash scripts/rerun_qpcr_multipair.sh
 set -euo pipefail
@@ -33,7 +34,10 @@ MAX_REPS=${MAX_REPS:-}    # real copies per group used to seed primer3
 QUEUE=${QUEUE:-rhel9}
 WALL=${WALL:-4:00}
 JOB=${JOB:-qpcr_multi}
-export SINGULARITYENV_PYTHONNOUSERSITE=1 APPTAINERENV_PYTHONNOUSERSITE=1
+# shellcheck source=/dev/null
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_container.sh"
+container_module_load
+container_init || exit 1
 
 do_work() {
   read -r -a FAM_ARR <<< "$FAMILIES"
@@ -54,7 +58,7 @@ do_work() {
     if [ -n "$EXPR_TSV" ]; then
       designcsv="$out/${label}.seqs.csv"
       echo "[$label] attaching per-locus expression from $EXPR_TSV"
-      singularity exec -B "$HOME" "$SIF" python "$REPO/attach_locus_expression.py" \
+      "$GAMECA_RT" exec -B "$HOME" "$SIF" python "$REPO/attach_locus_expression.py" \
           --expr "$EXPR_TSV" --seqs "$seqcsv" --out "$designcsv" \
           || { echo "[$label] expression attach failed"; designcsv="$seqcsv"; }
     fi
@@ -65,14 +69,14 @@ do_work() {
     [ -n "$AMP_MAX" ]  && exprarg+=(--amp-max "$AMP_MAX")
     [ -n "$MAX_REPS" ] && exprarg+=(--max-reps "$MAX_REPS")
     SINGULARITYENV_PYTHONPATH="$PYLIB" APPTAINERENV_PYTHONPATH="$PYLIB" \
-      singularity exec -B "$HOME" "$SIF" python "$REPO/te_qpcr_primers.py" \
+      "$GAMECA_RT" exec -B "$HOME" "$SIF" python "$REPO/te_qpcr_primers.py" \
         --input "$designcsv" --family "$label" --genome "$GENOME" --out "$out" \
         --n-pairs "$NPAIRS" --n-clusters "$NCLUST" --max-mm "$MAXMM" ${exprarg[@]+"${exprarg[@]}"} \
         || { echo "[$label] primer design failed"; continue; }
     if [ -n "$TOP_N" ]; then
       echo "[$label] ranking top-$TOP_N primers"
       SINGULARITYENV_PYTHONPATH="$PYLIB" APPTAINERENV_PYTHONPATH="$PYLIB" \
-        singularity exec -B "$HOME" "$SIF" python "$REPO/top_primers.py" \
+        "$GAMECA_RT" exec -B "$HOME" "$SIF" python "$REPO/top_primers.py" \
           --input "$designcsv" --family "$label" --genome "$GENOME" --out "$out" \
           --top-n "$TOP_N" --max-mm "$MAXMM" ${exprarg[@]+"${exprarg[@]}"} \
           || echo "[$label] top-primers ranking failed"

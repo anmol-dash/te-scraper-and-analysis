@@ -43,7 +43,12 @@ mkdir -p "$WORK" "$REF" "$CONT" "$WORK/fastq"
 DEPOT=https://depot.galaxyproject.org/singularity
 STAR_SIF=$CONT/star.sif
 TE_SIF=$CONT/tetranscripts.sif
-sing() { singularity exec -B "$WORK" "$@"; }
+LIBC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_container.sh"
+# shellcheck source=/dev/null
+. "$LIBC"
+CONTAINER_BIND="${CONTAINER_BIND:-}${CONTAINER_BIND:+:}$WORK:$REF:$CONT"
+container_module_load
+container_init || exit 1
 # FASTQ come straight from EBI ENA (deterministic HTTP, gzipped) -- no sra-tools
 # (its 3.4.1 build segfaults on exit here even though the download succeeds).
 
@@ -102,8 +107,14 @@ else
   cat > "$WORK/build_index.sh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-singularity exec -B "$WORK" "$STAR_SIF" STAR --runMode genomeGenerate \
-  --runThreadN $THREADS --genomeDir "$IDX" --genomeFastaFiles "$REF/hg38.fa" \
+# resolve the container runtime ON THE COMPUTE NODE -- it may be apptainer there,
+# or absent from the batch PATH entirely (that shows up as exit code 127)
+. "$LIBC"
+CONTAINER_BIND="$WORK:$REF"
+container_module_load
+container_init || exit 1
+sing "$STAR_SIF" STAR --runMode genomeGenerate \\
+  --runThreadN $THREADS --genomeDir "$IDX" --genomeFastaFiles "$REF/hg38.fa" \\
   --sjdbGTFfile "$REF/hg38.knownGene.gtf" --sjdbOverhang 100
 echo "STAR index done: $IDX"
 EOF

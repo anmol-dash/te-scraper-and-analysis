@@ -43,7 +43,7 @@ fi
 size() { [ -s "$1" ] && stat -c%s "$1" 2>/dev/null || echo 0; }
 
 get_aria() {  # $1=url $2=dir $3=outname
-  singularity exec -B "$WORK" "$ARIA_SIF" aria2c \
+  sing "$ARIA_SIF" aria2c \
     -x16 -s16 -c --max-tries=0 --retry-wait=5 --timeout=60 \
     --allow-overwrite=true --auto-file-renaming=false \
     -d "$2" -o "$3" "$1"
@@ -74,6 +74,16 @@ fetch() {  # $1=url $2=out $3=want_bytes
 }
 
 echo "== ENA download start on $(hostname) =="
+# aria2 runs in a container; if no runtime resolves here, drop to the curl path
+# rather than looping 200 times on 'command not found'.
+# shellcheck source=/dev/null
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_container.sh"
+CONTAINER_BIND="${CONTAINER_BIND:-}${CONTAINER_BIND:+:}$WORK"
+container_module_load
+if ! container_init; then
+  echo "  no container runtime -> using curl for every transfer"
+  ARIA_SIF=""
+fi
 tail -n +2 "$MANIFEST" | while IFS=$'\t' read -r cl smp run rest; do
   [ -z "${run:-}" ] && continue
   info=$(curl -s "https://www.ebi.ac.uk/ena/portal/api/filereport?accession=${run}&result=read_run&fields=fastq_ftp,fastq_bytes&format=tsv" | awk 'NR==2')
@@ -88,4 +98,28 @@ done
 
 echo "== final sizes =="
 ls -lh "$WORK/fastq/" 2>/dev/null || true
-echo "ena download done; verify sizes above match ENA (then run submit_hervk_ccle_requant.sh)"
+
+# VERIFY, and exit non-zero if anything is missing. Without this the job reports
+# success having downloaded nothing (the fetch loop runs in a `while` on the far
+# side of a pipe, and there is no `set -e`), so every -w done(...) dependency
+# downstream fires on an empty $WORK/fastq and the real failure surfaces much
+# later as a pile of unexplained exit-127 array elements.
+missing=0; present=0
+while IFS=$'\t' read -r cl smp run rest; do
+  [ -z "${run:-}" ] && continue
+  ok=1
+  for f in "$WORK/fastq/${run}_1.fastq.gz" "$WORK/fastq/${run}_2.fastq.gz"; do
+    [ -s "$f" ] || { echo "  MISSING $(basename "$f")  ($cl)"; ok=0; }
+  done
+  [ "$ok" = 1 ] && present=$((present + 1)) || missing=$((missing + 1))
+done < <(tail -n +2 "$MANIFEST")
+
+echo "== $present complete, $missing incomplete =="
+if [ "$missing" -gt 0 ]; then
+  echo "ENA DOWNLOAD FAILED: $missing of $((present + missing)) runs are missing a FASTQ."
+  echo "  Common causes: no outbound network from the compute node, ENA rate-limiting,"
+  echo "  or a full filesystem. Check the per-file lines above, then re-run --"
+  echo "  completed files are kept and resumed."
+  exit 1
+fi
+echo "ena download done: all $present runs present and byte-complete"

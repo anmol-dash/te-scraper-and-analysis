@@ -46,8 +46,13 @@ read -r -a FAM_ARR <<< "$FAMILIES"
 # The sif binds $HOME, so python inside picks up host ~/.local site-packages
 # (numpy 2.4 there breaks the container's numba/umap). Make every container
 # python ignore ~/.local; explicit PYTHONPATH (e.g. PYLIB) is still honored.
-export SINGULARITYENV_PYTHONNOUSERSITE=1
-sing() { singularity exec -B "$HOME" "$SIF" "$@"; }
+# shellcheck source=/dev/null
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_container.sh"
+container_module_load
+container_init || exit 1
+# this script's sing() bakes in $SIF (call sites pass only the command), so it
+# overrides the generic two-argument helper from the library
+sing() { "$GAMECA_RT" exec -B "$HOME" "$SIF" "$@"; }
 
 ensure_primer3() {   # sif has numpy/pandas but not primer3; install into PYLIB once
   sing python -c "import primer3" 2>/dev/null && return 0

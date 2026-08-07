@@ -142,7 +142,8 @@ show_status() {
       "$([ -s "$REAGENT_WORK/$fam/${fam}_${TAG}_qpcr_pairs.csv" ] && echo done || echo pending)"
   done
   echo
-  bjobs -w 2>/dev/null | grep -E "$J_DL|$J_ALIGN|$J_MERGE|$J_REAGENT|$J_QPCR|star_index" || echo "  (no matching jobs in the queue)"
+  bjobs -w 2>/dev/null | grep -E "$J_DL|$J_ALIGN|$J_MERGE|$J_REAGENT|$J_QPCR|$J_COMBO|star_index" \
+    || echo "  (no matching jobs in the queue)"
 }
 
 if [ "$STATUS_ONLY" = 1 ]; then show_status; exit 0; fi
@@ -152,7 +153,11 @@ say "preflight"
 [ -s "$MANIFEST" ] || { echo "FATAL: manifest not found: $MANIFEST"; exit 1; }
 [ -s "$SIF" ] || { echo "FATAL: gameca.sif not found at $SIF (build_sif.sh, or set SIF=)"; exit 1; }
 command -v bsub >/dev/null || { echo "FATAL: bsub not on PATH -- run this on the LSF cluster"; exit 1; }
-command -v singularity >/dev/null || { echo "FATAL: singularity not on PATH"; exit 1; }
+# singularity OR apptainer -- pennhpc compute nodes may only have the latter
+# shellcheck source=/dev/null
+. "$SCRIPTS/lib_container.sh"
+container_module_load
+container_init || exit 1
 echo "  manifest: $MANIFEST ($N_SAMPLES paired total-RNA runs)"
 echo "  families: $FAMILIES   (min_cluster_size: LTR66=$MCS_LTR66 LTR10G=$MCS_LTR10G)"
 echo "  strandedness: TEcount=$STRANDED featureCounts=-s $FC_STRAND"
@@ -188,7 +193,7 @@ fi
 # login node, so the scan job never depends on outbound network.
 if [ "$DRY" = 0 ]; then
   mkdir -p "$RMSK_DIR"
-  singularity exec -B "$HOME" "$SIF" python -c "
+  "$GAMECA_RT" exec -B "$HOME" "$SIF" python -c "
 import sys; sys.path.insert(0, '$REPO')
 from te_prep import get_rmsk_path
 from run_grna_combos import download_refgene
@@ -306,8 +311,10 @@ if [ "$DRY" = 0 ]; then
   cat > "$COMBO_SH" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-export SINGULARITYENV_PYTHONNOUSERSITE=1 APPTAINERENV_PYTHONNOUSERSITE=1
-sing() { singularity exec -B "\$HOME" "$SIF" "\$@"; }
+. "$SCRIPTS/lib_container.sh"
+container_module_load
+container_init || exit 1
+sing() { "\$GAMECA_RT" exec -B "\$HOME" "$SIF" "\$@"; }
 
 python3 "$SCRIPTS/collect_grna_candidates.py" \\
     --reagent-dir "$REAGENT_WORK" --families $FAMILIES \\

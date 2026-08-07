@@ -12,6 +12,16 @@
 #   bash scripts/submit_locus_expression.sh --merge    # after it finishes
 set -euo pipefail
 
+# GAMECA_ENV: path to a file of `export VAR='value'` lines written at submit time.
+# Job settings travel this way instead of on the bsub command line, because bsub
+# re-emits the command as a STRING and only quotes arguments containing spaces --
+# so a value like FILTER='^(LTR66|LTR10G)_dup' arrives unquoted and the node dies
+# with a shell syntax error before any of this script runs.
+if [ -n "${GAMECA_ENV:-}" ] && [ -r "${GAMECA_ENV}" ]; then
+  # shellcheck source=/dev/null
+  . "$GAMECA_ENV"
+fi
+
 WORK=${WORK:-$HOME/hervk_ccle}
 REF=${REF:-$WORK/ref}
 CONT=${CONT:-$WORK/containers}
@@ -39,7 +49,13 @@ GENE_GTF=$REF/hg38.knownGene.gtf
 MANIFEST=${MANIFEST:-$(cd "$(dirname "$0")" && pwd)/hervk_ccle_manifest.tsv}
 mkdir -p "$WORK/locus" "$WORK/bam" "$CONT"
 [ "$ALSO_TECOUNT" = "1" ] && mkdir -p "$WORK/counts"
-sing() { singularity exec -B "$WORK" "$@"; }
+# Resolve singularity/apptainer on THIS host (login and compute nodes differ --
+# a missing runtime is what makes every array element exit 127).
+# shellcheck source=/dev/null
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_container.sh"
+CONTAINER_BIND="${CONTAINER_BIND:-}${CONTAINER_BIND:+:}$WORK:$REF:$CONT"
+container_module_load
+container_init || exit 1
 
 # --- merge mode: combine per-sample featureCounts into locus_expression.tsv ---
 if [ "${1:-}" = "--merge" ]; then
@@ -151,11 +167,22 @@ SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 # BSUB_DEP: an LSF dependency EXPRESSION, e.g. 'done(ena_dl) && done(star_index)'.
 # It must reach bsub as a single argument, so it is never word-split.
 dep_args=(); [ -n "${BSUB_DEP:-}" ] && dep_args=( -w "$BSUB_DEP" )
+# Job settings go in a FILE, not on the bsub command line -- see GAMECA_ENV at the
+# top. printf %q quotes each value, and only the (metacharacter-free) file path
+# travels through bsub.
+ENVFILE="$WORK/${JOB}.env"
+{
+  # NB: GAMECA_RT is deliberately NOT forwarded -- the compute node must resolve
+  # its own container binary; the login node's path may not exist there.
+  for v in WORK REF CONT MANIFEST THREADS ALSO_TECOUNT STRANDED FC_STRAND FILTER \
+           CONTAINER_MODULE; do
+    eval "_val=\${$v:-}"
+    [ -n "$_val" ] && printf 'export %s=%q\n' "$v" "$_val"
+  done
+} > "$ENVFILE"
+echo "  job settings -> $ENVFILE"
 bsub -q "$QUEUE" -n "$THREADS" -M "$MEM_MB" -R "rusage[mem=$MEM_MB]" -W "$WALL" \
      ${dep_args[@]+"${dep_args[@]}"} \
      -J "${JOB}[1-$N]" -o "$LOG" -e "$LOG" \
-     env WORK="$WORK" REF="$REF" CONT="$CONT" MANIFEST="$MANIFEST" \
-         THREADS="$THREADS" ALSO_TECOUNT="$ALSO_TECOUNT" \
-         STRANDED="$STRANDED" FC_STRAND="$FC_STRAND" FILTER="$FILTER" \
-     bash "$SELF" --run-one
+     env GAMECA_ENV="$ENVFILE" bash "$SELF" --run-one
 echo "submitted ${JOB}[1-$N]; when DONE run: MANIFEST=$MANIFEST WORK=$WORK bash scripts/submit_locus_expression.sh --merge"
