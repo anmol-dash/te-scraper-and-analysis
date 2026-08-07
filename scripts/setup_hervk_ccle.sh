@@ -99,7 +99,10 @@ fi
 IDX=$REF/star_hg38
 if [ -s "$IDX/SAindex" ]; then
   echo "[setup] STAR index already built at $IDX"
-elif bjobs -J star_index 2>/dev/null | grep -qE '\b(PEND|RUN)\b'; then
+elif _idx_jobs=$(bjobs -J star_index 2>/dev/null || true); [[ "$_idx_jobs" =~ (PEND|RUN) ]]; then
+  # no pipe into grep -q: it can exit first, bjobs takes SIGPIPE, and pipefail
+  # turns that into "no job found" -- which would start a SECOND genomeGenerate
+  # into the same genomeDir and corrupt the index
   # don't submit a 2nd build into the same genomeDir (would corrupt it)
   echo "[setup] STAR index job already PEND/RUN (bjobs -J star_index); not resubmitting"
 else

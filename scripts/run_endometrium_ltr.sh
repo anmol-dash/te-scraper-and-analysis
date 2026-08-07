@@ -102,11 +102,13 @@ J_REAGENT=${J_REAGENT:-endo_reagents}
 J_QPCR=${J_QPCR:-endo_qpcr}
 J_COMBO=${J_COMBO:-endo_combos}
 
-DRY=0; STATUS_ONLY=0
+DRY=0; STATUS_ONLY=0; CLEAN=0; GO=0
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY=1 ;;
     --status)  STATUS_ONLY=1 ;;
+    --clean)   CLEAN=1 ;;      # bkill this study's jobs (then exit unless --go)
+    --go)      GO=1 ;;         # with --clean: clean and submit in one step
     -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
     *) echo "unknown option: $arg"; exit 2 ;;
   esac
@@ -144,9 +146,85 @@ show_status() {
   echo
   bjobs -w 2>/dev/null | grep -E "$J_DL|$J_ALIGN|$J_MERGE|$J_REAGENT|$J_QPCR|$J_COMBO|star_index" \
     || echo "  (no matching jobs in the queue)"
+  # A job PENDing on a dependency that can never be met looks exactly like a job
+  # waiting for a busy queue, so spell the difference out.
+  # NB: no pipe into `grep -q` here -- grep exits on first match, bjobs takes
+  # SIGPIPE, and `set -o pipefail` then reports the whole test as false.
+  local pend; pend=$(bjobs -p 2>/dev/null || true)
+  case "$pend" in *"never satisfied"*)
+    echo
+    echo "  ** Some jobs are PEND on a dependency that can NEVER be satisfied."
+    echo "     An upstream job failed (done() requires exit 0). These will wait forever."
+    echo "     Fix the upstream failure, then:  bash $0 --clean --go"
+    ;;
+  esac
+  # name the runs whose FASTQ are incomplete -- that is what fails the download job
+  local missing=""
+  while IFS=$'\t' read -r s _ run _; do
+    [ -z "${run:-}" ] && continue
+    { [ -s "$WORK/fastq/${run}_1.fastq.gz" ] && [ -s "$WORK/fastq/${run}_2.fastq.gz" ]; } \
+      || missing="$missing $s($run)"
+  done < <(tail -n +2 "$MANIFEST")
+  [ -n "$missing" ] && { echo; echo "  incomplete FASTQ:$missing"; }
 }
 
 if [ "$STATUS_ONLY" = 1 ]; then show_status; exit 0; fi
+
+# --- our jobs already in the queue? ------------------------------------------
+# Re-submitting while the previous attempt is still queued creates TWO jobs with
+# the same name, and `done(<name>)` then means whichever LSF picks -- so the new
+# chain can wait on the old, already-doomed job. Refuse, or clean up on request.
+# Print the NAMES of our jobs that are currently queued. Uses `bjobs -J <name>`
+# per name: portable across LSF versions, and it avoids an awk dynamic regex
+# (awk -v strips one backslash level, so "\\[" arrives as "[" and the pattern
+# dies as an unterminated character class -- which fails OPEN, silently).
+our_jobs() {
+  local j out
+  for j in "$J_DL" "$J_ALIGN" "$J_MERGE" "$J_REAGENT" "$J_QPCR" "$J_COMBO"; do
+    out=$(bjobs -J "$j" 2>/dev/null || true)
+    case "$out" in *PEND*|*RUN*|*PSUSP*|*USUSP*) printf '%s\n' "$j" ;; esac
+  done
+}
+if [ "$CLEAN" = 1 ]; then
+  say "clean"
+  names=$(our_jobs)
+  if [ -n "$names" ]; then
+    while read -r j; do
+      [ -z "$j" ] && continue
+      echo "  bkill -J $j"
+      bkill -J "$j" 2>&1 | sed 's/^/    /' || true
+    done <<< "$names"
+    # bkill returns before mbatchd has dropped the jobs; wait for them to clear
+    # rather than tripping the duplicate-name guard on our own cleanup.
+    for _ in $(seq 1 15); do
+      [ -z "$(our_jobs)" ] && break
+      sleep 2
+    done
+    left=$(our_jobs)
+    if [ -n "$left" ]; then
+      echo "  still queued after 30s: $(echo $left)"
+      echo "  (they may be in the process of being killed -- re-run in a minute)"
+    else
+      echo "  queue is clear"
+    fi
+  else
+    echo "  nothing of ours in the queue"
+  fi
+fi
+if [ "$CLEAN" = 1 ] && [ "$GO" = 0 ]; then
+  echo "  cleaned. Re-run without --clean to submit, or use --clean --go next time."
+  exit 0
+fi
+stale=$(our_jobs)
+if [ -n "$stale" ] && [ "$DRY" = 0 ]; then
+  echo "FATAL: these jobs of ours are still queued:"
+  printf '  %s\n' $stale
+  echo "  Submitting now would create duplicate job NAMES, and the -w dependencies"
+  echo "  would become ambiguous. Clear them first:"
+  echo "      bash $0 --clean        # bkill the above, then re-run"
+  echo "  or:  bash $0 --clean --go  # clean and submit in one step"
+  exit 1
+fi
 
 # --- preflight --------------------------------------------------------------
 say "preflight"
