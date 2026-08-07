@@ -321,7 +321,7 @@ say "stage 2/6: align + count  ($N_SAMPLES-element array, job '$J_ALIGN')"
 run env WORK="$WORK" REF="$REF" CONT="$CONT" MANIFEST="$MANIFEST" \
         JOB="$J_ALIGN" QUEUE="$QUEUE" THREADS="$THREADS" MEM_MB="$MEM_MB" \
         FILTER="$FILTER" ALSO_TECOUNT=1 STRANDED="$STRANDED" FC_STRAND="$FC_STRAND" \
-        REQUIRE_INPUTS=0 BSUB_DEP="$dep_expr" \
+        REQUIRE_INPUTS=0 BSUB_DEP="$dep_expr" EXCLUDE_HOSTS="${EXCLUDE_HOSTS:-}" \
         bash "$SCRIPTS/submit_locus_expression.sh"
 
 # ============================================================================

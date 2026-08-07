@@ -97,6 +97,17 @@ fi
 # --- per-sample worker ------------------------------------------------------
 run_one() {
   local idx="${LSB_JOBINDEX:?}"
+  # Probe the runtime BEFORE a 45 GB alignment: unlike the download, there is no
+  # host fallback for STAR/featureCounts/TEcount. The apptainer FIPS panic is
+  # node-dependent, so say which node failed -- that is what lets us exclude it.
+  if ! container_probe "$STAR_SIF"; then
+    echo "FATAL: the container runtime cannot start on $(hostname -s)."
+    echo "  runtime: ${GAMECA_RT:-<none found>}"
+    "${GAMECA_RT:-true}" exec "$STAR_SIF" true 2>&1 | head -5 | sed 's/^/  | /'
+    echo "  This node is unusable for the pipeline. Re-submit excluding it:"
+    echo "      EXCLUDE_HOSTS='$(hostname -s)' bash scripts/run_endometrium_ltr.sh --clean --go"
+    exit 1
+  fi
   local row cl run
   row=$(sed -n "$((idx+1))p" "$MANIFEST")
   cl=$(printf '%s' "$row" | cut -f1); run=$(printf '%s' "$row" | cut -f3)
@@ -167,6 +178,15 @@ SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 # BSUB_DEP: an LSF dependency EXPRESSION, e.g. 'done(ena_dl) && done(star_index)'.
 # It must reach bsub as a single argument, so it is never word-split.
 dep_args=(); [ -n "${BSUB_DEP:-}" ] && dep_args=( -w "$BSUB_DEP" )
+# EXCLUDE_HOSTS='node188 node180' -> LSF select[] that keeps the job off nodes
+# whose container runtime is broken (the FIPS panic is per-node).
+host_args=()
+if [ -n "${EXCLUDE_HOSTS:-}" ]; then
+  sel=""
+  for h in $EXCLUDE_HOSTS; do sel="$sel${sel:+ && }hname!='$h'"; done
+  host_args=( -R "select[$sel]" )
+  echo "  excluding hosts: $EXCLUDE_HOSTS"
+fi
 # Job settings go in a FILE, not on the bsub command line -- see GAMECA_ENV at the
 # top. printf %q quotes each value, and only the (metacharacter-free) file path
 # travels through bsub.
@@ -175,14 +195,14 @@ ENVFILE="$WORK/${JOB}.env"
   # NB: GAMECA_RT is deliberately NOT forwarded -- the compute node must resolve
   # its own container binary; the login node's path may not exist there.
   for v in WORK REF CONT MANIFEST THREADS ALSO_TECOUNT STRANDED FC_STRAND FILTER \
-           CONTAINER_MODULE; do
+           CONTAINER_MODULE EXCLUDE_HOSTS; do
     eval "_val=\${$v:-}"
     [ -n "$_val" ] && printf 'export %s=%q\n' "$v" "$_val"
   done
 } > "$ENVFILE"
 echo "  job settings -> $ENVFILE"
 bsub -q "$QUEUE" -n "$THREADS" -M "$MEM_MB" -R "rusage[mem=$MEM_MB]" -W "$WALL" \
-     ${dep_args[@]+"${dep_args[@]}"} \
+     ${dep_args[@]+"${dep_args[@]}"} ${host_args[@]+"${host_args[@]}"} \
      -J "${JOB}[1-$N]" -o "$LOG" -e "$LOG" \
      env GAMECA_ENV="$ENVFILE" bash "$SELF" --run-one
 echo "submitted ${JOB}[1-$N]; when DONE run: MANIFEST=$MANIFEST WORK=$WORK bash scripts/submit_locus_expression.sh --merge"
