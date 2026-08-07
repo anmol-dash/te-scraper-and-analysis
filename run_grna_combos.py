@@ -1119,8 +1119,22 @@ def main():
         answer.append(f"Coverage model: {cas} PAM required at the copy, "
                       f"<={args.cov_mm} mismatches allowed PAM-distal only.")
         if len(sites):
-            answer.append(f"Off-target model: exhaustive genome scan, <={args.ot_mm} "
-                          f"mismatches at ANY position, PAM required.")
+            # With --reuse-sites the sites can come from run_grna_offtarget_full.py,
+            # whose search space is wider than this script's own defaults. Describe
+            # what is actually in the table rather than what --ot-mm happens to say.
+            if {"bulge_type", "pam_class"} & set(sites.columns):
+                pam_seen = sorted(set(sites.get("pam_class", pd.Series(dtype=str))
+                                      .dropna().astype(str)) - {""})
+                n_bulge = int((sites.get("bulge_type", "none") != "none").sum())
+                answer.append(
+                    "Off-target model: COMPREHENSIVE scan (run_grna_offtarget_full.py) --- "
+                    f"PAMs {'/'.join(pam_seen) or 'NGG'}, up to {int(sites.n_mm.max())} "
+                    f"mismatches at ANY position, {n_bulge:,} bulged alignments, "
+                    f"{sites.chrom.nunique()} contigs.")
+            else:
+                answer.append(f"Off-target model: exhaustive genome scan, <={args.ot_mm} "
+                              f"mismatches at ANY position, PAM required (canonical "
+                              f"{cas} PAM, no bulges, primary chromosomes).")
             if target_fams:
                 answer.append(f"Hits to repFamily {'/'.join(sorted(target_fams))} "
                               "(the target's own family: LTR5A/B, HERVK-int, ...) "
@@ -1199,6 +1213,26 @@ def main():
                               f"{label}" + (" (also the top-coverage pair)" if same else
                                             f"; costs {cost:.1f} pp vs the top-coverage pair"))
                 answer.append(f"     {c0['guides']}")
+                # Coverage alone decides between pairs that tie on the safety
+                # filter, which can pick a pair carrying several times the
+                # off-family burden for one or two extra copies. Surface the
+                # trade-off instead of silently resolving it.
+                near = sub[sub.cov_pct >= c0["cov_pct"] - 2.0]
+                alt = near.sort_values(["ot_offfamily", "ot_coding_exon_offfamily"]) \
+                          .iloc[0] if len(near) else None
+                if (alt is not None and alt["ranks"] != c0["ranks"]
+                        and c0["ot_offfamily"] > 0
+                        and alt["ot_offfamily"] <= 0.5 * c0["ot_offfamily"]):
+                    answer.append(
+                        f"  >> LOWER-BURDEN ALTERNATIVE: ranks {alt['ranks']} = "
+                        f"{int(alt['covered'])}/{n_copies} ({alt['cov_pct']:.1f}%) --- "
+                        f"{int(alt['ot_offfamily']):,} off-family sites vs "
+                        f"{int(c0['ot_offfamily']):,}, "
+                        f"{int(alt['ot_coding_exon_offfamily'])} vs "
+                        f"{int(c0['ot_coding_exon_offfamily'])} coding-exon hits, "
+                        f"on-target {alt['min_on_target']:.2f} vs {c0['min_on_target']:.2f},"
+                        f" for {c0['covered'] - alt['covered']} fewer copies")
+                    answer.append(f"     {alt['guides']}")
                 break
         answer.append("")
 
