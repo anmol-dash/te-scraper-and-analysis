@@ -218,9 +218,12 @@ if [ "$COLLECT" = 1 ]; then
   rm -rf "$bundle"
   echo "  $n files -> ${bundle}.tar.gz  ($(du -h "${bundle}.tar.gz" | cut -f1))"
   echo
-  echo "  Pull it from your laptop:"
-  echo "      scp $(whoami)@$(hostname -f 2>/dev/null || hostname):${bundle}.tar.gz ."
+  echo "  Pull it from your laptop (full filename, no glob -- zsh expands globs"
+  echo "  locally and errors with 'no matches found' before scp runs):"
+  echo "      scp -O <you>@<login-host>:${bundle}.tar.gz ."
   echo "      tar xzf $(basename "${bundle}.tar.gz")"
+  echo "  (<login-host> is whatever you ssh to, e.g. consign.pmacs.upenn.edu --"
+  echo "   not necessarily $(hostname -s), which is just this node's name.)"
   exit 0
 fi
 
