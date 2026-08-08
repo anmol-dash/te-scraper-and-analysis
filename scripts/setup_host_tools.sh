@@ -80,26 +80,67 @@ VENV="$TOOLS/venv"
 if [ "${SKIP_VENV:-0}" = "1" ]; then
   echo "  SKIP_VENV=1 -> not building the python env"
 else
-  if [ ! -x "$VENV/bin/python" ]; then
-    echo "  creating python venv at $VENV ..."
-    python3 -m venv "$VENV" || { echo "  venv creation FAILED (python3 -m venv)"; exit 1; }
-    "$VENV/bin/pip" install --quiet --upgrade pip setuptools wheel 2>&1 | tail -1 || true
+  # Which interpreter to build the venv from. The conda 'base' env on this login
+  # node is itself broken (it prints a libicui18n.so.75 error on every command),
+  # so prefer a real system python and only fall back to whatever is on PATH.
+  BASE_PY=${BASE_PY:-}
+  if [ -z "$BASE_PY" ]; then
+    for c in /usr/bin/python3.11 /usr/bin/python3.10 /usr/bin/python3.9 /usr/bin/python3 python3; do
+      if command -v "$c" >/dev/null 2>&1 && "$c" -c 'import sys; sys.exit(0 if sys.version_info[:2] >= (3,8) else 1)' 2>/dev/null; then
+        BASE_PY=$(command -v "$c"); break
+      fi
+    done
   fi
-  echo "  installing python packages (per-package, failures tolerated) ..."
+  [ -n "$BASE_PY" ] || { echo "  FATAL: no python3 >= 3.8 found (set BASE_PY=)"; exit 1; }
+  echo "  base interpreter: $BASE_PY ($("$BASE_PY" -V 2>&1))"
+
+  if [ ! -x "$VENV/bin/python" ] || [ "${REBUILD_VENV:-0}" = "1" ]; then
+    rm -rf "$VENV"
+    echo "  creating python venv at $VENV ..."
+    "$BASE_PY" -m venv "$VENV" || { echo "  venv creation FAILED"; exit 1; }
+  fi
+  "$VENV/bin/python" -m pip install --upgrade pip setuptools wheel >/dev/null 2>&1 || true
+  echo "  pip: $("$VENV/bin/python" -m pip --version 2>&1 | cut -d' ' -f1-2)"
+
+  # --no-cache-dir: $HOME here already holds ~58 GB of FASTQ, and a full quota
+  # shows up as an inscrutable wheel failure.
+  echo "  installing python packages ..."
+  fails=0
   for pkg in numpy pandas scipy scikit-learn requests primer3-py umap-learn matplotlib; do
-    if "$VENV/bin/python" -c "import ${pkg//-/_}" >/dev/null 2>&1; then
+    mod=${pkg//-/_}; mod=${mod/scikit_learn/sklearn}; mod=${mod/primer3_py/primer3}; mod=${mod/umap_learn/umap}
+    if "$VENV/bin/python" -c "import $mod" >/dev/null 2>&1; then
       echo "    $pkg: already present"; continue
     fi
-    if "$VENV/bin/pip" install --quiet "$pkg" >/dev/null 2>&1; then
+    log="$TOOLS/src/pip-$pkg.log"
+    if "$VENV/bin/python" -m pip install --no-cache-dir "$pkg" > "$log" 2>&1; then
       echo "    $pkg: installed"
     else
-      echo "    $pkg: FAILED (optional ones are fine to skip)"
+      fails=$((fails + 1))
+      echo "    $pkg: FAILED -- reason:"
+      # show the actual error rather than hiding it
+      grep -iE 'error|no matching distribution|no space|quota|denied|killed' "$log" \
+        | tail -3 | sed 's/^/        /' || tail -3 "$log" | sed 's/^/        /'
+      echo "        full log: $log"
     fi
   done
+
   echo "  python env check:"
-  for m in numpy pandas scipy sklearn primer3; do
-    "$VENV/bin/python" -c "import $m" 2>/dev/null && echo "    $m: OK" || echo "    $m: MISSING"
+  missing=""
+  for m in numpy pandas scipy sklearn primer3 requests; do
+    if "$VENV/bin/python" -c "import $m" 2>/dev/null; then echo "    $m: OK"
+    else echo "    $m: MISSING"; missing="$missing $m"; fi
   done
+  if [ -n "$missing" ]; then
+    echo
+    echo "  The reagent-design stages need numpy/pandas/scipy/sklearn."
+    echo "  Common causes, in order:"
+    echo "    * disk quota in \$HOME  -> check:  du -sh ~ ; quota -s 2>/dev/null"
+    echo "    * no outbound network from this host to pypi.org"
+    echo "    * the base interpreter is unusable (try BASE_PY=/usr/bin/python3.9)"
+    echo "  Retry after fixing:  REBUILD_VENV=1 bash scripts/setup_host_tools.sh"
+    echo "  NOTE: STAR + featureCounts are already installed, so the EXPRESSION"
+    echo "        half of the pipeline can run regardless of this."
+  fi
 fi
 
 echo
