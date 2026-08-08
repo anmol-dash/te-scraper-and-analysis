@@ -31,6 +31,7 @@
 #   bash scripts/run_endometrium_ltr.sh              # go
 #   bash scripts/run_endometrium_ltr.sh --dry-run    # print the plan, submit nothing
 #   bash scripts/run_endometrium_ltr.sh --status     # where is it up to
+#   bash scripts/run_endometrium_ltr.sh --collect    # tar up the results to scp home
 #
 # First run downloads ~65 GB of FASTQ and (if not already present) ~35 GB of
 # references + STAR index. Run it under tmux/nohup: stage 1 can take ~30-60 min.
@@ -102,11 +103,12 @@ J_REAGENT=${J_REAGENT:-endo_reagents}
 J_QPCR=${J_QPCR:-endo_qpcr}
 J_COMBO=${J_COMBO:-endo_combos}
 
-DRY=0; STATUS_ONLY=0; CLEAN=0; GO=0
+DRY=0; STATUS_ONLY=0; CLEAN=0; GO=0; COLLECT=0
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY=1 ;;
     --status)  STATUS_ONLY=1 ;;
+    --collect) COLLECT=1 ;;    # bundle results into one tarball to scp
     --clean)   CLEAN=1 ;;      # bkill this study's jobs (then exit unless --go)
     --go)      GO=1 ;;         # with --clean: clean and submit in one step
     -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
@@ -169,6 +171,58 @@ show_status() {
 }
 
 if [ "$STATUS_ONLY" = 1 ]; then show_status; exit 0; fi
+
+# --- collect: bundle the deliverables into one tarball for scp ---------------
+# Results live in two trees ($WORK and $REAGENT_WORK) next to ~70 GB of FASTQ and
+# BAMs. This gathers only the small result files -- a few MB -- so pulling them
+# is one scp instead of a careful rsync with the right excludes.
+if [ "$COLLECT" = 1 ]; then
+  say "collect"
+  stamp=$(date +%Y%m%d)
+  bundle="$HOME/endometrium_results_${stamp}"
+  rm -rf "$bundle"; mkdir -p "$bundle/expression" "$bundle/reagents"
+  n=0
+  add() {  # add() <src> <destdir>
+    [ -e "$1" ] || return 0
+    cp -R "$1" "$2/" 2>/dev/null && n=$((n + 1))
+  }
+  # expression side
+  add "$WORK/te_timepoint_summary.tsv" "$bundle/expression"
+  add "$WORK/locus_expression.tsv"     "$bundle/expression"
+  for f in "$WORK"/counts/*.cntTable;            do add "$f" "$bundle/expression"; done
+  for f in "$WORK"/locus/*.featureCounts.txt.summary; do add "$f" "$bundle/expression"; done
+  # reagent side: CSVs, reports and the combos answer -- never the genome/BAMs
+  for fam in $FAMILIES; do
+    [ -d "$REAGENT_WORK/$fam" ] || continue
+    mkdir -p "$bundle/reagents/$fam"
+    for f in "$REAGENT_WORK/$fam"/*.csv "$REAGENT_WORK/$fam"/*.txt; do
+      add "$f" "$bundle/reagents/$fam"
+    done
+  done
+  [ -d "$COMBO_OUT" ] && { mkdir -p "$bundle/reagents/combos"
+    for f in "$COMBO_OUT"/*.csv "$COMBO_OUT"/*.txt; do add "$f" "$bundle/reagents/combos"; done; }
+  # a short provenance note so the numbers are interpretable later
+  {
+    echo "SRP090091 / PRJNA342633 -- LTR66 + LTR10G in human endometrium"
+    echo "collected: $(date)  host: $(hostname -s)"
+    echo "manifest : $MANIFEST ($N_SAMPLES paired total-RNA runs, 7 TP1 vs 7 TP2)"
+    echo "families : $FAMILIES   min_cluster_size: LTR66=$MCS_LTR66 LTR10G=$MCS_LTR10G"
+    echo "strand   : TEcount=$STRANDED featureCounts=-s $FC_STRAND (library prep unrecorded in SRA)"
+    echo "guides   : $CAS, spacer ${GRNA_LEN} nt; coverage in combos/ requires a PAM,"
+    echo "           the Pareto numbers in <fam>/grna_offtarget_report.txt do NOT."
+    echo "caveat   : expression is from endometrial TISSUE; the study's stromal-cell"
+    echo "           samples are small-RNA only and cannot quantify these LTRs."
+    echo "git      : $(cd "$REPO" && git rev-parse --short HEAD 2>/dev/null || echo n/a)"
+  } > "$bundle/README.txt"
+  tar czf "${bundle}.tar.gz" -C "$(dirname "$bundle")" "$(basename "$bundle")"
+  rm -rf "$bundle"
+  echo "  $n files -> ${bundle}.tar.gz  ($(du -h "${bundle}.tar.gz" | cut -f1))"
+  echo
+  echo "  Pull it from your laptop:"
+  echo "      scp $(whoami)@$(hostname -f 2>/dev/null || hostname):${bundle}.tar.gz ."
+  echo "      tar xzf $(basename "${bundle}.tar.gz")"
+  exit 0
+fi
 
 # --- our jobs already in the queue? ------------------------------------------
 # Re-submitting while the previous attempt is still queued creates TWO jobs with
