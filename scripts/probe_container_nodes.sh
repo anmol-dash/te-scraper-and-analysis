@@ -58,7 +58,17 @@ report() {   # $1=just_submitted (1 after a submit, else empty)
     fi
     return 0
   fi
-  count() { grep -l "RESULT=$1" "${res[@]}" 2>/dev/null | wc -l | tr -d ' '; }
+  # No pipelines here. `grep ... | wc -l` inside $( ) exits non-zero when there
+  # are no matches, and under `set -e` + pipefail that aborts the whole report --
+  # which is what made this print a bare header twice.
+  count() {
+    local n=0 f body
+    for f in "${res[@]}"; do
+      body=$(cat "$f" 2>/dev/null || true)
+      case "$body" in *"RESULT=$1"*) n=$((n + 1)) ;; esac
+    done
+    printf '%s' "$n"
+  }
   ok=$(count ok); un=$(count userns); bad=$(count broken)
   printf '  plain exec works : %s\n  needs --userns   : %s\n  broken entirely  : %s\n' \
     "${ok:-0}" "${un:-0}" "${bad:-0}"
@@ -66,7 +76,11 @@ report() {   # $1=just_submitted (1 after a submit, else empty)
   echo "  by node:"
   sort -u "${res[@]}" 2>/dev/null | sed 's/^/    /' || true
   echo
-  broken=$(grep -h 'RESULT=broken' "${res[@]}" 2>/dev/null | sed 's/ .*//' | sort -u | paste -sd' ' - || true)
+  broken=""
+  for f in "${res[@]}"; do
+    body=$(cat "$f" 2>/dev/null || true)
+    case "$body" in *"RESULT=broken"*) broken="$broken${broken:+ }${body%% *}" ;; esac
+  done
   if [ -n "$broken" ]; then
     echo "  exclude these when submitting:"
     echo "    EXCLUDE_HOSTS='$broken' bash scripts/run_endometrium_ltr.sh --clean --go"
