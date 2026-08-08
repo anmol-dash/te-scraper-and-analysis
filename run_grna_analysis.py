@@ -855,8 +855,9 @@ def parse_args():
                    help="Output directory for figures and measured_values.tex")
     p.add_argument("--family",      default="MT2_Mm",
                    help="Family name for plot titles")
-    p.add_argument("--grna-len",    type=int, default=18,
-                   help="gRNA spacer length (default: 18)")
+    p.add_argument("--grna-len",    type=int, default=20,
+                   help="gRNA spacer length (default: 20, the standard SpCas9 "
+                        "spacer; use 18 for truncated 'tru-gRNAs')")
     p.add_argument("--cas",         default="SpCas9",
                    choices=list(_PAM_TYPES.keys()),
                    help="Cas protein / PAM type (default: SpCas9)")

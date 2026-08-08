@@ -218,6 +218,23 @@ def clustering_analysis(df, kmer=10, min_cluster_size=100, out_dir=None,
     # ── Step 5: HDBSCAN on UMAP 2-D ───────────────────────────────────────
     mcs = min_cluster_size if min_cluster_size else max(5, n // 7)
     min_s = min_samples
+    # HDBSCAN cannot form more than n/mcs clusters. When min_cluster_size is a
+    # large fraction of the dataset the result silently degenerates to a single
+    # cluster plus noise, which looks like a real answer. Most TE subfamilies are
+    # small (hundreds of copies), while the CLI default is 100 -- so this is the
+    # common case, not an edge case. Warn loudly; do not change the value, so
+    # existing analyses stay reproducible.
+    if mcs >= n:
+        _pp(f"  ⚠  min_cluster_size ({mcs}) >= sequences ({n}): HDBSCAN cannot form "
+            f"ANY cluster — everything will be labelled noise (-1).")
+        _pp(f"     Pass --min-cluster-size ≈ {max(5, n // 10)} (roughly N/10) for this family.")
+    elif mcs > n // 2:
+        _pp(f"  ⚠  min_cluster_size ({mcs}) is over half the dataset ({n} sequences): "
+            f"at most 1 cluster is possible, so the result will be one cluster + noise.")
+        _pp(f"     Pass --min-cluster-size ≈ {max(5, n // 10)} (roughly N/10) for this family.")
+    elif mcs > n // 5:
+        _pp(f"  ⚠  min_cluster_size ({mcs}) is large for {n} sequences "
+            f"(at most {n // mcs} clusters possible). Consider ≈ {max(5, n // 10)}.")
     _pp(f"  Step 5/5: HDBSCAN (min_cluster_size={mcs}, min_samples={min_s})…")
 
     def _cluster(emb, name):

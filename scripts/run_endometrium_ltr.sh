@@ -84,8 +84,8 @@ MAX_REPS=${MAX_REPS:-30}
 # overstates what is actually cuttable (measured Aug 2026 on the ordered HERVK
 # guides: two of them have no NGG in any copy). Stage 7 therefore re-scores the
 # shortlist with run_grna_combos.py, which requires a PAM and also checks the
-# whole genome for gene hits. GRNA_LEN is forced to 20 because the three gRNA
-# scripts disagree by default (18 / 20 / 20) and mixing lengths is silent.
+# whole genome for gene hits. GRNA_LEN=20 is now every tool's default too
+# (they used to disagree 18/20/20); kept explicit so the study is self-documenting.
 GRNA_LEN=${GRNA_LEN:-20}
 TOP_GUIDES=${TOP_GUIDES:-12}   # per family; combos enumerates 2^N subsets
 COV_MM=${COV_MM:-2}            # on-family coverage: PAM-distal mismatches allowed
