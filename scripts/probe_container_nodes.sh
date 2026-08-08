@@ -22,7 +22,17 @@ N=${N:-20}
 JOB=${JOB:-cprobe}
 mkdir -p "$OUT"
 
-if [ "${1:-}" = "--report" ]; then
+# How many of our probe jobs are still queued/running? Judged from the OUTPUT,
+# not the exit status: this LSF returns 0 from `bjobs -J <name>` even when the
+# name matches nothing, so an exit-code test reports "still running" forever.
+probe_jobs_running() {
+  local out
+  out=$(bjobs -J "$JOB" 2>/dev/null || true)
+  printf '%s\n' "$out" | grep -cE '\b(PEND|RUN)\b' || true
+}
+
+report() {   # $1=just_submitted (1 after a submit, else empty)
+  local submitted="${1:-}"
   echo "== container probe results =="
   # NB: every count below is guarded. A bare `grep ... | wc -l` inside $( ) exits
   # non-zero when nothing matches, and under `set -e` that kills the script --
@@ -33,16 +43,20 @@ if [ "${1:-}" = "--report" ]; then
   if [ ${#res[@]} -eq 0 ]; then
     echo "  no results in $OUT"
     echo
-    if bjobs -J "$JOB" >/dev/null 2>&1; then
+    if [ "$(probe_jobs_running)" -gt 0 ]; then
       echo "  the probe jobs are still queued/running:"
       bjobs -J "$JOB" 2>/dev/null | head -5 | sed 's/^/    /'
       echo "  re-run --report when they clear."
+    elif [ -n "$submitted" ]; then
+      echo "  The probe jobs finished but wrote no results -- they failed before"
+      echo "  reaching the container test. Look at the job logs:"
+      echo "      tail -20 $OUT/${JOB}.*.log"
     else
-      echo "  no probe jobs are queued either -- you need to submit them first:"
+      echo "  NOTHING WAS SUBMITTED. Run it without --report first:"
       echo "      bash scripts/probe_container_nodes.sh"
-      echo "  (then wait ~1 min and re-run --report)"
+      echo "  (that submits, waits, and prints this report for you)"
     fi
-    exit 0
+    return 0
   fi
   count() { grep -l "RESULT=$1" "${res[@]}" 2>/dev/null | wc -l | tr -d ' '; }
   ok=$(count ok); un=$(count userns); bad=$(count broken)
@@ -61,8 +75,9 @@ if [ "${1:-}" = "--report" ]; then
   else
     echo "  every node tested is fine -- the earlier failure may have been one bad node."
   fi
-  exit 0
-fi
+}
+
+if [ "${1:-}" = "--report" ]; then report; exit 0; fi
 
 if [ "${1:-}" = "--run-one" ]; then
   h=$(hostname -s)
@@ -91,5 +106,12 @@ SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 bsub -q "$QUEUE" -n 1 -W 5 -M 2000 -R "rusage[mem=2000]" -R "span[ptile=1]" \
      -J "${JOB}[1-$N]" -o "$OUT/${JOB}.%J_%I.log" -e "$OUT/${JOB}.%J_%I.log" \
      env OUT="$OUT" IMG="$IMG" bash "$SELF" --run-one
-echo "submitted ${JOB}[1-$N]; these are 5-second jobs."
-echo "  when they clear:  bash scripts/probe_container_nodes.sh --report"
+echo "submitted ${JOB}[1-$N]; these are 5-second jobs. Waiting for them..."
+for i in $(seq 1 60); do            # up to 10 minutes
+  running=$(probe_jobs_running)
+  [ "$running" -eq 0 ] && break
+  printf '\r  %s still queued/running (%ds elapsed) ' "$running" "$((i * 10))"
+  sleep 10
+done
+echo
+report 1
