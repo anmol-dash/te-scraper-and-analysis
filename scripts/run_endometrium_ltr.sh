@@ -234,11 +234,26 @@ command -v bsub >/dev/null || { echo "FATAL: bsub not on PATH -- run this on the
 # singularity OR apptainer -- pennhpc compute nodes may only have the latter
 # shellcheck source=/dev/null
 . "$SCRIPTS/lib_container.sh"
+USE_CONTAINER=${USE_CONTAINER:-auto}
+TOOLS=${TOOLS:-$HOME/tools}
+PYBIN=${PYBIN:-$TOOLS/venv/bin/python}
 container_module_load
-container_init || exit 1
-container_probe "$SIF" \
-  || echo "  WARNING: the container cannot start HERE; compute nodes are probed separately"
-[ -n "$CONTAINER_EXEC_FLAGS" ] && echo "  container exec flags: $CONTAINER_EXEC_FLAGS"
+RUNMODE=""
+if [ "$USE_CONTAINER" != "0" ] && container_init 2>/dev/null && container_probe "$SIF"; then
+  RUNMODE=container
+  echo "  runmode: container${CONTAINER_EXEC_FLAGS:+ ($CONTAINER_EXEC_FLAGS)}"
+elif [ -x "$TOOLS/bin/STAR" ] && [ -x "$PYBIN" ]; then
+  RUNMODE=host; USE_CONTAINER=0
+  echo "  runmode: host tools ($TOOLS) -- container unusable here"
+else
+  echo "FATAL: neither path is available on this cluster."
+  echo "  container: cannot start (apptainer FIPS panic on every node)"
+  echo "  host tools: not installed"
+  echo
+  echo "  Install them once (5 min, no root, no conda):"
+  echo "      bash scripts/setup_host_tools.sh"
+  exit 1
+fi
 echo "  manifest: $MANIFEST ($N_SAMPLES paired total-RNA runs)"
 echo "  families: $FAMILIES   (min_cluster_size: LTR66=$MCS_LTR66 LTR10G=$MCS_LTR10G)"
 echo "  strandedness: TEcount=$STRANDED featureCounts=-s $FC_STRAND"
@@ -274,13 +289,19 @@ fi
 # login node, so the scan job never depends on outbound network.
 if [ "$DRY" = 0 ]; then
   mkdir -p "$RMSK_DIR"
-  "$GAMECA_RT" exec $CONTAINER_EXEC_FLAGS -B "$HOME" "$SIF" python -c "
+  { [ "$RUNMODE" = host ] && "$PYBIN" -c "
 import sys; sys.path.insert(0, '$REPO')
 from te_prep import get_rmsk_path
 from run_grna_combos import download_refgene
 print('  rmsk:   ', get_rmsk_path('hg38', '$RMSK_DIR'))
 print('  refGene:', download_refgene('hg38', '$RMSK_DIR'))
-" || echo "  WARNING: annotation prefetch failed; stage 7 will retry on the node"
+"; } || { [ "$RUNMODE" = container ] && "$GAMECA_RT" exec $CONTAINER_EXEC_FLAGS -B "$HOME" "$SIF" python -c "
+import sys; sys.path.insert(0, '$REPO')
+from te_prep import get_rmsk_path
+from run_grna_combos import download_refgene
+print('  rmsk:   ', get_rmsk_path('hg38', '$RMSK_DIR'))
+print('  refGene:', download_refgene('hg38', '$RMSK_DIR'))
+"; } || echo "  WARNING: annotation prefetch failed; stage 7 will retry on the node"
 fi
 
 # Which upstream jobs must stage 2 wait for? Decide from the FILESYSTEM, not from
@@ -325,6 +346,7 @@ run env WORK="$WORK" REF="$REF" CONT="$CONT" MANIFEST="$MANIFEST" \
         JOB="$J_ALIGN" QUEUE="$QUEUE" THREADS="$THREADS" MEM_MB="$MEM_MB" \
         FILTER="$FILTER" ALSO_TECOUNT=1 STRANDED="$STRANDED" FC_STRAND="$FC_STRAND" \
         REQUIRE_INPUTS=0 BSUB_DEP="$dep_expr" EXCLUDE_HOSTS="${EXCLUDE_HOSTS:-}" \
+        USE_CONTAINER="$USE_CONTAINER" TOOLS="$TOOLS" \
         bash "$SCRIPTS/submit_locus_expression.sh"
 
 # ============================================================================
@@ -360,6 +382,7 @@ run env SIF="$SIF" REF="$REF" GENOME="$GENOME" \
         REAGENT_WORK="$REAGENT_WORK" REAGENT_JOB="$J_REAGENT" \
         FAMILIES="$FAMILIES" CAS="$CAS" QUEUE="$QUEUE" \
         MCS_LTR66="$MCS_LTR66" MCS_LTR10G="$MCS_LTR10G" GRNA_LEN="$GRNA_LEN" \
+        USE_CONTAINER="$USE_CONTAINER" TOOLS="$TOOLS" PYBIN="$PYBIN" \
         bash "$SCRIPTS/submit_reagent_design.sh"
 
 # ============================================================================
@@ -369,6 +392,7 @@ say "stage 6/6: expression-weighted qPCR redesign + top-$TOP_N ranking  (job '$J
 run env SIF="$SIF" REF="$REF" GENOME="$GENOME" REAGENT_WORK="$REAGENT_WORK" \
         FAMILIES="$FAMILIES" NCLUST="$NCLUST" NPAIRS="$NPAIRS" TOP_N="$TOP_N" \
         AMP_MIN="$AMP_MIN" AMP_MAX="$AMP_MAX" MAX_REPS="$MAX_REPS" \
+        USE_CONTAINER="$USE_CONTAINER" TOOLS="$TOOLS" PYBIN="$PYBIN" \
         EXPR_TSV="$WORK/locus_expression.tsv" EXPR_COLS="expression" \
         REAGENT_TAG="$TAG" JOB="$J_QPCR" QUEUE="$QUEUE" \
         BSUB_DEP="done($J_MERGE) && done($J_REAGENT)" \

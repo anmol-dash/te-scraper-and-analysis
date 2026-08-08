@@ -36,9 +36,26 @@ WALL=${WALL:-4:00}
 JOB=${JOB:-qpcr_multi}
 # shellcheck source=/dev/null
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_container.sh"
-container_module_load
-container_init || exit 1
-container_probe "$SIF" || echo "  WARNING: container unusable on $(hostname -s); this will fail"
+USE_CONTAINER=${USE_CONTAINER:-auto}
+TOOLS=${TOOLS:-$HOME/tools}
+PYBIN=${PYBIN:-$TOOLS/venv/bin/python}
+RUNMODE=""
+if [ "$USE_CONTAINER" != "0" ]; then
+  container_module_load
+  if container_init 2>/dev/null && container_probe "$SIF"; then RUNMODE=container; fi
+fi
+if [ -z "$RUNMODE" ]; then
+  if [ -x "$PYBIN" ] && "$PYBIN" -c "import numpy, pandas" >/dev/null 2>&1; then RUNMODE=host
+  else echo "FATAL: no usable python (container dead, venv $PYBIN missing)."
+       echo "  bash scripts/setup_host_tools.sh"; exit 1; fi
+fi
+echo "  runmode: $RUNMODE"
+# run a repo python script under whichever runtime was selected
+runpy() {
+  if [ "$RUNMODE" = host ]; then PYTHONPATH="${PYLIB}:${PYTHONPATH:-}" "$PYBIN" "$@"
+  else SINGULARITYENV_PYTHONPATH="$PYLIB" APPTAINERENV_PYTHONPATH="$PYLIB" \
+       "$GAMECA_RT" exec $CONTAINER_EXEC_FLAGS -B "$HOME" "$SIF" python "$@"; fi
+}
 
 do_work() {
   read -r -a FAM_ARR <<< "$FAMILIES"
@@ -59,7 +76,7 @@ do_work() {
     if [ -n "$EXPR_TSV" ]; then
       designcsv="$out/${label}.seqs.csv"
       echo "[$label] attaching per-locus expression from $EXPR_TSV"
-      "$GAMECA_RT" exec $CONTAINER_EXEC_FLAGS -B "$HOME" "$SIF" python "$REPO/attach_locus_expression.py" \
+      runpy "$REPO/attach_locus_expression.py" \
           --expr "$EXPR_TSV" --seqs "$seqcsv" --out "$designcsv" \
           || { echo "[$label] expression attach failed"; designcsv="$seqcsv"; }
     fi
@@ -69,15 +86,13 @@ do_work() {
     [ -n "$AMP_MIN" ]  && exprarg+=(--amp-min "$AMP_MIN")
     [ -n "$AMP_MAX" ]  && exprarg+=(--amp-max "$AMP_MAX")
     [ -n "$MAX_REPS" ] && exprarg+=(--max-reps "$MAX_REPS")
-    SINGULARITYENV_PYTHONPATH="$PYLIB" APPTAINERENV_PYTHONPATH="$PYLIB" \
-      "$GAMECA_RT" exec $CONTAINER_EXEC_FLAGS -B "$HOME" "$SIF" python "$REPO/te_qpcr_primers.py" \
+    runpy "$REPO/te_qpcr_primers.py" \
         --input "$designcsv" --family "$label" --genome "$GENOME" --out "$out" \
         --n-pairs "$NPAIRS" --n-clusters "$NCLUST" --max-mm "$MAXMM" ${exprarg[@]+"${exprarg[@]}"} \
         || { echo "[$label] primer design failed"; continue; }
     if [ -n "$TOP_N" ]; then
       echo "[$label] ranking top-$TOP_N primers"
-      SINGULARITYENV_PYTHONPATH="$PYLIB" APPTAINERENV_PYTHONPATH="$PYLIB" \
-        "$GAMECA_RT" exec $CONTAINER_EXEC_FLAGS -B "$HOME" "$SIF" python "$REPO/top_primers.py" \
+      runpy "$REPO/top_primers.py" \
           --input "$designcsv" --family "$label" --genome "$GENOME" --out "$out" \
           --top-n "$TOP_N" --max-mm "$MAXMM" ${exprarg[@]+"${exprarg[@]}"} \
           || echo "[$label] top-primers ranking failed"
@@ -99,6 +114,7 @@ bsub -q "$QUEUE" -n 4 -M 20000 -R "rusage[mem=20000]" -W "$WALL" \
          FAMILIES="$FAMILIES" NCLUST="$NCLUST" NPAIRS="$NPAIRS" MAXMM="$MAXMM" \
          EXPR_COLS="$EXPR_COLS" EXPR_TSV="$EXPR_TSV" REAGENT_TAG="$REAGENT_TAG" TOP_N="$TOP_N" \
          AMP_MIN="$AMP_MIN" AMP_MAX="$AMP_MAX" MAX_REPS="$MAX_REPS" \
+         USE_CONTAINER="$USE_CONTAINER" TOOLS="$TOOLS" PYBIN="$PYBIN" \
      bash "$REPO/scripts/$(basename "$0")" --run
 echo "submitted $JOB (-q $QUEUE) for: $FAMILIES  (NCLUST=$NCLUST)"
 echo "  watch: bjobs -J $JOB ; log: $WORK/${JOB}.*.log"

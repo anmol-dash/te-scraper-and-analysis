@@ -49,13 +49,44 @@ GENE_GTF=$REF/hg38.knownGene.gtf
 MANIFEST=${MANIFEST:-$(cd "$(dirname "$0")" && pwd)/hervk_ccle_manifest.tsv}
 mkdir -p "$WORK/locus" "$WORK/bam" "$CONT"
 [ "$ALSO_TECOUNT" = "1" ] && mkdir -p "$WORK/counts"
-# Resolve singularity/apptainer on THIS host (login and compute nodes differ --
-# a missing runtime is what makes every array element exit 127).
+# USE_CONTAINER=0 runs STAR/featureCounts as plain host binaries from $TOOLS/bin
+# (scripts/setup_host_tools.sh). Needed on pennhpc rhel9, where the apptainer
+# package panics in its Go FIPS backend on EVERY node -- see that script.
+# 'auto' uses the container if it actually starts, else the host tools.
+USE_CONTAINER=${USE_CONTAINER:-auto}
+TOOLS=${TOOLS:-$HOME/tools}
+HOST_BIN=${HOST_BIN:-$TOOLS/bin}
 # shellcheck source=/dev/null
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_container.sh"
 CONTAINER_BIND="${CONTAINER_BIND:-}${CONTAINER_BIND:+:}$WORK:$REF:$CONT"
-container_module_load
-container_init || exit 1
+
+RUNMODE=""
+select_runmode() {
+  [ -n "$RUNMODE" ] && return 0
+  if [ "$USE_CONTAINER" != "0" ]; then
+    container_module_load
+    if container_init 2>/dev/null && container_probe "$STAR_SIF"; then
+      RUNMODE=container
+      echo "  runmode: container ($GAMECA_RT ${CONTAINER_EXEC_FLAGS:-plain})"
+      return 0
+    fi
+    [ "$USE_CONTAINER" = "1" ] && {
+      echo "FATAL: USE_CONTAINER=1 but the container cannot start on $(hostname -s)"; return 1; }
+  fi
+  if [ -x "$HOST_BIN/STAR" ] && [ -x "$HOST_BIN/featureCounts" ]; then
+    RUNMODE=host
+    echo "  runmode: host binaries ($HOST_BIN)"
+    return 0
+  fi
+  echo "FATAL: no way to run STAR/featureCounts on $(hostname -s)."
+  echo "  container: unusable    host tools: not found in $HOST_BIN"
+  echo "  Install the host tools once:  bash scripts/setup_host_tools.sh"
+  return 1
+}
+
+# run_star / run_fc dispatch on the selected mode
+run_star() { if [ "$RUNMODE" = host ]; then "$HOST_BIN/STAR" "$@"; else sing "$STAR_SIF" STAR "$@"; fi; }
+run_fc()   { if [ "$RUNMODE" = host ]; then "$HOST_BIN/featureCounts" "$@"; else sing "$SUB_SIF" featureCounts "$@"; fi; }
 
 # --- merge mode: combine per-sample featureCounts into locus_expression.tsv ---
 if [ "${1:-}" = "--merge" ]; then
@@ -97,17 +128,8 @@ fi
 # --- per-sample worker ------------------------------------------------------
 run_one() {
   local idx="${LSB_JOBINDEX:?}"
-  # Probe the runtime BEFORE a 45 GB alignment: unlike the download, there is no
-  # host fallback for STAR/featureCounts/TEcount. The apptainer FIPS panic is
-  # node-dependent, so say which node failed -- that is what lets us exclude it.
-  if ! container_probe "$STAR_SIF"; then
-    echo "FATAL: the container runtime cannot start on $(hostname -s)."
-    echo "  runtime: ${GAMECA_RT:-<none found>}"
-    "${GAMECA_RT:-true}" exec "$STAR_SIF" true 2>&1 | head -5 | sed 's/^/  | /'
-    echo "  This node is unusable for the pipeline. Re-submit excluding it:"
-    echo "      EXCLUDE_HOSTS='$(hostname -s)' bash scripts/run_endometrium_ltr.sh --clean --go"
-    exit 1
-  fi
+  # Decide container-vs-host BEFORE a 45 GB alignment, on this node.
+  select_runmode || exit 1
   local row cl run
   row=$(sed -n "$((idx+1))p" "$MANIFEST")
   cl=$(printf '%s' "$row" | cut -f1); run=$(printf '%s' "$row" | cut -f3)
@@ -121,21 +143,41 @@ run_one() {
     echo "[$cl] outputs exist -> skip"; exit 0
   fi
   echo "[$cl] STAR align"
-  sing "$STAR_SIF" STAR --runThreadN "$THREADS" --genomeDir "$STAR_INDEX" \
+  run_star --runThreadN "$THREADS" --genomeDir "$STAR_INDEX" \
       --readFilesIn "$fq1" "$fq2" --readFilesCommand zcat \
       --outSAMtype BAM Unsorted --outFileNamePrefix "$pref" \
       --outFilterMultimapNmax 100 --winAnchorMultimapNmax 100 --outSAMprimaryFlag AllBestScore
   if [ ! -s "$out" ]; then
     echo "[$cl] featureCounts per locus (-s $FC_STRAND)"
-    sing "$SUB_SIF" featureCounts -a "$TE_GTF" -o "$out" \
+    run_fc -a "$TE_GTF" -o "$out" \
         -M --fraction -O -T "$THREADS" -p --countReadPairs -s "$FC_STRAND" \
         -t exon -g transcript_id "$bam"
   fi
   if [ "$ALSO_TECOUNT" = "1" ] && [ ! -s "$cnt" ]; then
-    echo "[$cl] TEcount subfamily level (--stranded $STRANDED) on the same BAM"
-    sing "$TE_SIF" TEcount --mode multi --format BAM --sortByPos \
-        --stranded "$STRANDED" -b "$bam" --GTF "$GENE_GTF" --TE "$TE_GTF" \
-        --project "$WORK/counts/${cl}"
+    # Subfamily-level counts. In container mode use TEcount (EM multimapper
+    # assignment). On the host use featureCounts -g gene_id instead: the TE
+    # GTF's gene_id IS the repName, so this is the same table, and it avoids
+    # TEtranscripts' pysam dependency, which SIGABRTs on this cluster for the
+    # same FIPS reason that breaks apptainer.
+    if [ "$RUNMODE" = container ] && [ -s "$TE_SIF" ]; then
+      echo "[$cl] TEcount subfamily level (--stranded $STRANDED) on the same BAM"
+      sing "$TE_SIF" TEcount --mode multi --format BAM --sortByPos \
+          --stranded "$STRANDED" -b "$bam" --GTF "$GENE_GTF" --TE "$TE_GTF" \
+          --project "$WORK/counts/${cl}"
+    else
+      echo "[$cl] subfamily counts via featureCounts -g gene_id (no TEcount)"
+      run_fc -a "$TE_GTF" -o "$WORK/counts/${cl}.subfam.txt" \
+          -M --fraction -O -T "$THREADS" -p --countReadPairs -s "$FC_STRAND" \
+          -t exon -g gene_id "$bam"
+      # reshape to TEcount's 2-column .cntTable so downstream code is unchanged
+      # Match the header by CONTENT, not FNR: the '#' comment line is consumed by
+      # the rule above, so the real header is FNR==2 and an FNR==1 test would
+      # emit it as a data row ("Geneid  0").
+      awk 'BEGIN{FS=OFS="\t"} /^#/ {next} $1=="Geneid" {print "gene/TE","count"; next}
+           NF>1 {printf "%s\t%.0f\n", $1, $NF}' \
+        "$WORK/counts/${cl}.subfam.txt" > "$cnt"
+      echo "[$cl] wrote $(($(grep -c . "$cnt") - 1)) subfamily rows -> $cnt"
+    fi
   fi
   rm -f "$bam"
   if [ "$ALSO_TECOUNT" = "1" ]; then echo "[$cl] done -> $out + $cnt"
@@ -144,18 +186,14 @@ run_one() {
 if [ "${1:-}" = "--run-one" ]; then run_one; exit 0; fi
 
 # --- submit ----------------------------------------------------------------
-[ -s "$SUB_SIF" ] || { echo "pulling subread container..."; \
-  curl -fSL -o "$SUB_SIF" https://depot.galaxyproject.org/singularity/subread:2.0.6--he4a0461_2; }
+if [ "$USE_CONTAINER" != "0" ] && [ ! -s "$SUB_SIF" ]; then
+  echo "pulling subread container..."
+  curl -fSL -o "$SUB_SIF" https://depot.galaxyproject.org/singularity/subread:2.0.6--he4a0461_2 || true
+fi
 # Containers and GTFs come from the (synchronous) setup step, so they must
 # exist now no matter what.
-for f in "$STAR_SIF" "$SUB_SIF" "$TE_GTF"; do
-  [ -e "$f" ] || { echo "MISSING $f"; exit 1; }
-done
-if [ "$ALSO_TECOUNT" = "1" ]; then
-  for f in "$TE_SIF" "$GENE_GTF"; do
-    [ -e "$f" ] || { echo "MISSING $f"; exit 1; }
-  done
-fi
+[ -e "$TE_GTF" ] || { echo "MISSING $TE_GTF"; exit 1; }
+select_runmode || exit 1     # fails loudly here if neither path is available
 # The STAR index and the FASTQ, by contrast, are produced by OTHER LSF jobs.
 # REQUIRE_INPUTS=0 downgrades them to warnings so this array can be submitted
 # with a -w dependency on those jobs before they have run.
@@ -195,7 +233,7 @@ ENVFILE="$WORK/${JOB}.env"
   # NB: GAMECA_RT is deliberately NOT forwarded -- the compute node must resolve
   # its own container binary; the login node's path may not exist there.
   for v in WORK REF CONT MANIFEST THREADS ALSO_TECOUNT STRANDED FC_STRAND FILTER \
-           CONTAINER_MODULE EXCLUDE_HOSTS; do
+           CONTAINER_MODULE EXCLUDE_HOSTS USE_CONTAINER TOOLS HOST_BIN; do
     eval "_val=\${$v:-}"
     [ -n "$_val" ] && printf 'export %s=%q\n' "$v" "$_val"
   done

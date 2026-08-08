@@ -48,13 +48,41 @@ read -r -a FAM_ARR <<< "$FAMILIES"
 # python ignore ~/.local; explicit PYTHONPATH (e.g. PYLIB) is still honored.
 # shellcheck source=/dev/null
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_container.sh"
-container_module_load
-container_init || exit 1
-# discover any per-node exec workaround (e.g. --userns) before doing real work
-container_probe "$SIF" || echo "  WARNING: container unusable on $(hostname -s); this will fail"
-# this script's sing() bakes in $SIF (call sites pass only the command), so it
-# overrides the generic two-argument helper from the library
-sing() { "$GAMECA_RT" exec $CONTAINER_EXEC_FLAGS -B "$HOME" "$SIF" "$@"; }
+# USE_CONTAINER=0 (or 'auto' when the container will not start) runs the python
+# steps with the host venv from scripts/setup_host_tools.sh. Required on this
+# cluster: apptainer panics in its Go FIPS backend on every node.
+USE_CONTAINER=${USE_CONTAINER:-auto}
+TOOLS=${TOOLS:-$HOME/tools}
+PYBIN=${PYBIN:-$TOOLS/venv/bin/python}
+RUNMODE=""
+if [ "$USE_CONTAINER" != "0" ]; then
+  container_module_load
+  if container_init 2>/dev/null && container_probe "$SIF"; then RUNMODE=container; fi
+fi
+if [ -z "$RUNMODE" ]; then
+  if [ -x "$PYBIN" ] && "$PYBIN" -c "import numpy, pandas" >/dev/null 2>&1; then
+    RUNMODE=host
+  else
+    echo "FATAL: no usable python on $(hostname -s)."
+    echo "  container: cannot start;  host venv: $PYBIN missing or incomplete"
+    echo "  Install it once:  bash scripts/setup_host_tools.sh"
+    exit 1
+  fi
+fi
+echo "  runmode: $RUNMODE"
+# sing() bakes in $SIF (call sites pass only the command); in host mode the
+# leading 'python'/'pip' argument is replaced by the venv equivalent.
+sing() {
+  if [ "$RUNMODE" = host ]; then
+    case "$1" in
+      python) shift; PYTHONPATH="${PYLIB}:${PYTHONPATH:-}" "$PYBIN" "$@" ;;
+      pip)    shift; "$(dirname "$PYBIN")/pip" "$@" ;;
+      *)      "$@" ;;
+    esac
+  else
+    "$GAMECA_RT" exec $CONTAINER_EXEC_FLAGS -B "$HOME" "$SIF" "$@"
+  fi
+}
 
 ensure_primer3() {   # sif has numpy/pandas but not primer3; install into PYLIB once
   sing python -c "import primer3" 2>/dev/null && return 0
@@ -150,7 +178,8 @@ LOG="$WORK/${JOB}.%J_%I.log"
 bsub "${bsub_args[@]}" ${dep_args[@]+"${dep_args[@]}"} \
      -J "${JOB}[1-$N]" -o "$LOG" -e "$LOG" \
      env SIF="$SIF" REF="$REF" GENOME="$GENOME" REAGENT_WORK="$WORK" REAGENT_JOB="$JOB" \
-         CAS="$CAS" FAMILIES="$FAMILIES" GRNA_LEN="$GRNA_LEN" "${mcs_env[@]}" \
+         CAS="$CAS" FAMILIES="$FAMILIES" GRNA_LEN="$GRNA_LEN" \
+         USE_CONTAINER="$USE_CONTAINER" TOOLS="$TOOLS" PYBIN="$PYBIN" "${mcs_env[@]}" \
      bash "$REPO/scripts/$(basename "$0")" --run-one
 echo "submitted ${JOB}[1-$N] for: ${FAM_ARR[*]}"
 echo "  watch: bjobs -J $JOB ; logs: $WORK/${JOB}.*_*.log ; outputs under $WORK/<family>/"
