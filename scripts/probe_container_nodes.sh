@@ -45,12 +45,12 @@ report() {   # $1=just_submitted (1 after a submit, else empty)
     echo
     if [ "$(probe_jobs_running)" -gt 0 ]; then
       echo "  the probe jobs are still queued/running:"
-      bjobs -J "$JOB" 2>/dev/null | head -5 | sed 's/^/    /'
+      bjobs -J "$JOB" 2>/dev/null | head -5 | sed 's/^/    /' || true
       echo "  re-run --report when they clear."
     elif [ -n "$submitted" ]; then
       echo "  The probe jobs finished but wrote no results -- they failed before"
       echo "  reaching the container test. Look at the job logs:"
-      echo "      tail -20 $OUT/${JOB}.*.log"
+      echo "      tail -n 20 $OUT/${JOB}.*.log"
     else
       echo "  NOTHING WAS SUBMITTED. Run it without --report first:"
       echo "      bash scripts/probe_container_nodes.sh"
@@ -94,20 +94,28 @@ report() {   # $1=just_submitted (1 after a submit, else empty)
 if [ "${1:-}" = "--report" ]; then report; exit 0; fi
 
 if [ "${1:-}" = "--run-one" ]; then
+  # A diagnostic must ALWAYS leave a verdict behind, so this worker runs with
+  # -e and pipefail OFF. The previous version piped the panic text through
+  # `head -1`: head exits after one line, apptainer takes SIGPIPE, pipefail
+  # reports failure and -e killed the worker before it wrote anything -- so
+  # every BROKEN node (the ones we most need to see) silently vanished.
+  set +e +o pipefail
   h=$(hostname -s)
   res="$OUT/${h}.res"
+  echo "$h RESULT=broken reason=probe-did-not-finish" > "$res"   # overwritten below
   # deliberately NOT using lib_container.sh here: this probe must report the raw
   # behaviour, not the behaviour after the library's workarounds
   export GOFIPS=0 GOLANG_FIPS=0
-  RT=$(command -v singularity 2>/dev/null || command -v apptainer 2>/dev/null || true)
+  RT=$(command -v singularity 2>/dev/null || command -v apptainer 2>/dev/null)
   if [ -z "$RT" ]; then echo "$h RESULT=broken reason=no-runtime" > "$res"; exit 0; fi
-  ver=$("$RT" --version 2>&1 | head -1)
+  # first line via parameter expansion, not `| head -1` -- no pipe, no SIGPIPE
+  ver=$("$RT" --version 2>&1); ver=${ver%%$'\n'*}
   if "$RT" exec "$IMG" true >/dev/null 2>&1; then
     echo "$h RESULT=ok runtime='$ver'" > "$res"
   elif "$RT" exec --userns "$IMG" true >/dev/null 2>&1; then
     echo "$h RESULT=userns runtime='$ver'" > "$res"
   else
-    err=$("$RT" exec "$IMG" true 2>&1 | head -1 | tr -d "'")
+    err=$("$RT" exec "$IMG" true 2>&1); err=${err%%$'\n'*}; err=${err//\'/}
     echo "$h RESULT=broken runtime='$ver' err='$err'" > "$res"
   fi
   exit 0
