@@ -114,14 +114,21 @@ fi
 
 # ------------------------------------------------------------------ status --
 if [ "$cmd" = "status" ]; then
+  # A read-only report must never abort partway and leave you guessing whether
+  # it finished or died. Under `set -e` + pipefail a $(gcloud ...) that returns
+  # non-zero because an object simply does not exist kills the script mid-output
+  # -- which is exactly what truncated this report.
+  set +e +o pipefail
   say "status"
   echo "  project $PROJECT   zone $ZONE   vm $VM"
-  gcloud compute instances list --project "$PROJECT" --filter="name=$VM" \
-    --format="table(name,status,machineType.basename(),scheduling.provisioningModel,lastStartTimestamp)" \
-    2>/dev/null || echo "  (no such VM)"
+  vms=$(gcloud compute instances list --project "$PROJECT" --filter="name=$VM" \
+    --format="table(name,status,machineType.basename(),scheduling.provisioningModel,lastStartTimestamp)" 2>/dev/null)
+  if [ -n "$vms" ]; then echo "$vms" | sed 's/^/  /'
+  else echo "  VM: not present (nothing running, nothing billing)"; fi
   echo
   echo "  progress markers in $BUCKET:"
-  gcloud storage ls "$BUCKET/progress/" 2>/dev/null | sed 's|.*/|    |' || echo "    (none yet)"
+  marks=$(gcloud storage ls "$BUCKET/progress/" 2>/dev/null | sed 's|.*/|    |')
+  if [ -n "$marks" ]; then echo "$marks"; else echo "    (none yet -- has 'up' been run?)"; fi
   echo
   # FAILED must be reported before results: an empty file can still exist
   if gcloud storage ls "$BUCKET/progress/FAILED" >/dev/null 2>&1; then
@@ -134,7 +141,7 @@ if [ "$cmd" = "status" ]; then
     echo -n "    "; gcloud storage cat "$BUCKET/results/RUN_SUMMARY.txt" 2>/dev/null
   fi
   for f in locus_expression.tsv te_timepoint_summary.tsv; do
-    sz=$(gcloud storage ls -l "$BUCKET/results/$f" 2>/dev/null | head -1 | awk "{print \$1}")
+    sz=$(gcloud storage ls -l "$BUCKET/results/$f" 2>/dev/null | head -1 | awk "{print \$1}" || true)
     if [ -n "${sz:-}" ] && [ "${sz:-0}" -gt 200 ] 2>/dev/null; then echo "    $f: READY ($sz bytes)"
     elif [ -n "${sz:-}" ]; then echo "    $f: PRESENT BUT SUSPICIOUSLY SMALL ($sz bytes)"
     else echo "    $f: not yet"; fi
