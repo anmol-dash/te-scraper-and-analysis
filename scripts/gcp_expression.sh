@@ -123,15 +123,31 @@ if [ "$cmd" = "status" ]; then
   echo "  progress markers in $BUCKET:"
   gcloud storage ls "$BUCKET/progress/" 2>/dev/null | sed 's|.*/|    |' || echo "    (none yet)"
   echo
-  echo "  results present?"
+  # FAILED must be reported before results: an empty file can still exist
+  if gcloud storage ls "$BUCKET/progress/FAILED" >/dev/null 2>&1; then
+    echo "  *** RUN FAILED ***"
+    gcloud storage cat "$BUCKET/progress/FAILED" 2>/dev/null | sed 's/^/    /'
+    echo "    full log: bash scripts/gcp_expression.sh logfile"
+  fi
+  echo "  results:"
+  if gcloud storage ls "$BUCKET/results/RUN_SUMMARY.txt" >/dev/null 2>&1; then
+    echo -n "    "; gcloud storage cat "$BUCKET/results/RUN_SUMMARY.txt" 2>/dev/null
+  fi
   for f in locus_expression.tsv te_timepoint_summary.tsv; do
-    if gcloud storage ls "$BUCKET/results/$f" >/dev/null 2>&1; then echo "    $f: READY"
+    sz=$(gcloud storage ls -l "$BUCKET/results/$f" 2>/dev/null | head -1 | awk "{print \$1}")
+    if [ -n "${sz:-}" ] && [ "${sz:-0}" -gt 200 ] 2>/dev/null; then echo "    $f: READY ($sz bytes)"
+    elif [ -n "${sz:-}" ]; then echo "    $f: PRESENT BUT SUSPICIOUSLY SMALL ($sz bytes)"
     else echo "    $f: not yet"; fi
   done
   exit 0
 fi
 
 # -------------------------------------------------------------------- logs --
+if [ "$cmd" = "logfile" ]; then
+  gcloud storage cat "$BUCKET/progress/endo.log" 2>/dev/null || echo "no log uploaded yet"
+  exit 0
+fi
+
 if [ "$cmd" = "logs" ]; then
   gcloud compute instances get-serial-port-output "$VM" --zone "$ZONE" --project "$PROJECT" 2>/dev/null \
     | grep -aE 'startup-script|\[endo\]' | tail -"${2:-40}" \
@@ -235,6 +251,38 @@ trap finish EXIT
 
 mark() { echo "[endo] STAGE \$1"; echo "\$1 \$(date -Is)" | gcloud storage cp - "\$BUCKET/progress/\$1" --quiet 2>/dev/null || true; }
 
+# A stage that cannot succeed must STOP the run, not let it march on to DONE.
+# The first version of this script had no such guard: UCSC was unreachable, the
+# genome never downloaded, all 14 alignments failed instantly, and an EMPTY
+# locus_expression.tsv was uploaded and marked DONE. Loud failure beats a
+# plausible-looking empty result.
+fail() {
+  echo "[endo] FATAL: \$*"
+  echo "\$*" | gcloud storage cp - "\$BUCKET/progress/FAILED" --quiet 2>/dev/null || true
+  exit 1
+}
+require() {   # require <file> <min-bytes> <what>
+  local f="\$1" min="\$2" what="\$3" sz
+  # wc -c, not stat: stat's size flag differs between GNU (-c%s) and BSD (-f%z),
+  # so this stays testable off-VM as well as correct on it
+  sz=\$(wc -c < "\$f" 2>/dev/null | tr -d ' ' || echo 0); sz=\${sz:-0}
+  [ "\$sz" -ge "\$min" ] || fail "\$what missing or truncated: \$f (\$sz bytes, need >= \$min)"
+  echo "[endo] ok \$what: \$f (\$sz bytes)"
+}
+# UCSC times out from GCP often enough to matter; try every mirror, with retries.
+fetch_ucsc() {   # fetch_ucsc <path-under-goldenPath> <outfile>
+  local path="\$1" out="\$2" h
+  for h in hgdownload.soe.ucsc.edu hgdownload.gi.ucsc.edu hgdownload2.soe.ucsc.edu; do
+    echo "[endo] trying \$h/\$path"
+    if curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 \
+            --connect-timeout 30 --max-time 3600 -o "\$out" "https://\$h/goldenPath/\$path"; then
+      [ -s "\$out" ] && { echo "[endo] got \$out from \$h"; return 0; }
+    fi
+    echo "[endo] \$h failed for \$path"
+  done
+  return 1
+}
+
 # ---- disk ----
 mkfs.ext4 -F /dev/disk/by-id/google-persistent-disk-1 2>/dev/null || true
 mkdir -p \$WORK && mount /dev/disk/by-id/google-persistent-disk-1 \$WORK 2>/dev/null || WORK=/var/endo
@@ -251,12 +299,34 @@ tar xzf subread.tar.gz && cp subread-2.0.6-Linux-x86_64/bin/featureCounts bin/ &
 export PATH=\$WORK/bin:\$PATH
 STAR --version; featureCounts -v 2>&1 | head -1
 
-# ---- references ----
+# ---- references (cached in the bucket: a re-run skips the slow parts) ----
 mark refs
 cd \$WORK/ref
-curl -fsSL -O https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz && gunzip -f hg38.fa.gz
-curl -fsSL -O https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/genes/hg38.knownGene.gtf.gz && gunzip -f hg38.knownGene.gtf.gz
-curl -fsSL -O https://hgdownload.soe.ucsc.edu/goldenPath/hg38/database/rmsk.txt.gz
+if gcloud storage cp "\$BUCKET/cache/hg38.fa" hg38.fa --quiet 2>/dev/null; then
+  echo "[endo] hg38.fa from bucket cache"
+else
+  fetch_ucsc hg38/bigZips/hg38.fa.gz hg38.fa.gz || fail "hg38.fa.gz: every UCSC mirror failed"
+  gunzip -f hg38.fa.gz
+  require hg38.fa 3000000000 "hg38 genome"
+  gcloud storage cp hg38.fa "\$BUCKET/cache/hg38.fa" --quiet 2>/dev/null || true
+fi
+require hg38.fa 3000000000 "hg38 genome"
+
+if gcloud storage cp "\$BUCKET/cache/rmsk.txt.gz" rmsk.txt.gz --quiet 2>/dev/null; then
+  echo "[endo] rmsk from bucket cache"
+else
+  fetch_ucsc hg38/database/rmsk.txt.gz rmsk.txt.gz || fail "rmsk.txt.gz: every UCSC mirror failed"
+  gcloud storage cp rmsk.txt.gz "\$BUCKET/cache/rmsk.txt.gz" --quiet 2>/dev/null || true
+fi
+require rmsk.txt.gz 100000000 "RepeatMasker table"
+
+# knownGene only feeds STAR's --sjdbGTFfile, which is optional; do not abort on it
+SJDB=""
+if fetch_ucsc hg38/bigZips/genes/hg38.knownGene.gtf.gz hg38.knownGene.gtf.gz; then
+  gunzip -f hg38.knownGene.gtf.gz && SJDB="--sjdbGTFfile \$WORK/ref/hg38.knownGene.gtf --sjdbOverhang 100"
+else
+  echo "[endo] WARNING: knownGene GTF unavailable; building the index without splice junctions"
+fi
 # identical TE GTF construction to scripts/setup_hervk_ccle.sh
 zcat rmsk.txt.gz | awk -F'\t' '
   \$12 ~ /Simple_repeat|Low_complexity|Satellite|^RNA\$|rRNA|scRNA|snRNA|srpRNA|tRNA|Unknown|\?/ {next}
@@ -266,11 +336,25 @@ zcat rmsk.txt.gz | awk -F'\t' '
 echo "[endo] TE GTF \$(wc -l < hg38_rmsk_TE.gtf) lines; target families present:"
 awk -F'gene_id "' '{split(\$2,a,"\"");print a[1]}' hg38_rmsk_TE.gtf | grep -cE "^(\${FAMILIES// /|})\$" || true
 
+echo "[endo] TE GTF families of interest:"
+awk -F'gene_id "' '{split(\$2,a,"\"");print a[1]}' hg38_rmsk_TE.gtf \
+  | grep -cE "^(\${FAMILIES// /|})\$" | xargs echo "[endo]   target-family GTF rows:"
+
 mark star_index
 mkdir -p star_hg38
-STAR --runMode genomeGenerate --runThreadN \$THREADS --genomeDir \$WORK/ref/star_hg38 \
-     --genomeFastaFiles \$WORK/ref/hg38.fa --sjdbGTFfile \$WORK/ref/hg38.knownGene.gtf \
-     --sjdbOverhang 100 --outFileNamePrefix \$WORK/ref/idx_
+# the index build is ~40 min of CPU; cache it so a re-run costs minutes
+if gcloud storage cp "\$BUCKET/cache/star_hg38.tar" - --quiet 2>/dev/null | tar xf - -C \$WORK/ref 2>/dev/null \
+   && [ -s star_hg38/genomeParameters.txt ]; then
+  echo "[endo] STAR index from bucket cache"
+else
+  STAR --runMode genomeGenerate --runThreadN \$THREADS --genomeDir \$WORK/ref/star_hg38 \
+       --genomeFastaFiles \$WORK/ref/hg38.fa \$SJDB --outFileNamePrefix \$WORK/ref/idx_ \
+    || fail "STAR genomeGenerate failed (see log)"
+  require star_hg38/genomeParameters.txt 100 "STAR index"
+  tar cf - -C \$WORK/ref star_hg38 | gcloud storage cp - "\$BUCKET/cache/star_hg38.tar" --quiet 2>/dev/null || true
+fi
+require star_hg38/genomeParameters.txt 100 "STAR index"
+require star_hg38/SA 1000000 "STAR suffix array"
 
 # ---- manifest ----
 cd \$WORK
@@ -294,17 +378,32 @@ tail -n +2 manifest.tsv | while IFS=\$'\t' read -r sample tp run rest; do
        --outSAMtype BAM Unsorted --outFileNamePrefix bam/\${sample}. \
        --outFilterMultimapNmax 100 --winAnchorMultimapNmax 100 --outSAMprimaryFlag AllBestScore
   BAM=bam/\${sample}.Aligned.out.bam
+  # Do not count a BAM that STAR did not actually produce -- that is how the
+  # first run generated empty tables and still reported success.
+  if [ ! -s "\$BAM" ]; then
+    echo "[endo] \$sample: STAR produced no BAM -- SKIPPING (will show as missing)"
+    rm -f fastq/r1.gz fastq/r2.gz; continue
+  fi
   featureCounts -a ref/hg38_rmsk_TE.gtf -o locus/\${sample}.featureCounts.txt \
-      -M --fraction -O -T \$THREADS -p --countReadPairs -s 0 -t exon -g transcript_id "\$BAM"
+      -M --fraction -O -T \$THREADS -p --countReadPairs -s 0 -t exon -g transcript_id "\$BAM" \
+    || echo "[endo] \$sample: locus featureCounts failed"
   featureCounts -a ref/hg38_rmsk_TE.gtf -o counts/\${sample}.subfam.txt \
-      -M --fraction -O -T \$THREADS -p --countReadPairs -s 0 -t exon -g gene_id "\$BAM"
-  awk 'BEGIN{FS=OFS="\t"} /^#/{next} \$1=="Geneid"{print "gene/TE","count";next} NF>1{printf "%s\t%.0f\n",\$1,\$NF}' \
-      counts/\${sample}.subfam.txt > counts/\${sample}.cntTable
+      -M --fraction -O -T \$THREADS -p --countReadPairs -s 0 -t exon -g gene_id "\$BAM" \
+    || echo "[endo] \$sample: subfamily featureCounts failed"
+  if [ -s counts/\${sample}.subfam.txt ]; then
+    awk 'BEGIN{FS=OFS="\t"} /^#/{next} \$1=="Geneid"{print "gene/TE","count";next} NF>1{printf "%s\t%.0f\n",\$1,\$NF}' \
+        counts/\${sample}.subfam.txt > counts/\${sample}.cntTable
+  fi
   rm -f "\$BAM" fastq/r1.gz fastq/r2.gz
-  gcloud storage cp locus/\${sample}.featureCounts.txt "\$BUCKET/results/locus/" --quiet || true
-  gcloud storage cp counts/\${sample}.cntTable "\$BUCKET/results/counts/" --quiet || true
+  # only publish non-empty outputs
+  [ -s locus/\${sample}.featureCounts.txt ] && gcloud storage cp locus/\${sample}.featureCounts.txt "\$BUCKET/results/locus/" --quiet || true
+  [ -s counts/\${sample}.cntTable ] && gcloud storage cp counts/\${sample}.cntTable "\$BUCKET/results/counts/" --quiet || true
   echo "[endo] \$sample OK"
 done
+
+NOK=\$(ls locus/*.featureCounts.txt 2>/dev/null | wc -l)
+echo "[endo] samples with counts: \$NOK"
+[ "\$NOK" -gt 0 ] || fail "no sample produced counts -- nothing to merge"
 
 # ---- merge + summarise ----
 mark merge
@@ -341,8 +440,16 @@ python3 summarize_te_timepoints.py --counts \$WORK/counts --manifest manifest.ts
     --families \$FAMILIES --sample-col 1 --group-col 2 \
     --out te_timepoint_summary.tsv || true
 
+# Gate on real content: a header-only file is a failure, not a result.
+LOCI=\$(( \$(grep -c . locus_expression.tsv 2>/dev/null || echo 1) - 1 ))
+echo "[endo] locus_expression.tsv data rows: \$LOCI"
+[ "\$LOCI" -gt 0 ] || fail "locus_expression.tsv has no data rows (samples counted: \$NOK)"
+
 mark upload
-gcloud storage cp locus_expression.tsv te_timepoint_summary.tsv "\$BUCKET/results/" --quiet
+gcloud storage cp locus_expression.tsv "\$BUCKET/results/" --quiet
+[ -s te_timepoint_summary.tsv ] && gcloud storage cp te_timepoint_summary.tsv "\$BUCKET/results/" --quiet
+echo "\$LOCI loci from \$NOK/\$(( \$(grep -c . manifest.tsv) - 1 )) samples" \
+  | gcloud storage cp - "\$BUCKET/results/RUN_SUMMARY.txt" --quiet || true
 mark DONE
 echo "[endo] complete \$(date)"
 # trap 'finish' deletes the instance here
