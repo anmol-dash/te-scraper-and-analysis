@@ -219,6 +219,8 @@ if [ "${2:-}" != "--yes" ]; then
   case "$ans" in y|Y|yes) ;; *) echo "  aborted; nothing created."; exit 0 ;; esac
 fi
 
+echo "  clearing stale progress markers from any previous run ..."
+gcloud storage rm -r "$BUCKET/progress" --project "$PROJECT" 2>/dev/null || true
 echo "  ensuring bucket ..."
 gcloud storage buckets describe "$BUCKET" --project "$PROJECT" >/dev/null 2>&1 \
   || gcloud storage buckets create "$BUCKET" --project "$PROJECT" --location=US --quiet
@@ -304,10 +306,29 @@ mark boot
 mark tools
 curl -fsSL -o bin/STAR https://raw.githubusercontent.com/alexdobin/STAR/2.7.11b/bin/Linux_x86_64_static/STAR
 chmod +x bin/STAR
-curl -fsSL -o subread.tar.gz https://downloads.sourceforge.net/project/subread/subread-2.0.6/subread-2.0.6-Linux-x86_64.tar.gz
-tar xzf subread.tar.gz && cp subread-2.0.6-Linux-x86_64/bin/featureCounts bin/ && chmod +x bin/featureCounts
+# featureCounts: use Debian's package, NOT the SourceForge tarball. That binary
+# is "statically linked, for GNU/Linux 2.6.18" -- an ancient glibc build that
+# segfaults instantly on Debian 12, which boots with vsyscall=none. It crashed
+# on `-v` at this stage and then once per sample, wasting an alignment each time.
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq && apt-get install -y -qq subread || true
 export PATH=\$WORK/bin:\$PATH
-STAR --version; featureCounts -v 2>&1 | head -1
+if ! command -v featureCounts >/dev/null 2>&1; then
+  echo "[endo] apt subread unavailable; falling back to the SourceForge build"
+  curl -fsSL -o subread.tar.gz https://downloads.sourceforge.net/project/subread/subread-2.0.6/subread-2.0.6-Linux-x86_64.tar.gz
+  tar xzf subread.tar.gz && cp subread-2.0.6-Linux-x86_64/bin/featureCounts bin/ && chmod +x bin/featureCounts
+fi
+
+# GATE the tools before spending an hour on an index and 14 alignments. The
+# previous run printed STAR's version, printed NOTHING for featureCounts, and
+# carried on regardless -- every sample then died in the counting step.
+STAR --version >/dev/null 2>&1 || fail "STAR will not run on this VM"
+echo "[endo] STAR \$(STAR --version)"
+FC_VER=\$(featureCounts -v 2>&1 | tr -d '\\0' | grep -i featureCounts | head -1)
+[ -n "\$FC_VER" ] || fail "featureCounts will not run on this VM (segfault or missing). \\
+Debian's 'subread' package is the supported source here; the SourceForge static \\
+build targets glibc 2.6.18 and dies under vsyscall=none."
+echo "[endo] \$FC_VER  (\$(command -v featureCounts))"
 
 # ---- references (cached in the bucket: a re-run skips the slow parts) ----
 mark refs
