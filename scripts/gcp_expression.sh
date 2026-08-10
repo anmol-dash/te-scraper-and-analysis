@@ -357,9 +357,15 @@ if gcloud storage cp "\$BUCKET/cache/star_hg38.tar" - --quiet 2>/dev/null | tar 
    && [ -s star_hg38/genomeParameters.txt ]; then
   echo "[endo] STAR index from bucket cache"
 else
+  # STAR caps itself at ~31 GB by default, below what this build needs. Size the
+  # limit from the machine, leaving 6 GB for the OS.
+  RAMB=\$(( \$(awk '/MemTotal/{print \$2}' /proc/meminfo) * 1024 - 6000000000 ))
+  echo "[endo] genomeGenerate --limitGenomeGenerateRAM \$RAMB"
   STAR --runMode genomeGenerate --runThreadN \$THREADS --genomeDir \$WORK/ref/star_hg38 \
        --genomeFastaFiles \$WORK/ref/hg38.fa \$SJDB --outFileNamePrefix \$WORK/ref/idx_ \
-    || fail "STAR genomeGenerate failed (see log)"
+       --limitGenomeGenerateRAM \$RAMB \
+    || { dmesg 2>/dev/null | grep -i "killed process" | tail -2;
+         fail "STAR genomeGenerate failed. A 'Killed' line above means the VM ran out of RAM -- needs >=64 GB (MACHINE=n2-standard-16)."; }
   require star_hg38/genomeParameters.txt 100 "STAR index"
   tar cf - -C \$WORK/ref star_hg38 | gcloud storage cp - "\$BUCKET/cache/star_hg38.tar" --quiet 2>/dev/null || true
 fi
