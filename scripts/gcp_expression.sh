@@ -32,10 +32,13 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 PROJECT=${PROJECT:-$(gcloud config get-value project 2>/dev/null)}
 ZONE=${ZONE:-us-central1-a}
 VM=${VM:-endo-expression}
-# n2-standard-8: 8 vCPU / 32 GB. STAR needs ~30 GB resident for hg38, so 32 GB
-# is the smallest shape that works; the 8 vCPUs are what make the 14 alignments
-# finish in hours rather than a day.
-MACHINE=${MACHINE:-n2-standard-8}
+# n2-standard-16: 16 vCPU / 64 GB.
+# 32 GB is NOT enough: genomeGenerate got 51 min in and was OOM-killed during
+# "generating Suffix Array index" (STAR's ~32 GB figure is for ALIGNMENT; the
+# index build with --sjdbGTFfile annotations needs appreciably more). 64 GB
+# removes that risk, and the extra threads roughly halve alignment time, so the
+# job finishes sooner for about the same total spend.
+MACHINE=${MACHINE:-n2-standard-16}
 DISK_GB=${DISK_GB:-200}          # hg38 3 + STAR index 30 + fastq 65 + slack
 MAX_HOURS=${MAX_HOURS:-10}       # hard server-side deletion deadline
 BUCKET=${BUCKET:-gs://${PROJECT}-endo-expression}
@@ -57,10 +60,10 @@ if [ "$cmd" = "estimate" ]; then
 import sys
 machine, disk, maxh = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
 # us-central1 spot list prices, Aug 2026 (approximate, for sizing only)
-spot = {"n2-standard-8": 0.097, "n2-standard-16": 0.194, "e2-standard-8": 0.080}
+spot = {"n2-standard-8": 0.097, "n2-standard-16": 0.194, "n2-highmem-8": 0.131}
 rate = spot.get(machine, 0.10)
 disk_hr = disk * 0.10 / 730          # pd-balanced ~$0.10/GB-month
-run = 6.0                             # realistic runtime
+run = 4.0                             # realistic runtime (16 vCPU)
 print(f"  machine {machine} (spot)      ${rate:.3f}/h")
 print(f"  disk    {disk} GB pd-balanced  ${disk_hr:.3f}/h")
 print(f"  ingress from ENA               $0 (inbound is free)")
