@@ -309,9 +309,14 @@ chmod +x bin/STAR
 # featureCounts: use Debian's package, NOT the SourceForge tarball. That binary
 # is "statically linked, for GNU/Linux 2.6.18" -- an ancient glibc build that
 # segfaults instantly on Debian 12, which boots with vsyscall=none. It crashed
-# on `-v` at this stage and then once per sample, wasting an alignment each time.
+# on \`-v\` at this stage and then once per sample, wasting an alignment each time.
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq && apt-get install -y -qq subread || true
+# aria2   -- resumable multi-stream download (the FASTQ fix, see fetch_pair)
+# sra-toolkit -- fasterq-dump, for the AWS SRA mirror fallback
+# pigz    -- parallel gzip, to recompress that fallback's output
+# All three are optional: each has a curl/gzip path behind it, so a failed apt
+# cannot sink the run. Only subread is load-bearing, and it is gated below.
+apt-get update -qq && apt-get install -y -qq subread aria2 sra-toolkit pigz || true
 export PATH=\$WORK/bin:\$PATH
 if ! command -v featureCounts >/dev/null 2>&1; then
   echo "[endo] apt subread unavailable; falling back to the SourceForge build"
@@ -393,6 +398,142 @@ fi
 require star_hg38/genomeParameters.txt 100 "STAR index"
 require star_hg38/SA 1000000 "STAR suffix array"
 
+# ---- FASTQ acquisition -----------------------------------------------------
+# The previous run lost all 28 FASTQ files to "transfer closed with N bytes
+# remaining", then to hard 403s. Three separate mistakes, all fixed here:
+#
+#   1. \`curl --retry\` RESTARTS a dead transfer from byte 0. ENA drops long TLS
+#      transfers, so 11 attempts x 2.3 GB each moved ~3 MB and got nowhere --
+#      and the hammering is what earned us the 403s on the later samples.
+#      Resume is mandatory: aria2 -c, or curl -C -.
+#   2. curl's exit status was never checked, so a 3 MB stub was handed to STAR
+#      ("unexpected end of file" -> "quality string length is not equal to
+#      sequence length"). ENA publishes fastq_bytes and fastq_md5; verify.
+#   3. Both mates were fetched CONCURRENTLY, doubling the per-IP connection
+#      pressure that triggered the throttling. One at a time.
+#
+# This mirrors scripts/download_fastq_ena.sh, which already pulls much larger
+# CCLE runs off ENA reliably using exactly this resume-and-verify loop.
+fsize() { wc -c < "\$1" 2>/dev/null | tr -d ' ' || echo 0; }
+
+ena_lookup() {   # <run> -> "urls<TAB>bytes<TAB>md5s" (';'-separated pairs)
+  local run="\$1" info attempt
+  for attempt in 1 2 3 4 5; do
+    info=\$(curl -sS --fail --connect-timeout 20 --max-time 120 \
+      "https://www.ebi.ac.uk/ena/portal/api/filereport?accession=\${run}&result=read_run&fields=fastq_ftp,fastq_bytes,fastq_md5&format=tsv" \
+      2>/dev/null | awk -F'\t' 'NR==2{print \$2"\t"\$3"\t"\$4}')
+    [ -n "\$(printf '%s' "\$info" | cut -f1)" ] && { printf '%s' "\$info"; return 0; }
+    echo "[endo]   ENA lookup \$run failed (\$attempt/5); retrying" >&2
+    sleep \$(( attempt * 10 ))
+  done
+  return 1
+}
+
+get_one() {   # <url> <out> <want_bytes> <md5> -- resumable + verified
+  local url="\$1" out="\$2" want="\$3" md5="\$4" have prev=-1 stalled=0 attempt got
+  want=\${want:-0}
+  for attempt in \$(seq 1 40); do
+    have=\$(fsize "\$out")
+    [ "\$want" -gt 0 ] && [ "\$have" -ge "\$want" ] && break
+    # A run of attempts that move zero bytes means blocked or throttled, not
+    # flaky. Retrying then just reprints the same error 40 times (the lesson
+    # already learned in download_fastq_ena.sh).
+    if [ "\$have" -le "\$prev" ]; then stalled=\$(( stalled + 1 )); else stalled=0; fi
+    if [ "\$stalled" -ge 5 ]; then
+      echo "[endo]   stalled: 5 attempts moved no bytes (\$have/\$want)"; break
+    fi
+    prev=\$have
+    echo "[endo]   [\$attempt] \$(basename "\$out"): \$have / \$want bytes"
+    if command -v aria2c >/dev/null 2>&1; then
+      # -x4 not -x16: modest parallelism resumes fast without re-tripping the
+      # per-IP limit that blocked the last run.
+      # --allow-overwrite=true is REQUIRED alongside -c: with =false and no
+      # .aria2 control file (the usual case after a killed transfer) aria2c
+      # refuses the existing partial outright instead of resuming it. Same
+      # combination download_fastq_ena.sh already uses against ENA.
+      aria2c -x4 -s4 -c --max-tries=3 --retry-wait=15 --timeout=60 \
+             --summary-interval=0 --console-log-level=warn \
+             --allow-overwrite=true --auto-file-renaming=false \
+             -d "\$(dirname "\$out")" -o "\$(basename "\$out")" "\$url" || true
+    else
+      curl -fsSL -C - -o "\$out" "\$url" --connect-timeout 30 \
+           --speed-limit 2000 --speed-time 120 \
+           --retry 3 --retry-delay 15 --retry-all-errors || true
+    fi
+    sleep 5
+  done
+  have=\$(fsize "\$out")
+  if [ "\$want" -gt 0 ] && [ "\$have" -lt "\$want" ]; then
+    echo "[endo]   SHORT \$(basename "\$out"): \$have/\$want bytes"; return 1
+  fi
+  if [ -n "\$md5" ]; then
+    got=\$(md5sum "\$out" 2>/dev/null | awk '{print \$1}')
+    [ "\$got" = "\$md5" ] || { echo "[endo]   MD5 MISMATCH \$(basename "\$out")"; return 1; }
+    echo "[endo]   md5 ok \$(basename "\$out") (\$have bytes)"
+  else
+    # No md5 published: at minimum prove the gzip stream is complete, which is
+    # the specific corruption that reached STAR last time.
+    gzip -t "\$out" 2>/dev/null || { echo "[endo]   gzip -t FAILED \$(basename "\$out")"; return 1; }
+    echo "[endo]   gzip ok \$(basename "\$out") (\$have bytes)"
+  fi
+  return 0
+}
+
+get_from_sra() {   # <run> -- AWS SRA Open Data mirror; a DIFFERENT provider, so
+                   # an ENA-side block or throttle cannot take it out too.
+  local run="\$1"
+  command -v fasterq-dump >/dev/null 2>&1 || { echo "[endo]   no fasterq-dump; cannot use the SRA mirror"; return 1; }
+  echo "[endo]   falling back to the SRA Open Data mirror (AWS, public, no credentials)"
+  curl -fsSL -C - -o "fastq/\${run}.sra" \
+       "https://sra-pub-run-odp.s3.amazonaws.com/sra/\${run}/\${run}" \
+       --connect-timeout 30 --speed-limit 2000 --speed-time 120 \
+       --retry 10 --retry-delay 15 --retry-all-errors || { echo "[endo]   SRA mirror download failed"; return 1; }
+  fasterq-dump --split-files --threads \$THREADS --outdir fastq \
+               --temp fastq "fastq/\${run}.sra" || { echo "[endo]   fasterq-dump failed"; return 1; }
+  rm -f "fastq/\${run}.sra"
+  [ -s "fastq/\${run}_1.fastq" ] && [ -s "fastq/\${run}_2.fastq" ] || return 1
+  # leave them uncompressed; STAR reads them with cat and they are deleted after
+  mv "fastq/\${run}_1.fastq" fastq/r1.fq && mv "fastq/\${run}_2.fastq" fastq/r2.fq
+  R1=fastq/r1.fq; R2=fastq/r2.fq; RDCMD=cat
+  return 0
+}
+
+fetch_pair() {   # <run> -- sets R1/R2/RDCMD on success
+  local run="\$1" info urls bytes md5s u1 u2 b1 b2 m1 m2
+  R1=""; R2=""; RDCMD=cat
+  # A previous run may have parked verified copies here; free recovery path.
+  if gcloud storage cp "\$BUCKET/cache/fastq/\${run}_1.fastq.gz" fastq/r1.gz --quiet 2>/dev/null \
+  && gcloud storage cp "\$BUCKET/cache/fastq/\${run}_2.fastq.gz" fastq/r2.gz --quiet 2>/dev/null \
+  && gzip -t fastq/r1.gz 2>/dev/null && gzip -t fastq/r2.gz 2>/dev/null; then
+    echo "[endo]   FASTQ pair from bucket cache"
+    R1=fastq/r1.gz; R2=fastq/r2.gz; RDCMD=zcat; return 0
+  fi
+  rm -f fastq/r1.gz fastq/r2.gz
+  if info=\$(ena_lookup "\$run"); then
+    urls=\$(printf '%s' "\$info" | cut -f1)
+    bytes=\$(printf '%s' "\$info" | cut -f2)
+    md5s=\$(printf '%s' "\$info" | cut -f3)
+    u1=\${urls%%;*}; u2=\${urls##*;}
+    # A single-file (unpaired) run makes both of these the SAME url -- which
+    # would silently align one mate against itself. Only accept a real pair.
+    if [ -n "\$u1" ] && [ "\$u1" != "\$u2" ]; then
+      b1=\${bytes%%;*}; b2=\${bytes##*;}
+      m1=\${md5s%%;*};  m2=\${md5s##*;}
+      if get_one "https://\$u1" fastq/r1.gz "\$b1" "\$m1" \
+      && get_one "https://\$u2" fastq/r2.gz "\$b2" "\$m2"; then
+        R1=fastq/r1.gz; R2=fastq/r2.gz; RDCMD=zcat; return 0
+      fi
+      echo "[endo]   ENA transfer did not verify"
+    else
+      echo "[endo]   ENA reports no paired FASTQ for \$run"
+    fi
+  else
+    echo "[endo]   ENA metadata lookup failed for \$run"
+  fi
+  rm -f fastq/r1.gz fastq/r2.gz
+  get_from_sra "\$run"
+}
+
 # ---- manifest ----
 cd \$WORK
 gcloud storage cp "\$BUCKET/input/manifest.tsv" manifest.tsv --quiet
@@ -400,47 +541,89 @@ gcloud storage cp "\$BUCKET/input/summarize_te_timepoints.py" . --quiet
 
 # ---- per sample: stream FASTQ from ENA, align, count, delete ----
 mark align
-tail -n +2 manifest.tsv | while IFS=\$'\t' read -r sample tp run rest; do
+: > failed_samples.txt
+DL_FAILS=0
+# NOTE: process substitution, not "tail | while". A pipeline puts the loop in a
+# subshell, where DL_FAILS cannot persist and fail() cannot stop the run.
+while IFS=\$'\t' read -r sample tp run rest; do
   [ -z "\${run:-}" ] && continue
   [ -s "locus/\${sample}.featureCounts.txt" ] && { echo "[endo] \$sample done"; continue; }
   echo "[endo] === \$sample (\$run) ==="
-  info=\$(curl -sS --retry 5 "https://www.ebi.ac.uk/ena/portal/api/filereport?accession=\${run}&result=read_run&fields=fastq_ftp&format=tsv" | awk 'NR==2{print \$2}')
-  [ -z "\$info" ] && { echo "[endo] \$sample: no ENA metadata, skipping"; continue; }
-  u1=\${info%%;*}; u2=\${info##*;}
-  curl -fsSL --retry 10 --retry-all-errors -o fastq/r1.gz "https://\$u1" &
-  curl -fsSL --retry 10 --retry-all-errors -o fastq/r2.gz "https://\$u2" &
-  wait
-  STAR --runThreadN \$THREADS --genomeDir ref/star_hg38 \
-       --readFilesIn fastq/r1.gz fastq/r2.gz --readFilesCommand zcat \
+  rm -f fastq/r1.gz fastq/r2.gz fastq/r1.fq fastq/r2.fq "fastq/\${run}"*
+
+  if ! fetch_pair "\$run"; then
+    echo "[endo] \$sample: FASTQ unavailable from ENA AND the SRA mirror"
+    echo "\$sample download" >> failed_samples.txt
+    DL_FAILS=\$(( DL_FAILS + 1 ))
+    # Do not spend 40 minutes per sample rediscovering the same block. This is
+    # what turned one network problem into a 5-hour, 14-sample, zero-output run.
+    [ "\$DL_FAILS" -ge 3 ] && fail "3 consecutive samples failed to download from both
+  ENA and the AWS SRA mirror. That is a network/throttling problem, not a
+  per-sample one, and the remaining samples would fail the same way.
+  Re-run later (references and the STAR index are cached, so it restarts in
+  minutes), or seed \$BUCKET/cache/fastq/ with <RUN>_1.fastq.gz / <RUN>_2.fastq.gz."
+    continue
+  fi
+  DL_FAILS=0
+
+  # STAR's exit status is authoritative. Last run ignored it and counted the
+  # 8 KB partial BAM that STAR leaves behind when it dies mid-write.
+  if ! STAR --runThreadN \$THREADS --genomeDir ref/star_hg38 \
+       --readFilesIn "\$R1" "\$R2" --readFilesCommand \$RDCMD \
        --outSAMtype BAM Unsorted --outFileNamePrefix bam/\${sample}. \
-       --outFilterMultimapNmax 100 --winAnchorMultimapNmax 100 --outSAMprimaryFlag AllBestScore
+       --outFilterMultimapNmax 100 --winAnchorMultimapNmax 100 --outSAMprimaryFlag AllBestScore; then
+    echo "[endo] \$sample: STAR exited non-zero -- refusing to count a partial BAM"
+    echo "\$sample star" >> failed_samples.txt
+    rm -f bam/\${sample}.Aligned.out.bam "\$R1" "\$R2"; continue
+  fi
   BAM=bam/\${sample}.Aligned.out.bam
-  # Do not count a BAM that STAR did not actually produce -- that is how the
-  # first run generated empty tables and still reported success.
-  if [ ! -s "\$BAM" ]; then
-    echo "[endo] \$sample: STAR produced no BAM -- SKIPPING (will show as missing)"
-    rm -f fastq/r1.gz fastq/r2.gz; continue
+  # STAR can also exit 0 having read almost nothing (a truncated gz that happens
+  # to end on a record boundary). Three samples did exactly that: "finished
+  # mapping" in under a second, then featureCounts found no read pairs.
+  NIN=\$(awk -F'\t' '/Number of input reads/{gsub(/[ \t]/,"",\$2); print \$2}' \
+        bam/\${sample}.Log.final.out 2>/dev/null); NIN=\${NIN:-0}
+  if [ ! -s "\$BAM" ] || [ "\$NIN" -lt 100000 ]; then
+    echo "[endo] \$sample: STAR read only \$NIN input reads -- input was truncated, skipping"
+    echo "\$sample truncated(\$NIN reads)" >> failed_samples.txt
+    rm -f "\$BAM" "\$R1" "\$R2"; continue
   fi
-  featureCounts -a ref/hg38_rmsk_TE.gtf -o locus/\${sample}.featureCounts.txt \
-      -M --fraction -O -T \$THREADS -p --countReadPairs -s 0 -t exon -g transcript_id "\$BAM" \
-    || echo "[endo] \$sample: locus featureCounts failed"
-  featureCounts -a ref/hg38_rmsk_TE.gtf -o counts/\${sample}.subfam.txt \
-      -M --fraction -O -T \$THREADS -p --countReadPairs -s 0 -t exon -g gene_id "\$BAM" \
-    || echo "[endo] \$sample: subfamily featureCounts failed"
-  if [ -s counts/\${sample}.subfam.txt ]; then
-    awk 'BEGIN{FS=OFS="\t"} /^#/{next} \$1=="Geneid"{print "gene/TE","count";next} NF>1{printf "%s\t%.0f\n",\$1,\$NF}' \
-        counts/\${sample}.subfam.txt > counts/\${sample}.cntTable
+  echo "[endo] \$sample: STAR input reads \$NIN"
+
+  # Both featureCounts runs are load-bearing; a failure must not reach "OK".
+  # Delete the stub on failure so it cannot be mistaken for a completed sample
+  # by the resume check above or counted in NOK below.
+  if ! featureCounts -a ref/hg38_rmsk_TE.gtf -o locus/\${sample}.featureCounts.txt \
+      -M --fraction -O -T \$THREADS -p --countReadPairs -s 0 -t exon -g transcript_id "\$BAM"; then
+    echo "[endo] \$sample: locus featureCounts FAILED"
+    rm -f locus/\${sample}.featureCounts.txt
+    echo "\$sample featurecounts-locus" >> failed_samples.txt
+    rm -f "\$BAM" "\$R1" "\$R2"; continue
   fi
-  rm -f "\$BAM" fastq/r1.gz fastq/r2.gz
-  # only publish non-empty outputs
-  [ -s locus/\${sample}.featureCounts.txt ] && gcloud storage cp locus/\${sample}.featureCounts.txt "\$BUCKET/results/locus/" --quiet || true
+  if ! featureCounts -a ref/hg38_rmsk_TE.gtf -o counts/\${sample}.subfam.txt \
+      -M --fraction -O -T \$THREADS -p --countReadPairs -s 0 -t exon -g gene_id "\$BAM"; then
+    echo "[endo] \$sample: subfamily featureCounts FAILED"
+    rm -f locus/\${sample}.featureCounts.txt counts/\${sample}.subfam.txt
+    echo "\$sample featurecounts-subfam" >> failed_samples.txt
+    rm -f "\$BAM" "\$R1" "\$R2"; continue
+  fi
+  awk 'BEGIN{FS=OFS="\t"} /^#/{next} \$1=="Geneid"{print "gene/TE","count";next} NF>1{printf "%s\t%.0f\n",\$1,\$NF}' \
+      counts/\${sample}.subfam.txt > counts/\${sample}.cntTable
+  rm -f "\$BAM" "\$R1" "\$R2"
+  gcloud storage cp locus/\${sample}.featureCounts.txt "\$BUCKET/results/locus/" --quiet || true
   [ -s counts/\${sample}.cntTable ] && gcloud storage cp counts/\${sample}.cntTable "\$BUCKET/results/counts/" --quiet || true
-  echo "[endo] \$sample OK"
-done
+  echo "[endo] \$sample OK (\$NIN reads counted)"
+done < <(tail -n +2 manifest.tsv)
 
 NOK=\$(ls locus/*.featureCounts.txt 2>/dev/null | wc -l)
-echo "[endo] samples with counts: \$NOK"
-[ "\$NOK" -gt 0 ] || fail "no sample produced counts -- nothing to merge"
+# wc -l, not \`grep -c . || echo 0\`: grep -c prints "0" AND exits 1 on an empty
+# file, so the || fires too and the variable becomes "0\n0", which then blows up
+# every arithmetic test that touches it.
+NFAIL=\$(wc -l < failed_samples.txt 2>/dev/null | tr -d ' '); NFAIL=\${NFAIL:-0}
+echo "[endo] samples with counts: \$NOK   failed: \$NFAIL"
+if [ "\$NFAIL" -gt 0 ]; then
+  echo "[endo] per-sample failures:"; sed 's/^/[endo]   /' failed_samples.txt
+fi
+[ "\$NOK" -gt 0 ] || fail "no sample produced counts -- nothing to merge (per-sample reasons are in the log)"
 
 # ---- merge + summarise ----
 mark merge
@@ -478,15 +661,17 @@ python3 summarize_te_timepoints.py --counts \$WORK/counts --manifest manifest.ts
     --out te_timepoint_summary.tsv || true
 
 # Gate on real content: a header-only file is a failure, not a result.
-LOCI=\$(( \$(grep -c . locus_expression.tsv 2>/dev/null || echo 1) - 1 ))
+LOCI=\$(wc -l < locus_expression.tsv 2>/dev/null | tr -d ' '); LOCI=\$(( \${LOCI:-1} - 1 ))
 echo "[endo] locus_expression.tsv data rows: \$LOCI"
 [ "\$LOCI" -gt 0 ] || fail "locus_expression.tsv has no data rows (samples counted: \$NOK)"
 
 mark upload
 gcloud storage cp locus_expression.tsv "\$BUCKET/results/" --quiet
 [ -s te_timepoint_summary.tsv ] && gcloud storage cp te_timepoint_summary.tsv "\$BUCKET/results/" --quiet
-echo "\$LOCI loci from \$NOK/\$(( \$(grep -c . manifest.tsv) - 1 )) samples" \
-  | gcloud storage cp - "\$BUCKET/results/RUN_SUMMARY.txt" --quiet || true
+NTOT=\$(wc -l < manifest.tsv | tr -d ' '); NTOT=\$(( \${NTOT:-1} - 1 ))
+{ echo "\$LOCI loci from \$NOK/\$NTOT samples"
+  [ "\$NFAIL" -gt 0 ] && { echo "\$NFAIL sample(s) failed:"; sed 's/^/  /' failed_samples.txt; }
+} | gcloud storage cp - "\$BUCKET/results/RUN_SUMMARY.txt" --quiet || true
 mark DONE
 echo "[endo] complete \$(date)"
 # trap 'finish' deletes the instance here
