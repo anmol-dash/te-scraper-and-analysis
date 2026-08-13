@@ -30,7 +30,16 @@ set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 PROJECT=${PROJECT:-$(gcloud config get-value project 2>/dev/null)}
+# Capacity for large instances is PER-ZONE and moves around by the hour:
+# us-central1-a returned ZONE_RESOURCE_POOL_EXHAUSTED for n2-standard-16 on
+# 2026-08-13, and that same contention is almost certainly why the SPOT VM there
+# was reclaimed 5 min into the previous run. So try a list, not one zone.
+# The bucket is US multi-region, so any US zone reads the 31 GB index cache at
+# full speed with no egress charge -- zone choice costs nothing here.
 ZONE=${ZONE:-us-central1-a}
+ZONES=${ZONES:-"$ZONE us-central1-b us-central1-c us-central1-f
+                us-east1-b us-east1-c us-east1-d us-east4-a us-east4-b
+                us-west1-a us-west1-b us-west1-c"}
 VM=${VM:-endo-expression}
 # n2-standard-16: 16 vCPU / 64 GB.
 # 32 GB is NOT enough: genomeGenerate got 51 min in and was OOM-killed during
@@ -45,6 +54,13 @@ MACHINE=${MACHINE:-n2-standard-16}
 # dollars. STANDARD removes preemption entirely; --max-run-duration still caps
 # the spend either way.
 PROVISIONING=${PROVISIONING:-STANDARD}
+# Machine-type fallbacks, tried within each zone. Every one of these has >= 64 GB
+# RAM and that is not negotiable: STAR loads the ~31 GB hg38 index into memory to
+# ALIGN, so a 32 GB machine OOMs. (64 GB was originally chosen for genomeGenerate,
+# which is now cached and skipped -- but alignment still needs the index
+# resident.) Fewer vCPUs just means slower, so highmem-8 is an acceptable last
+# resort; less memory is not.
+MACHINES=${MACHINES:-"$MACHINE n2d-standard-16 e2-standard-16 c3-standard-22 n2-highmem-8"}
 DISK_GB=${DISK_GB:-200}          # hg38 3 + STAR index 30 + fastq 65 + slack
 # Hard server-side deletion deadline. 18, not 10: 14 samples x ~40 min is ~10 h,
 # so a 10 h cap was set exactly at the expected runtime and would have killed the
@@ -61,6 +77,17 @@ LOCAL_OUT=${LOCAL_OUT:-$HOME/endo/expression}
 say() { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
 die() { echo "FATAL: $*" >&2; exit 1; }
 [ -n "$PROJECT" ] || die "no GCP project set (gcloud config set project ...)"
+
+# The VM is not necessarily in $ZONE any more: 'up' falls through a list of zones
+# looking for capacity. Ask where it actually landed instead of assuming -- above
+# all so 'down' can never report "nothing to delete" while a VM bills away in
+# another zone.
+vm_zone() {
+  local z
+  z=$(gcloud compute instances list --project "$PROJECT" --filter="name=$VM" \
+      --format="value(zone.basename())" 2>/dev/null | head -1)
+  printf '%s' "${z:-$ZONE}"
+}
 
 cmd=${1:-help}
 
@@ -103,20 +130,25 @@ fi
 # Deliberately first among the action verbs, and safe to run at any time.
 if [ "$cmd" = "down" ] || [ "$cmd" = "stop" ]; then
   say "down -- deleting everything"
-  echo "  project: $PROJECT   zone: $ZONE"
-  if gcloud compute instances describe "$VM" --zone "$ZONE" --project "$PROJECT" >/dev/null 2>&1; then
+  DZ=$(vm_zone)
+  echo "  project: $PROJECT   zone: $DZ"
+  if gcloud compute instances describe "$VM" --zone "$DZ" --project "$PROJECT" >/dev/null 2>&1; then
     echo "  deleting VM $VM (and its boot disk) ..."
-    gcloud compute instances delete "$VM" --zone "$ZONE" --project "$PROJECT" --quiet \
+    gcloud compute instances delete "$VM" --zone "$DZ" --project "$PROJECT" --quiet \
       && echo "  VM deleted"
   else
-    echo "  VM $VM: not present (nothing to delete)"
+    echo "  VM $VM: not present in any zone (nothing to delete)"
   fi
-  # orphaned disks, if the VM was created with a non-auto-delete disk
-  for d in $(gcloud compute disks list --project "$PROJECT" --filter="name~^${VM}" \
-             --format="value(name)" 2>/dev/null || true); do
-    echo "  deleting orphaned disk $d ..."
-    gcloud compute disks delete "$d" --zone "$ZONE" --project "$PROJECT" --quiet || true
-  done
+  # Orphaned disks, if the VM was created with a non-auto-delete disk. Delete each
+  # in ITS OWN zone -- a zone-fallback run can leave a disk somewhere other than
+  # $ZONE, and a disk deleted nowhere is a disk that keeps billing.
+  gcloud compute disks list --project "$PROJECT" --filter="name~^${VM}" \
+      --format="value(name,zone.basename())" 2>/dev/null \
+  | while read -r d dz; do
+      [ -z "${d:-}" ] && continue
+      echo "  deleting orphaned disk $d in ${dz:-$DZ} ..."
+      gcloud compute disks delete "$d" --zone "${dz:-$DZ}" --project "$PROJECT" --quiet || true
+    done
   if [ "${2:-}" = "--all" ]; then
     echo "  deleting bucket $BUCKET (results included) ..."
     gcloud storage rm -r "$BUCKET" --project "$PROJECT" 2>/dev/null && echo "  bucket deleted" \
@@ -139,9 +171,12 @@ if [ "$cmd" = "status" ]; then
   # -- which is exactly what truncated this report.
   set +e +o pipefail
   say "status"
-  echo "  project $PROJECT   zone $ZONE   vm $VM"
+  echo "  project $PROJECT   vm $VM"
+  # No --zone filter, and zone is a column: 'up' may have placed the VM in any of
+  # $ZONES, and a status that only looked in one zone could report "nothing
+  # running" while it runs somewhere else.
   vms=$(gcloud compute instances list --project "$PROJECT" --filter="name=$VM" \
-    --format="table(name,status,machineType.basename(),scheduling.provisioningModel,lastStartTimestamp)" 2>/dev/null)
+    --format="table(name,zone.basename(),status,machineType.basename(),scheduling.provisioningModel,lastStartTimestamp)" 2>/dev/null)
   if [ -n "$vms" ]; then echo "$vms" | sed 's/^/  /'
   else echo "  VM: not present (nothing running, nothing billing)"; fi
   echo
@@ -191,7 +226,7 @@ if [ "$cmd" = "logfile" ]; then
 fi
 
 if [ "$cmd" = "logs" ]; then
-  gcloud compute instances get-serial-port-output "$VM" --zone "$ZONE" --project "$PROJECT" 2>/dev/null \
+  gcloud compute instances get-serial-port-output "$VM" --zone "$(vm_zone)" --project "$PROJECT" 2>/dev/null \
     | grep -aE 'startup-script|\[endo\]' | tail -"${2:-40}" \
     || echo "no serial output (VM may be gone -- check 'status')"
   exit 0
@@ -237,15 +272,19 @@ done
 echo "  APIs OK (compute, storage); billing linked"
 N=$(($(grep -c . "$MANIFEST") - 1))
 echo "  project  : $PROJECT"
-echo "  zone     : $ZONE"
+echo "  zones    : $(echo $ZONES | tr '\n' ' ' | awk '{print $1" (preferred), then "NF-1" more"}')"
 echo "  machine  : $MACHINE ($PROVISIONING)  disk ${DISK_GB} GB"
 [ "$PROVISIONING" = "SPOT" ] && echo "             ^ can be reclaimed by GCP mid-run (PROVISIONING=STANDARD to avoid)"
 echo "  samples  : $N   families: $FAMILIES"
 echo "  hard stop: ${MAX_HOURS}h, enforced by GCP (--max-run-duration)"
 echo "  bucket   : $BUCKET"
 echo
-if gcloud compute instances describe "$VM" --zone "$ZONE" --project "$PROJECT" >/dev/null 2>&1; then
-  die "$VM already exists. 'status' to inspect, 'down' to remove it first."
+# Search every zone, not just $ZONE -- a previous run may have landed elsewhere,
+# and creating a second VM because we looked in the wrong place would double the
+# spend silently.
+if [ -n "$(gcloud compute instances list --project "$PROJECT" --filter="name=$VM" \
+           --format='value(name)' 2>/dev/null)" ]; then
+  die "$VM already exists (in $(vm_zone)). 'status' to inspect, 'down' to remove it first."
 fi
 if [ "${2:-}" != "--yes" ]; then
   read -r -p "  Create this VM now? [y/N] " ans
@@ -739,18 +778,63 @@ echo "[endo] complete \$(date)"
 # trap 'finish' deletes the instance here
 STARTUP_EOF
 
-echo "  creating VM ..."
-gcloud compute instances create "$VM" \
-  --project="$PROJECT" --zone="$ZONE" --machine-type="$MACHINE" \
-  --provisioning-model="$PROVISIONING" --instance-termination-action=DELETE \
-  --max-run-duration="${MAX_HOURS}h" \
-  --image-family=debian-12 --image-project=debian-cloud \
-  --boot-disk-size=50GB --boot-disk-type=pd-balanced \
-  --create-disk="name=${VM}-work,size=${DISK_GB}GB,type=pd-balanced,auto-delete=yes" \
-  --scopes=cloud-platform \
-  --metadata-from-file=startup-script="$STARTUP" \
-  --labels=purpose=endo-expression
+# Walk machine types x zones until one has capacity. A single-zone create turns a
+# transient, purely local shortage into "run cancelled" -- which is what
+# ZONE_RESOURCE_POOL_EXHAUSTED did on 2026-08-13.
+# Machine-major, NOT zone-major: the preferred type is tried in every zone before
+# falling back to a smaller one. Zone is free to change (the bucket is US
+# multi-region), but dropping 16 vCPU -> 8 doubles the alignment time, so never
+# trade cores away just to stay in us-central1-a.
+echo "  creating VM (trying zones until one has capacity) ..."
+CREATED=""
+for m in $MACHINES; do
+  for z in $ZONES; do
+    printf '    %-16s %-18s ... ' "$z" "$m"
+    if out=$(gcloud compute instances create "$VM" \
+        --project="$PROJECT" --zone="$z" --machine-type="$m" \
+        --provisioning-model="$PROVISIONING" --instance-termination-action=DELETE \
+        --max-run-duration="${MAX_HOURS}h" \
+        --image-family=debian-12 --image-project=debian-cloud \
+        --boot-disk-size=50GB --boot-disk-type=pd-balanced \
+        --create-disk="name=${VM}-work,size=${DISK_GB}GB,type=pd-balanced,auto-delete=yes" \
+        --scopes=cloud-platform \
+        --metadata-from-file=startup-script="$STARTUP" \
+        --labels=purpose=endo-expression 2>&1); then
+      echo "CREATED"; CREATED="yes"; ZONE="$z"; MACHINE="$m"; break 2
+    fi
+    case "$out" in
+      # Quota is a project limit, not a shortage. Other zones in the SAME region
+      # will fail identically, so name it rather than hiding it behind "no
+      # capacity" -- a trial project can easily be capped below 16 vCPU.
+      *QUOTA_EXCEEDED*|*"Quota "*exceeded*)
+        echo "QUOTA (project limit, not capacity)"; QUOTA_HIT=1 ;;
+      *ZONE_RESOURCE_POOL_EXHAUSTED*|*"does not have enough resources"*|*"was not found"*|*"not available in"*)
+        echo "no capacity" ;;
+      *"already exists"*)
+        echo; die "$VM already exists (in some zone). 'status' to inspect, 'down' to remove it." ;;
+      *)
+        echo "failed"; echo "$out" | sed 's/^/      /' | tail -6 ;;
+    esac
+  done
+done
 rm -f "$STARTUP"
+if [ -z "$CREATED" ]; then
+  if [ -n "${QUOTA_HIT:-}" ]; then
+    die "blocked by QUOTA, not capacity -- more zones will not help.
+  Check the CPU quota for this project and raise it (free on a trial account):
+      https://console.cloud.google.com/iam-admin/quotas?project=$PROJECT
+  Filter for 'CPUs' in the regions above. n2-standard-16 needs 16 vCPU in one
+  region. Nothing was created and nothing is billing."
+  fi
+  die "no zone had capacity for any of: $MACHINES
+  Tried: $(echo $ZONES | tr '\n' ' ')
+  Nothing was created and nothing is billing. Options:
+    * wait and re-run -- capacity frees up, often within the hour
+    * widen the search:  ZONES='...' MACHINES='...' bash $0 up
+  Any replacement machine type MUST have >= 64 GB RAM: STAR holds the ~31 GB
+  hg38 index in memory while aligning, so a 32 GB instance will OOM."
+fi
+echo "  landed in $ZONE on $MACHINE"
 
 cat <<EOF
 
