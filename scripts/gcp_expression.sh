@@ -9,8 +9,8 @@
 # COST CONTROL IS THE POINT OF THIS SCRIPT. Four independent stops, so no
 # single failure can leave something running:
 #
-#   1. SPOT instance with --instance-termination-action=DELETE
-#      (cheapest tier; if preempted the VM is deleted, not left stopped)
+#   1. --instance-termination-action=DELETE (if the VM ends for any reason --
+#      preemption, the deadline -- it is deleted, never left stopped and billing)
 #   2. --max-run-duration=$MAX_HOURS  -- GCP itself deletes the VM at the
 #      deadline. This is enforced server-side and survives ANY failure of the
 #      guest, the network, or this laptop.
@@ -39,8 +39,19 @@ VM=${VM:-endo-expression}
 # removes that risk, and the extra threads roughly halve alignment time, so the
 # job finishes sooner for about the same total spend.
 MACHINE=${MACHINE:-n2-standard-16}
+# SPOT is ~4x cheaper but GCP can reclaim the VM at any moment with ~30 s notice
+# -- the 2026-08-12 run was preempted 5 min 14 s after boot, 54 s into aligning.
+# A 10h+ job is a lot of exposure, and on the $300 credit the difference is a few
+# dollars. STANDARD removes preemption entirely; --max-run-duration still caps
+# the spend either way.
+PROVISIONING=${PROVISIONING:-STANDARD}
 DISK_GB=${DISK_GB:-200}          # hg38 3 + STAR index 30 + fastq 65 + slack
-MAX_HOURS=${MAX_HOURS:-10}       # hard server-side deletion deadline
+# Hard server-side deletion deadline. 18, not 10: 14 samples x ~40 min is ~10 h,
+# so a 10 h cap was set exactly at the expected runtime and would have killed the
+# run just before it finished. Overrun is now recoverable (finished samples are
+# restored from the bucket on the next 'up'), but there is no reason to cut it
+# fine at ~$0.80/h against a $300 credit.
+MAX_HOURS=${MAX_HOURS:-18}
 BUCKET=${BUCKET:-gs://${PROJECT}-endo-expression}
 MANIFEST=${MANIFEST:-$REPO/scripts/srp090091_manifest.tsv}
 FAMILIES=${FAMILIES:-"LTR66 LTR10G"}
@@ -56,15 +67,19 @@ cmd=${1:-help}
 # ---------------------------------------------------------------- estimate --
 if [ "$cmd" = "estimate" ]; then
   say "cost estimate (nothing is created)"
-  python3 - "$MACHINE" "$DISK_GB" "$MAX_HOURS" <<'PY'
+  python3 - "$MACHINE" "$DISK_GB" "$MAX_HOURS" "$PROVISIONING" <<'PY'
 import sys
 machine, disk, maxh = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
-# us-central1 spot list prices, Aug 2026 (approximate, for sizing only)
+prov = sys.argv[4]
+# us-central1 list prices, Aug 2026 (approximate, for sizing only)
 spot = {"n2-standard-8": 0.097, "n2-standard-16": 0.194, "n2-highmem-8": 0.131}
-rate = spot.get(machine, 0.10)
+ondm = {"n2-standard-8": 0.389, "n2-standard-16": 0.777, "n2-highmem-8": 0.525}
+rate = (spot if prov == "SPOT" else ondm).get(machine, 0.10 if prov == "SPOT" else 0.40)
 disk_hr = disk * 0.10 / 730          # pd-balanced ~$0.10/GB-month
-run = 4.0                             # realistic runtime (16 vCPU)
-print(f"  machine {machine} (spot)      ${rate:.3f}/h")
+# 14 samples x ~40 min (download + align + 2x featureCounts over a 4.8M-feature
+# GTF). The old 4 h figure predated measuring a real sample.
+run = 10.0
+print(f"  machine {machine} ({prov.lower()})  ${rate:.3f}/h")
 print(f"  disk    {disk} GB pd-balanced  ${disk_hr:.3f}/h")
 print(f"  ingress from ENA               $0 (inbound is free)")
 print(f"  egress  results ~2 MB          ~$0.00")
@@ -72,13 +87,14 @@ print()
 print(f"  expected run ~{run:.0f} h  ->  ${(rate + disk_hr) * run:.2f}")
 print(f"  worst case  {maxh:.0f} h  ->  ${(rate + disk_hr) * maxh:.2f}  (hard cap: GCP deletes the VM)")
 print()
-print("  Free trial credit is $300, so the ceiling above is ~1% of it.")
+print(f"  Free trial credit is $300, so the ceiling above is ~{(rate + disk_hr) * maxh / 300 * 100:.0f}% of it.")
 PY
   echo
   echo "  Stops in force once running:"
   echo "    * GCP deletes the VM after ${MAX_HOURS}h no matter what (--max-run-duration)"
   echo "    * the VM deletes itself when the pipeline finishes"
-  echo "    * spot preemption deletes rather than stops it"
+  echo "    * any termination deletes rather than stops it (never left billing)"
+  echo "    * finished samples are in the bucket, so a restart resumes, not repeats"
   echo "    * bash scripts/gcp_expression.sh down   -- any time"
   exit 0
 fi
@@ -133,6 +149,22 @@ if [ "$cmd" = "status" ]; then
   marks=$(gcloud storage ls "$BUCKET/progress/" 2>/dev/null | sed 's|.*/|    |')
   if [ -n "$marks" ]; then echo "$marks"; else echo "    (none yet -- has 'up' been run?)"; fi
   echo
+  # Per-sample progress: the align stage is ~90% of the runtime and the stage
+  # markers cannot show movement inside it. Counted samples land in the bucket
+  # as they finish, so this is the real progress bar.
+  ndone=$(gcloud storage ls "$BUCKET/results/locus/" 2>/dev/null | grep -c featureCounts)
+  ntot=$(( $(grep -c . "$MANIFEST" 2>/dev/null || echo 1) - 1 ))
+  echo "  samples counted: ${ndone:-0} / $ntot   (these survive a restart)"
+  echo
+  # Preemption is not a pipeline failure and must not read like one. It also
+  # leaves NO other trace, so without this the report is just "markers stop
+  # partway, no VM" -- which tells you nothing about why.
+  if gcloud storage ls "$BUCKET/progress/PREEMPTED" >/dev/null 2>&1; then
+    echo "  *** PREEMPTED (spot capacity reclaimed by GCP -- not a pipeline error) ***"
+    gcloud storage cat "$BUCKET/progress/PREEMPTED" 2>/dev/null | sed 's/^/    /'
+    echo "    'up' resumes from the ${ndone:-0} sample(s) above."
+    echo "    PROVISIONING=STANDARD bash scripts/gcp_expression.sh up   # no preemption"
+  fi
   # FAILED must be reported before results: an empty file can still exist
   if gcloud storage ls "$BUCKET/progress/FAILED" >/dev/null 2>&1; then
     echo "  *** RUN FAILED ***"
@@ -206,7 +238,8 @@ echo "  APIs OK (compute, storage); billing linked"
 N=$(($(grep -c . "$MANIFEST") - 1))
 echo "  project  : $PROJECT"
 echo "  zone     : $ZONE"
-echo "  machine  : $MACHINE (SPOT)  disk ${DISK_GB} GB"
+echo "  machine  : $MACHINE ($PROVISIONING)  disk ${DISK_GB} GB"
+[ "$PROVISIONING" = "SPOT" ] && echo "             ^ can be reclaimed by GCP mid-run (PROVISIONING=STANDARD to avoid)"
 echo "  samples  : $N   families: $FAMILIES"
 echo "  hard stop: ${MAX_HOURS}h, enforced by GCP (--max-run-duration)"
 echo "  bucket   : $BUCKET"
@@ -260,6 +293,24 @@ finish() {   # self-delete on the way out, whatever the outcome
     || poweroff
 }
 trap finish EXIT
+
+# A spot preemption HARD-terminates the VM: the EXIT trap never runs, nothing is
+# uploaded, and the bucket simply stops updating -- indistinguishable from a hang
+# or a crash, which is exactly how the 2026-08-12 run looked (markers up to
+# 'align', no FAILED, no DONE, no endo.log). GCP flips this metadata key ~30 s
+# before pulling the plug; that is enough time to leave a note saying so.
+( while :; do
+    if [ "\$(curl -s -H Metadata-Flavor:Google \
+         http://metadata.google.internal/computeMetadata/v1/instance/preempted 2>/dev/null)" = "TRUE" ]; then
+      echo "preempted \$(date -Is) -- GCP reclaimed this SPOT VM; not a pipeline error.
+Finished samples are already in \$BUCKET/results/, and re-running 'up' resumes
+from them. PROVISIONING=STANDARD avoids preemption altogether." \
+        | gcloud storage cp - "\$BUCKET/progress/PREEMPTED" --quiet 2>/dev/null
+      gcloud storage cp /var/log/endo.log "\$BUCKET/progress/endo.log" --quiet 2>/dev/null
+      break
+    fi
+    sleep 10
+  done ) &
 
 mark() { echo "[endo] STAGE \$1"; echo "\$1 \$(date -Is)" | gcloud storage cp - "\$BUCKET/progress/\$1" --quiet 2>/dev/null || true; }
 
@@ -541,6 +592,17 @@ gcloud storage cp "\$BUCKET/input/summarize_te_timepoints.py" . --quiet
 
 # ---- per sample: stream FASTQ from ENA, align, count, delete ----
 mark align
+# Preemption, the max-run-duration cap, or any crash must not throw away samples
+# that already finished. Per-sample counts are uploaded the moment they complete,
+# so pull them back onto a fresh VM and let the skip check below treat them as
+# done. Without this, being preempted at sample 13 costs all 13 -- and a 14-sample
+# run is ~10 h, which is a long time to gamble on nothing going wrong.
+gcloud storage cp "\$BUCKET/results/locus/*.featureCounts.txt" locus/ --quiet 2>/dev/null || true
+gcloud storage cp "\$BUCKET/results/counts/*.cntTable" counts/ --quiet 2>/dev/null || true
+NRESUME=\$(ls locus/*.featureCounts.txt 2>/dev/null | wc -l | tr -d ' ')
+if [ "\${NRESUME:-0}" -gt 0 ]; then
+  echo "[endo] resuming: \$NRESUME sample(s) already counted, restored from the bucket"
+fi
 : > failed_samples.txt
 DL_FAILS=0
 # NOTE: process substitution, not "tail | while". A pipeline puts the loop in a
@@ -680,7 +742,7 @@ STARTUP_EOF
 echo "  creating VM ..."
 gcloud compute instances create "$VM" \
   --project="$PROJECT" --zone="$ZONE" --machine-type="$MACHINE" \
-  --provisioning-model=SPOT --instance-termination-action=DELETE \
+  --provisioning-model="$PROVISIONING" --instance-termination-action=DELETE \
   --max-run-duration="${MAX_HOURS}h" \
   --image-family=debian-12 --image-project=debian-cloud \
   --boot-disk-size=50GB --boot-disk-type=pd-balanced \
