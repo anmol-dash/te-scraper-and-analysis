@@ -24,6 +24,7 @@
 #   bash scripts/gcp_expression.sh up         # provision + start (asks first)
 #   bash scripts/gcp_expression.sh status     # where is it up to
 #   bash scripts/gcp_expression.sh logs       # tail the VM's progress
+#   bash scripts/gcp_expression.sh motifs     # JUST the TF-motif scan (~5 min)
 #   bash scripts/gcp_expression.sh fetch      # pull results down
 #   bash scripts/gcp_expression.sh down       # DELETE EVERYTHING (do this!)
 set -euo pipefail
@@ -71,6 +72,22 @@ MAX_HOURS=${MAX_HOURS:-18}
 BUCKET=${BUCKET:-gs://${PROJECT}-endo-expression}
 MANIFEST=${MANIFEST:-$REPO/scripts/srp090091_manifest.tsv}
 FAMILIES=${FAMILIES:-"LTR66 LTR10G"}
+# --- motif analysis (sequence-only; needs hg38 + the TE GTF, no RNA-seq) ------
+# JASPAR CORE vertebrates, non-redundant, "raw" PFM format -- the format
+# te_moods_scan.parse_jaspar_pfms expects. 284 KB, 879 matrices.
+JASPAR_URL=${JASPAR_URL:-https://jaspar.elixir.no/download/data/2024/CORE/JASPAR2024_CORE_vertebrates_non-redundant_pfms_jaspar.txt}
+# Dinucleotide-preserving shuffles per element. 50x over ~500 copies is ~6 MB of
+# background to scan, which MOODS does in seconds and which makes the Fisher
+# margins comfortable even for rare motifs.
+NSHUFFLE=${NSHUFFLE:-50}
+# MOTIFS_ONLY=1 -> do refs + motifs and stop, skipping the STAR index and all
+# alignment. Turns a ~10 h run into a ~5 min one when the motifs are all you
+# want. Set automatically by the 'motifs' verb.
+MOTIFS_ONLY=${MOTIFS_ONLY:-}
+# Progress markers live under their own prefix per run KIND. 'motifs' must not
+# clear (or overwrite) the markers and endo.log of a completed expression run --
+# 'up' wipes this prefix on start, and both runs write the same marker names.
+PROGRESS=${PROGRESS:-$BUCKET/progress}
 FILTER=${FILTER:-'^(LTR66|LTR10G)_dup'}
 LOCAL_OUT=${LOCAL_OUT:-$HOME/endo/expression}
 
@@ -91,6 +108,27 @@ vm_zone() {
 
 cmd=${1:-help}
 
+# ------------------------------------------------------------------ motifs --
+# 'motifs' is 'up' with the RNA-seq half switched off: references + motif scan,
+# then stop. It never builds or loads a STAR index, so the 64 GB floor does not
+# apply and a 4 vCPU box is plenty. Runs under its OWN VM name so it can be
+# launched while an expression run is in flight; 'down' deletes both (it matches
+# on the name prefix), so the cost guarantee is unchanged.
+if [ "$cmd" = "motifs" ]; then
+  MOTIFS_ONLY=1
+  VM="${VM}-motifs"
+  PROGRESS="$BUCKET/progress-motifs"
+  MACHINE=${MOTIF_MACHINE:-n2-standard-4}
+  MACHINES="$MACHINE n2-standard-8 e2-standard-4 n2d-standard-4"
+  MAX_HOURS=${MOTIF_MAX_HOURS:-2}
+  # 100 GB not 40: pd-balanced throughput scales with volume SIZE (~0.28 MB/s
+  # per GB), so a 40 GB volume reads at ~11 MB/s and the single linear pass over
+  # hg38.fa would become the slowest step in the whole job. Disk is ~$0.004 here.
+  DISK_GB=${MOTIF_DISK_GB:-100}
+  cmd=up
+  set -- up "${@:2}"
+fi
+
 # ---------------------------------------------------------------- estimate --
 if [ "$cmd" = "estimate" ]; then
   say "cost estimate (nothing is created)"
@@ -99,8 +137,8 @@ import sys
 machine, disk, maxh = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
 prov = sys.argv[4]
 # us-central1 list prices, Aug 2026 (approximate, for sizing only)
-spot = {"n2-standard-8": 0.097, "n2-standard-16": 0.194, "n2-highmem-8": 0.131}
-ondm = {"n2-standard-8": 0.389, "n2-standard-16": 0.777, "n2-highmem-8": 0.525}
+spot = {"n2-standard-4": 0.049, "n2-standard-8": 0.097, "n2-standard-16": 0.194, "n2-highmem-8": 0.131}
+ondm = {"n2-standard-4": 0.194, "n2-standard-8": 0.389, "n2-standard-16": 0.777, "n2-highmem-8": 0.525}
 rate = (spot if prov == "SPOT" else ondm).get(machine, 0.10 if prov == "SPOT" else 0.40)
 disk_hr = disk * 0.10 / 730          # pd-balanced ~$0.10/GB-month
 # 14 samples x ~40 min (download + align + 2x featureCounts over a 4.8M-feature
@@ -130,15 +168,21 @@ fi
 # Deliberately first among the action verbs, and safe to run at any time.
 if [ "$cmd" = "down" ] || [ "$cmd" = "stop" ]; then
   say "down -- deleting everything"
-  DZ=$(vm_zone)
-  echo "  project: $PROJECT   zone: $DZ"
-  if gcloud compute instances describe "$VM" --zone "$DZ" --project "$PROJECT" >/dev/null 2>&1; then
-    echo "  deleting VM $VM (and its boot disk) ..."
-    gcloud compute instances delete "$VM" --zone "$DZ" --project "$PROJECT" --quiet \
-      && echo "  VM deleted"
-  else
-    echo "  VM $VM: not present in any zone (nothing to delete)"
-  fi
+  echo "  project: $PROJECT"
+  # Prefix match, not an exact name: 'motifs' runs as ${VM}-motifs, and a 'down'
+  # that only knew the exact base name would leave it running and billing.
+  found=""
+  gcloud compute instances list --project "$PROJECT" --filter="name~^${VM}" \
+      --format="value(name,zone.basename())" 2>/dev/null \
+  | while read -r n nz; do
+      [ -z "${n:-}" ] && continue
+      echo "  deleting VM $n in $nz (and its boot disk) ..."
+      gcloud compute instances delete "$n" --zone "$nz" --project "$PROJECT" --quiet \
+        && echo "    deleted"
+    done
+  found=$(gcloud compute instances list --project "$PROJECT" --filter="name~^${VM}" \
+          --format="value(name)" 2>/dev/null)
+  [ -z "$found" ] && echo "  no VM matching ^${VM} in any zone (nothing running)"
   # Orphaned disks, if the VM was created with a non-auto-delete disk. Delete each
   # in ITS OWN zone -- a zone-fallback run can leave a disk somewhere other than
   # $ZONE, and a disk deleted nowhere is a disk that keeps billing.
@@ -175,7 +219,7 @@ if [ "$cmd" = "status" ]; then
   # No --zone filter, and zone is a column: 'up' may have placed the VM in any of
   # $ZONES, and a status that only looked in one zone could report "nothing
   # running" while it runs somewhere else.
-  vms=$(gcloud compute instances list --project "$PROJECT" --filter="name=$VM" \
+  vms=$(gcloud compute instances list --project "$PROJECT" --filter="name~^$VM" \
     --format="table(name,zone.basename(),status,machineType.basename(),scheduling.provisioningModel,lastStartTimestamp)" 2>/dev/null)
   if [ -n "$vms" ]; then echo "$vms" | sed 's/^/  /'
   else echo "  VM: not present (nothing running, nothing billing)"; fi
@@ -183,6 +227,8 @@ if [ "$cmd" = "status" ]; then
   echo "  progress markers in $BUCKET:"
   marks=$(gcloud storage ls "$BUCKET/progress/" 2>/dev/null | sed 's|.*/|    |')
   if [ -n "$marks" ]; then echo "$marks"; else echo "    (none yet -- has 'up' been run?)"; fi
+  mmarks=$(gcloud storage ls "$BUCKET/progress-motifs/" 2>/dev/null | sed 's|.*/|    |')
+  if [ -n "$mmarks" ]; then echo "  motif-run markers:"; echo "$mmarks"; fi
   echo
   # Per-sample progress: the align stage is ~90% of the runtime and the stage
   # markers cannot show movement inside it. Counted samples land in the bucket
@@ -206,6 +252,23 @@ if [ "$cmd" = "status" ]; then
     gcloud storage cat "$BUCKET/progress/FAILED" 2>/dev/null | sed 's/^/    /'
     echo "    full log: bash scripts/gcp_expression.sh logfile"
   fi
+  # Either prefix: a full 'up' writes this under progress/, the 'motifs' verb
+  # under progress-motifs/.
+  mf=""
+  for pfx in "$BUCKET/progress" "$BUCKET/progress-motifs"; do
+    gcloud storage ls "$pfx/MOTIFS_FAILED" >/dev/null 2>&1 && mf="$pfx/MOTIFS_FAILED"
+  done
+  if [ -n "$mf" ]; then
+    echo "  motif analysis: FAILED (the expression run was allowed to continue)"
+    gcloud storage cat "$mf" 2>/dev/null | sed 's/^/    /'
+  elif gcloud storage ls "$BUCKET/results/motifs/TOP_MOTIFS.txt" >/dev/null 2>&1; then
+    echo "  motifs: READY -- top hits per family:"
+    gcloud storage cat "$BUCKET/results/motifs/TOP_MOTIFS.txt" 2>/dev/null \
+      | sed -n '/^=== /,$p' | head -24 | sed 's/^/    /'
+  else
+    echo "  motifs: not yet"
+  fi
+  echo
   echo "  results:"
   if gcloud storage ls "$BUCKET/results/RUN_SUMMARY.txt" >/dev/null 2>&1; then
     echo -n "    "; gcloud storage cat "$BUCKET/results/RUN_SUMMARY.txt" 2>/dev/null
@@ -292,13 +355,17 @@ if [ "${2:-}" != "--yes" ]; then
 fi
 
 echo "  clearing stale progress markers from any previous run ..."
-gcloud storage rm -r "$BUCKET/progress" --project "$PROJECT" 2>/dev/null || true
+gcloud storage rm -r "$PROGRESS" --project "$PROJECT" 2>/dev/null || true
 echo "  ensuring bucket ..."
 gcloud storage buckets describe "$BUCKET" --project "$PROJECT" >/dev/null 2>&1 \
   || gcloud storage buckets create "$BUCKET" --project "$PROJECT" --location=US --quiet
 echo "  uploading manifest + helper ..."
 gcloud storage cp "$MANIFEST" "$BUCKET/input/manifest.tsv" --quiet
 gcloud storage cp "$REPO/scripts/summarize_te_timepoints.py" "$BUCKET/input/" --quiet
+# The motif stage reuses te_moods_scan.py (repo root) rather than reimplementing
+# MOODS, so both files have to travel to the VM together.
+gcloud storage cp "$REPO/scripts/te_motif_enrichment.py" "$BUCKET/input/" --quiet
+gcloud storage cp "$REPO/te_moods_scan.py" "$BUCKET/input/" --quiet
 
 STARTUP=$(mktemp)
 cat > "$STARTUP" <<STARTUP_EOF
@@ -312,6 +379,10 @@ echo "[endo] boot \$(date)"
 BUCKET="$BUCKET"
 FILTER='$FILTER'
 FAMILIES="$FAMILIES"
+JASPAR_URL="$JASPAR_URL"
+NSHUFFLE=$NSHUFFLE
+MOTIFS_ONLY="$MOTIFS_ONLY"
+PROG="$PROGRESS"
 MAX_HOURS=$MAX_HOURS
 THREADS=\$(nproc)
 WORK=/mnt/work
@@ -324,7 +395,7 @@ shutdown -P +\$(( MAX_HOURS * 60 - 15 )) "endo watchdog" || true
 finish() {   # self-delete on the way out, whatever the outcome
   local rc=\$?
   echo "[endo] finishing rc=\$rc \$(date)"
-  gcloud storage cp /var/log/endo.log "\$BUCKET/progress/endo.log" --quiet 2>/dev/null || true
+  gcloud storage cp /var/log/endo.log "\$PROG/endo.log" --quiet 2>/dev/null || true
   echo "[endo] deleting self"
   gcloud --quiet compute instances delete "\$(hostname)" \
     --zone="\$(curl -s -H Metadata-Flavor:Google \
@@ -344,14 +415,14 @@ trap finish EXIT
       echo "preempted \$(date -Is) -- GCP reclaimed this SPOT VM; not a pipeline error.
 Finished samples are already in \$BUCKET/results/, and re-running 'up' resumes
 from them. PROVISIONING=STANDARD avoids preemption altogether." \
-        | gcloud storage cp - "\$BUCKET/progress/PREEMPTED" --quiet 2>/dev/null
-      gcloud storage cp /var/log/endo.log "\$BUCKET/progress/endo.log" --quiet 2>/dev/null
+        | gcloud storage cp - "\$PROG/PREEMPTED" --quiet 2>/dev/null
+      gcloud storage cp /var/log/endo.log "\$PROG/endo.log" --quiet 2>/dev/null
       break
     fi
     sleep 10
   done ) &
 
-mark() { echo "[endo] STAGE \$1"; echo "\$1 \$(date -Is)" | gcloud storage cp - "\$BUCKET/progress/\$1" --quiet 2>/dev/null || true; }
+mark() { echo "[endo] STAGE \$1"; echo "\$1 \$(date -Is)" | gcloud storage cp - "\$PROG/\$1" --quiet 2>/dev/null || true; }
 
 # A stage that cannot succeed must STOP the run, not let it march on to DONE.
 # The first version of this script had no such guard: UCSC was unreachable, the
@@ -360,7 +431,7 @@ mark() { echo "[endo] STAGE \$1"; echo "\$1 \$(date -Is)" | gcloud storage cp - 
 # plausible-looking empty result.
 fail() {
   echo "[endo] FATAL: \$*"
-  echo "\$*" | gcloud storage cp - "\$BUCKET/progress/FAILED" --quiet 2>/dev/null || true
+  echo "\$*" | gcloud storage cp - "\$PROG/FAILED" --quiet 2>/dev/null || true
   exit 1
 }
 require() {   # require <file> <min-bytes> <what>
@@ -465,6 +536,56 @@ awk -F'gene_id "' '{split(\$2,a,"\"");print a[1]}' hg38_rmsk_TE.gtf | grep -cE "
 echo "[endo] TE GTF families of interest:"
 awk -F'gene_id "' '{split(\$2,a,"\"");print a[1]}' hg38_rmsk_TE.gtf \
   | grep -cE "^(\${FAMILIES// /|})\$" | xargs echo "[endo]   target-family GTF rows:"
+
+# ---- motifs: which TF motifs are enriched inside the target families -------
+# Sequence-only: needs hg38 and the TE GTF, both of which exist by now, and none
+# of the RNA-seq machinery. Deliberately placed BEFORE the STAR index and the
+# alignment, so the answer reaches the bucket within minutes of boot instead of
+# ~10 h later -- and so MOTIFS_ONLY can stop cleanly right here.
+mark motifs
+MOTIF_OK=""
+(
+  set -e                     # abort this block on the first error...
+  cd \$WORK
+  gcloud storage cp "\$BUCKET/input/te_motif_enrichment.py" . --quiet
+  gcloud storage cp "\$BUCKET/input/te_moods_scan.py" . --quiet
+  apt-get install -y -qq python3-pandas python3-scipy python3-numpy >/dev/null 2>&1 || true
+  # Debian 12 is PEP 668 "externally managed", so a plain pip install refuses.
+  pip3 install --break-system-packages --quiet MOODS-python >/dev/null 2>&1 \
+    || pip3 install --quiet MOODS-python >/dev/null 2>&1
+  python3 -c "import MOODS.scan, pandas, scipy"
+  if ! gcloud storage cp "\$BUCKET/cache/jaspar_pfms.txt" ref/jaspar_pfms.txt --quiet 2>/dev/null; then
+    curl -fsSL --retry 5 --retry-all-errors --connect-timeout 30 \
+         -o ref/jaspar_pfms.txt "\$JASPAR_URL"
+    gcloud storage cp ref/jaspar_pfms.txt "\$BUCKET/cache/jaspar_pfms.txt" --quiet 2>/dev/null || true
+  fi
+  echo "[endo] JASPAR PFMs: \$(grep -c '^>' ref/jaspar_pfms.txt) matrices"
+  python3 te_motif_enrichment.py \
+      --gtf ref/hg38_rmsk_TE.gtf --genome-fa ref/hg38.fa \
+      --jaspar-pfm ref/jaspar_pfms.txt --families \$FAMILIES \
+      --out-dir \$WORK/motifs --nshuffle \$NSHUFFLE --threads \$THREADS
+) && MOTIF_OK=1
+
+if [ -n "\$MOTIF_OK" ] && [ -s \$WORK/motifs/TOP_MOTIFS.txt ]; then
+  gcloud storage cp \$WORK/motifs/* "\$BUCKET/results/motifs/" --quiet 2>/dev/null || true
+  mark motifs_done
+  echo "[endo] motifs -> \$BUCKET/results/motifs/  (TOP_MOTIFS.txt is the readable one)"
+  sed -n '1,40p' \$WORK/motifs/TOP_MOTIFS.txt
+else
+  # The cheap sequence analysis must never sink the expensive expression run --
+  # but it must never fail silently either.
+  echo "[endo] WARNING: motif analysis failed (see above); continuing to expression"
+  echo "motif stage failed \$(date -Is)" \
+    | gcloud storage cp - "\$PROG/MOTIFS_FAILED" --quiet 2>/dev/null || true
+  [ -n "\$MOTIFS_ONLY" ] && fail "motif analysis failed, and MOTIFS_ONLY was set -- nothing else to do"
+fi
+
+if [ -n "\$MOTIFS_ONLY" ]; then
+  echo "[endo] MOTIFS_ONLY set -- skipping the STAR index and all alignment"
+  mark DONE
+  echo "[endo] complete \$(date)"
+  exit 0     # the EXIT trap deletes the instance
+fi
 
 mark star_index
 mkdir -p star_hg38
