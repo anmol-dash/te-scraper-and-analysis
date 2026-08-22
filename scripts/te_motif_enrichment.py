@@ -356,10 +356,24 @@ def main():
             res.to_csv(enr_path, sep="\t", index=False)
 
             hits_path = out_dir / f"motifs_{fam}_hits.tsv.gz"
-            hits.rename(columns={"chr": "element", "Motif_start": "elem_pos_start",
-                                 "Motif_end": "elem_pos_end"}).drop(
-                columns=[c for c in ("start", "stop", "Motif_chr") if c in hits.columns]
-            ).to_csv(hits_path, sep="\t", index=False, compression="gzip")
+            hits_out = hits.rename(columns={"chr": "element", "Motif_start": "elem_pos_start",
+                                            "Motif_end": "elem_pos_end"}).drop(
+                columns=[c for c in ("start", "stop", "Motif_chr") if c in hits.columns])
+            # The bases each match actually landed on. Free here -- the element
+            # sequences are already in memory and positions are element-relative
+            # -- and without it the only way to see what a TF matched is to
+            # re-extract from hg38, which needs the 3 GB FASTA. A '-' strand hit
+            # matched the reverse complement of the motif; the substring is
+            # written as it appears on the element, so revcomp it to compare
+            # against the matrix consensus (te_motif_groups.py does this).
+            if len(hits_out):
+                by_id = {eid: s for eid, s in zip(ids, seqs)}
+                hits_out["matched_seq"] = [
+                    by_id.get(e, "")[int(a):int(b)]
+                    for e, a, b in zip(hits_out["element"],
+                                       hits_out["elem_pos_start"],
+                                       hits_out["elem_pos_end"])]
+            hits_out.to_csv(hits_path, sep="\t", index=False, compression="gzip")
 
             sig = res[res["fdr_q"] < 0.05] if len(res) else res
             summary_lines.append(

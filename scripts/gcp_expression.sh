@@ -366,6 +366,10 @@ gcloud storage cp "$REPO/scripts/summarize_te_timepoints.py" "$BUCKET/input/" --
 # MOODS, so both files have to travel to the VM together.
 gcloud storage cp "$REPO/scripts/te_motif_enrichment.py" "$BUCKET/input/" --quiet
 gcloud storage cp "$REPO/te_moods_scan.py" "$BUCKET/input/" --quiet
+# Post-processing: collapses the redundant enrichment table into non-redundant
+# groups and prints each motif's consensus sequence. Reads only the stage's own
+# outputs, so a failure here cannot cost the scan.
+gcloud storage cp "$REPO/scripts/te_motif_groups.py" "$BUCKET/input/" --quiet
 
 STARTUP=$(mktemp)
 cat > "$STARTUP" <<STARTUP_EOF
@@ -564,6 +568,20 @@ MOTIF_OK=""
       --gtf ref/hg38_rmsk_TE.gtf --genome-fa ref/hg38.fa \
       --jaspar-pfm ref/jaspar_pfms.txt --families \$FAMILIES \
       --out-dir \$WORK/motifs --nshuffle \$NSHUFFLE --threads \$THREADS
+
+  # Collapse the table: JASPAR redundancy means N significant matrices are not
+  # N findings, and the per-matrix %copies double-counts one site. Grouping is
+  # seconds and reads only the files just written, so it runs inside the same
+  # block -- but it must not be able to lose an otherwise good scan, hence the
+  # '|| true'. The enrichment TSVs are already in \$WORK/motifs either way.
+  gcloud storage cp "\$BUCKET/input/te_motif_groups.py" . --quiet
+  for f in \$FAMILIES; do
+    python3 te_motif_groups.py \
+        --hits \$WORK/motifs/motifs_\${f}_hits.tsv.gz \
+        --enrichment \$WORK/motifs/motifs_\${f}_enrichment.tsv \
+        --jaspar-pfm ref/jaspar_pfms.txt --family \$f \
+        --out-dir \$WORK/motifs || true
+  done
 ) && MOTIF_OK=1
 
 if [ -n "\$MOTIF_OK" ] && [ -s \$WORK/motifs/TOP_MOTIFS.txt ]; then
