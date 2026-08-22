@@ -56,128 +56,26 @@ log = logging.getLogger("motif-groups")
 
 _BASES = "ACGT"
 
-# IUPAC ambiguity codes, keyed by the frozenset of bases they stand for.
-_IUPAC = {
-    frozenset("A"): "A", frozenset("C"): "C", frozenset("G"): "G", frozenset("T"): "T",
-    frozenset("AG"): "R", frozenset("CT"): "Y", frozenset("CG"): "S", frozenset("AT"): "W",
-    frozenset("GT"): "K", frozenset("AC"): "M",
-    frozenset("CGT"): "B", frozenset("AGT"): "D", frozenset("ACT"): "H", frozenset("ACG"): "V",
-    frozenset("ACGT"): "N",
-}
-
-_COMP = str.maketrans("ACGTRYSWKMBDHVNacgtryswkmbdhvn",
-                      "TGCAYRSWMKVHDBNtgcayrswmkvhdbn")
-
-
-def revcomp(s):
-    return s.translate(_COMP)[::-1]
-
-
-def iupac_from_freqs(freqs, cum=0.75):
-    """Collapse one PFM column to a single IUPAC letter.
-
-    Bases are taken in descending frequency until they account for `cum` of the
-    column. A column dominated by one base yields that base; a split column
-    yields the ambiguity code for the bases that carry it.
-    """
-    total = sum(freqs) or 1.0
-    order = sorted(range(4), key=lambda i: -freqs[i])
-    picked, acc = [], 0.0
-    for i in order:
-        picked.append(_BASES[i])
-        acc += freqs[i] / total
-        if acc >= cum:
-            break
-    return _IUPAC.get(frozenset(picked), "N")
-
-
-def column_info(freqs):
-    """Information content of a PFM column, in bits (max 2)."""
-    total = sum(freqs) or 1.0
-    ic = 2.0
-    for f in freqs:
-        p = f / total
-        if p > 0:
-            ic += p * math.log2(p)
-    return ic
+# Consensus construction is shared with te_moods_scan so that every motif output
+# in the repo spells sequences the same way; this module only arranges them.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from te_moods_scan import (parse_jaspar_pfms, consensus_from_counts,  # noqa: E402
+                           observed_consensus, revcomp_iupac, IUPAC_LEGEND)
 
 
 def parse_pfms(path):
-    """Return {label: {"id","name","consensus","core","width","ic"}}.
-
-    label is 'NAME (ID)' -- exactly the Motif_name written by te_moods_scan.
-    'core' is the consensus trimmed to the informative middle (>=1 bit), which
-    is what is worth eyeballing; flanking low-information columns are dropped.
-    """
+    """{label: {id,name,consensus,core,width,ic}} keyed by 'NAME (ID)'."""
     out = {}
-    cur_id = cur_name = None
-    rows = {}
-
-    def flush():
-        if cur_id is None or set(rows) != set(_BASES):
-            return
-        widths = {len(rows[b]) for b in _BASES}
-        if len(widths) != 1:
-            return
-        cols = list(zip(rows["A"], rows["C"], rows["G"], rows["T"]))
-        cons = "".join(iupac_from_freqs(c) for c in cols)
-        ics = [column_info(c) for c in cols]
-        lo, hi = 0, len(cols)
-        while lo < hi and ics[lo] < 1.0:
-            lo += 1
-        while hi > lo and ics[hi - 1] < 1.0:
-            hi -= 1
-        label = f"{cur_name or cur_id} ({cur_id})"
-        out[label] = {
-            "id": cur_id, "name": cur_name or cur_id,
-            "consensus": cons, "core": cons[lo:hi] or cons,
-            "width": len(cols), "ic": round(sum(ics), 2),
+    for p in parse_jaspar_pfms(path):
+        cons, core, bits = consensus_from_counts(p["counts"])
+        out[f'{p["name"]} ({p["id"]})'] = {
+            "id": p["id"], "name": p["name"], "consensus": cons, "core": core,
+            "width": len(p["counts"][0]), "ic": bits,
         }
-
-    with open(path) as fh:
-        for raw in fh:
-            line = raw.rstrip("\n")
-            if not line.strip():
-                continue
-            if line.startswith(">"):
-                flush()
-                parts = line[1:].strip().replace("\t", " ").split(None, 1)
-                cur_id = parts[0]
-                cur_name = parts[1].strip() if len(parts) > 1 else parts[0]
-                rows = {}
-                continue
-            base = line.strip()[0].upper()
-            if base not in _BASES:
-                continue
-            nums = line.replace("[", " ").replace("]", " ").strip()[1:].split()
-            try:
-                rows[base] = [float(x) for x in nums]
-            except ValueError:
-                pass
-    flush()
     if not out:
         raise ValueError(f"no PFMs parsed from {path}")
     return out
-
-
-def observed_consensus(seqs, cum=0.75, min_n=3):
-    """IUPAC consensus of the actual matched substrings (all same width)."""
-    seqs = [s for s in seqs if s and "N" not in s]
-    if len(seqs) < min_n:
-        return ""
-    w = max(set(len(s) for s in seqs), key=[len(s) for s in seqs].count)
-    seqs = [s for s in seqs if len(s) == w]
-    if len(seqs) < min_n:
-        return ""
-    cols = []
-    for i in range(w):
-        counts = [0.0] * 4
-        for s in seqs:
-            k = _BASES.find(s[i])
-            if k >= 0:
-                counts[k] += 1
-        cols.append(iupac_from_freqs(counts, cum))
-    return "".join(cols)
 
 
 # ── grouping ─────────────────────────────────────────────────────────────────
@@ -293,7 +191,7 @@ def main():
                 # a '-' strand hit matched the reverse complement; normalise so
                 # the observed consensus is comparable to the PFM consensus
                 if "Motif_strand" in ci and f[ci["Motif_strand"]] == "-":
-                    seq = revcomp(seq)
+                    seq = revcomp_iupac(seq)
                 matched[motif].append(seq)
     log.info("%s: %d hits over %d significant motifs%s", fam, len(rows), len(keep),
              " (with matched sequence)" if has_seq else "")

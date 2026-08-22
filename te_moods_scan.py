@@ -105,6 +105,136 @@ def parse_jaspar_pfms(path):
     return pfms
 
 
+# ── motif consensus sequences ───────────────────────────────────────────────
+# A motif table that names TFs but never shows the SEQUENCE they were matched on
+# is not usable on its own: the first question asked of one is always "what does
+# that TF actually bind here", and answering it otherwise means going back to
+# JASPAR by hand, matrix by matrix. Every motif output in this repo is expected
+# to carry a consensus column, so the code that builds one lives here -- beside
+# the PFM parser both motif paths already share -- rather than in any one caller.
+
+# IUPAC ambiguity codes, keyed by the set of bases they stand for.
+IUPAC = {
+    frozenset("A"): "A", frozenset("C"): "C", frozenset("G"): "G", frozenset("T"): "T",
+    frozenset("AG"): "R", frozenset("CT"): "Y", frozenset("CG"): "S", frozenset("AT"): "W",
+    frozenset("GT"): "K", frozenset("AC"): "M",
+    frozenset("CGT"): "B", frozenset("AGT"): "D", frozenset("ACT"): "H", frozenset("ACG"): "V",
+    frozenset("ACGT"): "N",
+}
+
+IUPAC_LEGEND = ("IUPAC: R=A/G Y=C/T S=C/G W=A/T K=G/T M=A/C "
+                "B=not A D=not C H=not G V=not T N=any")
+
+_COMP_IUPAC = str.maketrans("ACGTRYSWKMBDHVNacgtryswkmbdhvn",
+                            "TGCAYRSWMKVHDBNtgcayrswmkvhdbn")
+
+
+def revcomp_iupac(s):
+    """Reverse-complement, ambiguity codes included."""
+    return s.translate(_COMP_IUPAC)[::-1]
+
+
+def iupac_from_freqs(freqs, cum=0.75):
+    """Collapse one column of base frequencies (A,C,G,T order) to one letter.
+
+    Bases are taken in descending frequency until they account for `cum` of the
+    column, so a column dominated by one base gives that base and a split column
+    gives the ambiguity code for the bases carrying it.
+    """
+    total = sum(freqs) or 1.0
+    order = sorted(range(4), key=lambda i: -freqs[i])
+    picked, acc, last = [], 0.0, 0.0
+    for i in order:
+        picked.append(_BASES[i])
+        acc += freqs[i] / total
+        last = freqs[i]
+        if acc >= cum:
+            break
+    # Any base as frequent as the last one taken must come too, or where the cum
+    # threshold happens to fall decides the answer: a uniform column would stop
+    # after three equal bases and read 'V' when the honest answer is 'N'.
+    for i in order[len(picked):]:
+        if freqs[i] >= last:
+            picked.append(_BASES[i])
+    return IUPAC.get(frozenset(picked), "N")
+
+
+def column_info(freqs):
+    """Information content of one column, in bits (0 = uniform, 2 = fixed)."""
+    import math
+    total = sum(freqs) or 1.0
+    ic = 2.0
+    for f in freqs:
+        p = f / total
+        if p > 0:
+            ic += p * math.log2(p)
+    return ic
+
+
+def consensus_from_counts(counts, cum=0.75, min_bits=1.0):
+    """(consensus, core, info_bits) for one PFM's [[A..],[C..],[G..],[T..]].
+
+    `core` is the consensus trimmed to the informative middle: flanking columns
+    below min_bits are dropped, since a matrix's low-information tails are noise
+    to the eye and make two views of one site look unrelated.
+    """
+    cols = list(zip(*counts))
+    cons = "".join(iupac_from_freqs(c, cum) for c in cols)
+    ics = [column_info(c) for c in cols]
+    lo, hi = 0, len(cols)
+    while lo < hi and ics[lo] < min_bits:
+        lo += 1
+    while hi > lo and ics[hi - 1] < min_bits:
+        hi -= 1
+    return cons, (cons[lo:hi] or cons), round(sum(ics), 2)
+
+
+def pfm_consensus_map(pfm_path, cum=0.75, min_bits=1.0):
+    """{label: {id,name,consensus,core,width,info_bits}} for a JASPAR bundle.
+
+    Keyed by 'NAME (ID)' -- the same Motif_name scan_loci emits -- and also by
+    the bare matrix ID and bare TF name, so callers whose motif labels came from
+    a JASPAR BED track rather than from this scanner can still look one up.
+    """
+    out = {}
+    for p in parse_jaspar_pfms(pfm_path):
+        cons, core, bits = consensus_from_counts(p["counts"], cum, min_bits)
+        rec = {"id": p["id"], "name": p["name"], "consensus": cons, "core": core,
+               "width": len(p["counts"][0]), "info_bits": bits}
+        out[f'{p["name"]} ({p["id"]})'] = rec
+        out.setdefault(p["id"], rec)
+        out.setdefault(p["id"].split(".")[0], rec)
+        out.setdefault(p["name"], rec)
+        out.setdefault(p["name"].upper(), rec)
+    return out
+
+
+def observed_consensus(seqs, cum=0.75, min_n=3):
+    """IUPAC consensus of actual matched substrings -- what the copies REALLY have.
+
+    Sequences must already be oriented to the motif (reverse-complement '-'
+    strand matches first). Returns '' when there is too little to summarise.
+    """
+    seqs = [s.upper() for s in seqs if s]
+    seqs = [s for s in seqs if set(s) <= set(_BASES)]
+    if len(seqs) < min_n:
+        return ""
+    widths = {}
+    for s in seqs:
+        widths[len(s)] = widths.get(len(s), 0) + 1
+    w = max(widths, key=widths.get)
+    seqs = [s for s in seqs if len(s) == w]
+    if len(seqs) < min_n:
+        return ""
+    cols = []
+    for i in range(w):
+        counts = [0.0] * 4
+        for s in seqs:
+            counts[_BASES.index(s[i])] += 1
+        cols.append(iupac_from_freqs(counts, cum))
+    return "".join(cols)
+
+
 # ── MOODS scanner construction ──────────────────────────────────────────────
 
 def build_scanner(pfms, pvalue=1e-4, bg=None, pseudocount=0.8, window=7):

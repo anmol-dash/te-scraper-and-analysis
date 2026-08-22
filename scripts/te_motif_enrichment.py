@@ -255,11 +255,19 @@ def main():
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     import pandas as pd
     from scipy import stats as sstats
-    from te_moods_scan import scan_loci
+    from te_moods_scan import (scan_loci, pfm_consensus_map, observed_consensus,
+                               revcomp_iupac, IUPAC_LEGEND)
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     rng = random.Random(args.seed)
+
+    # The consensus sequence for every matrix, up front. A motif table that
+    # names TFs without showing the sequence they matched cannot be read on its
+    # own, so this is not optional output -- it goes in the main table.
+    cons_map = pfm_consensus_map(args.jaspar_pfm)
+    log.info("consensus sequences derived for %d matrices",
+             sum(1 for k in cons_map if k.endswith(")")))
 
     log.info("loading loci for %s from %s", ", ".join(args.families), args.gtf)
     fam_loci = load_family_loci(args.gtf, args.families)
@@ -322,6 +330,19 @@ def main():
             bg_cop = bg_hits.groupby("Motif_name")["chr"].nunique() if len(bg_hits) else {}
             bg_n = bg_hits["Motif_name"].value_counts() if len(bg_hits) else {}
 
+            # The bases every match actually landed on, per motif. '-' strand
+            # matches are reverse-complemented so the observed consensus is
+            # directly comparable to the matrix consensus rather than being its
+            # mirror image for half the hits.
+            by_id = {eid: s for eid, s in zip(ids, seqs)}
+            matched = defaultdict(list)
+            if len(hits):
+                for el, a0, b0, mname, mstrand in zip(
+                        hits["chr"], hits["Motif_start"], hits["Motif_end"],
+                        hits["Motif_name"], hits["Motif_strand"]):
+                    sub = by_id.get(el, "")[int(a0):int(b0)]
+                    matched[mname].append(revcomp_iupac(sub) if mstrand == "-" else sub)
+
             rows = []
             for motif in sorted(set(list(obs_cop.keys() if hasattr(obs_cop, "keys") else []))):
                 a = int(obs_cop.get(motif, 0))
@@ -334,8 +355,14 @@ def main():
                     _, p = sstats.fisher_exact([[a, b], [c, d]], alternative="greater")
                 except Exception:
                     p = 1.0
+                cm = cons_map.get(motif, {})
                 rows.append({
                     "motif": motif,
+                    # what the matrix binds, and what these copies actually have
+                    "consensus": cm.get("core", ""),
+                    "observed_consensus": observed_consensus(matched.get(motif, [])),
+                    "consensus_full": cm.get("consensus", ""),
+                    "motif_width": cm.get("width", ""),
                     "copies_with_hit": a,
                     "n_copies": n_real,
                     "pct_copies": round(100.0 * prev_o, 2),
@@ -385,13 +412,18 @@ def main():
                 f"  full table: {enr_path.name}\n")
             head = (sig if len(sig) else res).head(args.top)
             if len(head):
+                # 'binds' is the matrix consensus, 'observed' the bases these
+                # copies actually carry. Both are in the printed table because
+                # the TF name alone is the one thing nobody can act on.
                 summary_lines.append(
-                    f"  {'motif':<34}{'%copies':>9}{'%bg':>8}{'fold':>8}{'hits/kb':>9}{'q':>11}\n")
+                    f"  {'motif':<26}{'binds':<20}{'observed':<20}"
+                    f"{'%copies':>8}{'fold':>7}{'q':>10}\n")
                 for _, r in head.iterrows():
                     summary_lines.append(
-                        f"  {str(r['motif'])[:33]:<34}{r['pct_copies']:>9.1f}"
-                        f"{r['pct_copies_bg']:>8.2f}{r['fold_prevalence']:>8.1f}"
-                        f"{r['hits_per_kb']:>9.1f}{r['fdr_q']:>11.2e}\n")
+                        f"  {str(r['motif'])[:25]:<26}{str(r['consensus'])[:19]:<20}"
+                        f"{str(r['observed_consensus'])[:19]:<20}"
+                        f"{r['pct_copies']:>8.1f}{r['fold_prevalence']:>7.1f}"
+                        f"{r['fdr_q']:>10.1e}\n")
 
     banner = (
         "TOP MOTIFS BY FAMILY\n"
@@ -399,6 +431,9 @@ def main():
         f"JASPAR CORE vertebrates, MOODS p < {args.pvalue:g}, both strands.\n"
         "Enrichment is against a dinucleotide-preserving shuffle of the same\n"
         "copies, so GC/CpG content is controlled for and what remains is order.\n"
+        "\n'binds' is the JASPAR matrix consensus, trimmed to its informative\n"
+        "core; 'observed' is built from the bases these copies actually carry.\n"
+        f"{IUPAC_LEGEND}\n"
         "\nRead with three caveats:\n"
         "  * JASPAR is redundant -- adjacent rows are often one TF family, not\n"
         "    independent hits.\n"

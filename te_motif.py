@@ -21,6 +21,11 @@ Output:
     cluster_N_enrichment.csv       Fisher p-values per cluster
     enrichment_heatmap.png         -log10(p) heatmap across clusters
 
+Every table that names a motif also carries its SEQUENCE: a `consensus` column
+(IUPAC, trimmed to the matrix's informative core) and `consensus_full`. A TF name
+on its own cannot be acted on -- the next question is always what it binds -- so
+this is not optional output. The matrices are fetched once into --jaspar-dir.
+
 JASPAR BED resolution order (--jaspar-bed is optional; auto-download always works)
   1. --jaspar-bed FILE
   2. TE_JASPAR_<BUILD> environment variable
@@ -1587,6 +1592,76 @@ def _cluster_col(df):
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
+# ── motif consensus sequences ────────────────────────────────────────────────
+# This path finds motifs by intersecting a JASPAR BED track, so it never loads a
+# PFM and its tables name TFs without ever showing the sequence involved -- which
+# is the first thing anyone asks of them. The matrices are a 284 KB download, so
+# fetch them once and annotate every table rather than leaving the question open.
+
+JASPAR_PFM_URL = ("https://jaspar.elixir.no/download/data/2024/CORE/"
+                  "JASPAR2024_CORE_vertebrates_non-redundant_pfms_jaspar.txt")
+
+
+def resolve_motif_consensus(jaspar_dir):
+    """{motif label: consensus record} for annotating motif tables.
+
+    Looks for a PFM bundle already on disk (cache dir, repo, TE_JASPAR_PFM),
+    downloads it if absent. Returns {} rather than raising: a missing consensus
+    column must never be able to sink an analysis that otherwise succeeded.
+    """
+    try:
+        from te_moods_scan import pfm_consensus_map
+    except Exception as exc:
+        log.warning("consensus: te_moods_scan unavailable (%s); "
+                    "motif tables will not carry sequences", exc)
+        return {}
+
+    cands = []
+    env = os.environ.get("TE_JASPAR_PFM")
+    if env:
+        cands.append(Path(env))
+    cands += [
+        Path(jaspar_dir) / "jaspar_pfms.txt",
+        Path(__file__).resolve().parent / "JASPAR2026_CORE_vertebrates_non-redundant_pfms_jaspar.txt",
+    ]
+    for c in cands:
+        try:
+            if c.is_file() and c.stat().st_size > 1000:
+                m = pfm_consensus_map(c)
+                log.info("consensus: %d matrices from %s", len(m), c)
+                return m
+        except Exception as exc:
+            log.debug("consensus: %s unusable (%s)", c, exc)
+
+    dest = Path(jaspar_dir) / "jaspar_pfms.txt"
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if _curl_download(JASPAR_PFM_URL, dest) and dest.stat().st_size > 1000:
+            m = pfm_consensus_map(dest)
+            log.info("consensus: %d matrices downloaded to %s", len(m), dest)
+            return m
+    except Exception as exc:
+        log.warning("consensus: could not obtain JASPAR PFMs (%s); "
+                    "motif tables will not carry sequences", exc)
+    return {}
+
+
+def annotate_consensus(df, cons_map, motif_col):
+    """Insert consensus / consensus_full right after the motif-name column."""
+    if not cons_map or motif_col not in df.columns:
+        return df
+    labels = df[motif_col].astype(str)
+    core = labels.map(lambda m: cons_map.get(m, {}).get("core", ""))
+    full = labels.map(lambda m: cons_map.get(m, {}).get("consensus", ""))
+    df = df.copy()
+    df.insert(df.columns.get_loc(motif_col) + 1, "consensus", core)
+    df.insert(df.columns.get_loc("consensus") + 1, "consensus_full", full)
+    hit = int((core != "").sum())
+    if hit < len(df):
+        log.debug("consensus: matched %d/%d motif labels", hit, len(df))
+    return df
+
+
 def run_motif_analysis(input_csv, build, out_dir, jaspar_bed_arg,
                        jaspar_dir, p_threshold=0.05, force=False,
                        bed_input=None):
@@ -1824,6 +1899,12 @@ def run_motif_analysis(input_csv, build, out_dir, jaspar_bed_arg,
     else:
         df_ov = None
 
+    # Consensus sequences for every motif these tables name. Resolved out here,
+    # not inside the intersect branch below: that branch is skipped when a
+    # cached overlaps file is reused, and the Fisher stage annotates its results
+    # either way. Cheap and cached, so paying for it on both paths costs nothing.
+    cons_map = resolve_motif_consensus(jaspar_dir)
+
     if df_ov is None:
         t0 = time.time()
         scratch = os.environ.get("TMPDIR", str(out_dir / "tmp"))
@@ -1924,7 +2005,9 @@ def run_motif_analysis(input_csv, build, out_dir, jaspar_bed_arg,
         # Overall motif counts
         try:
             overall = df_ov["Motif_name"].value_counts()
-            overall.to_csv(motif_dir / "overall_motif_counts.csv")
+            overall_df = overall.rename_axis("Motif_name").reset_index(name="count")
+            annotate_consensus(overall_df, cons_map, "Motif_name").to_csv(
+                motif_dir / "overall_motif_counts.csv", index=False)
             log.info("%d unique motifs. Top 5: %s",
                      len(overall),
                      ", ".join(f"{k}={v}" for k, v in overall.head(5).items()))
@@ -1985,7 +2068,8 @@ def run_motif_analysis(input_csv, build, out_dir, jaspar_bed_arg,
                 if loci_per_cluster.get(row[cl_col]) else float("nan")
                 for _, row in per_cluster.iterrows()
             ]
-            per_cluster.to_csv(motif_dir / "cluster_motif_counts.csv", index=False)
+            annotate_consensus(per_cluster, cons_map, "Motif_name").to_csv(
+                motif_dir / "cluster_motif_counts.csv", index=False)
         except Exception as exc:
             log.warning("cluster_motif_counts.csv failed: %s", exc)
             log.debug(traceback.format_exc())
@@ -2051,6 +2135,7 @@ def run_motif_analysis(input_csv, build, out_dir, jaspar_bed_arg,
                 log.debug("    Cluster %d: tested %d/%d motifs ...", cid, m_i + 1, len(all_motifs))
 
         rdf = pd.DataFrame(results).sort_values("P_Value")
+        rdf = annotate_consensus(rdf, cons_map, "Motif")
         out_csv = enrich_dir / f"cluster_{cid}_enrichment.csv"
         try:
             rdf.to_csv(out_csv, index=False)
