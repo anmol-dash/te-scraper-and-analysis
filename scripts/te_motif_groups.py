@@ -161,7 +161,7 @@ def main():
     pfms = parse_pfms(args.jaspar_pfm)
     log.info("%s: %d PFM consensuses parsed", fam, len(pfms))
 
-    enr = pd.read_csv(args.enrichment, sep="\t")
+    enr = pd.read_csv(args.enrichment, sep="\t", float_precision="round_trip")
     sig = enr[enr["fdr_q"] < args.q].copy() if "fdr_q" in enr.columns else enr.copy()
     keep = set(sig["motif"])
     log.info("%s: %d motifs at FDR<%g of %d", fam, len(keep), args.q, len(enr))

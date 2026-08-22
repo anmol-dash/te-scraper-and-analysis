@@ -23,10 +23,16 @@ Method
   5. Per motif: prevalence across copies, hits/kb, fold vs background, Fisher
      exact p, Benjamini-Hochberg q.
 
-Outputs, per family, into --out-dir:
-  motifs_<FAM>_enrichment.tsv   ranked motif table
-  motifs_<FAM>_hits.tsv.gz      every copy x motif hit, element-relative pos
+Outputs into --out-dir:
+  MOTIF_SEQUENCES.tsv           EVERY motif and its sequence, all families, one
+                                row per motif x family -- the lookup table
+  motifs_<FAM>_enrichment.tsv   ranked motif table, per family
+  motifs_<FAM>_hits.tsv.gz      every copy x motif hit, with the matched bases
   TOP_MOTIFS.txt                human-readable summary across all families
+
+Every table naming a motif also carries its SEQUENCE: `consensus` (IUPAC, the
+matrix's informative core) and `observed_consensus` (built from the bases these
+copies actually carry). A TF name alone cannot be acted on.
 
 Limits this reports rather than hides:
   * JASPAR is redundant. Many matrices describe one TF family, so the top of
@@ -231,11 +237,78 @@ def benjamini_hochberg(pvals):
     return q
 
 
+def write_motif_sequences(out_dir, families, cons_map, pd):
+    """One file with every motif and its sequence, across all families.
+
+    The per-family tables answer "what is enriched in THIS family"; this answers
+    "what is motif X, and where did it turn up" in a single place, which is the
+    lookup anyone actually reaches for. Long format, one row per motif x family,
+    and it covers EVERY matrix in the scanned bundle -- including the ones with
+    no hit anywhere, since "we looked and it is not there" is also an answer and
+    a table missing those silently looks like they were never tested.
+
+    Built by reading the per-family enrichment TSVs back, so it can be rebuilt
+    from a finished run without rescanning (--combine-only).
+    """
+    out_dir = Path(out_dir)
+    per_fam = {}
+    for fam in families:
+        p = out_dir / f"motifs_{fam}_enrichment.tsv"
+        if p.exists():
+            # round_trip: pandas' default CSV float parser is fast but up to a
+            # couple of ULP off, so q-values re-read here would not be bit-exact
+            # against the table they came from. Nothing here turns on the last
+            # bit of a 1e-90 q-value, but two files disagreeing on the same
+            # number is the kind of thing that costs an afternoon later.
+            df = pd.read_csv(p, sep="\t", float_precision="round_trip")
+            per_fam[fam] = {r["motif"]: r for _, r in df.iterrows()}
+        else:
+            log.warning("combined table: %s missing, skipping %s", p.name, fam)
+    if not per_fam:
+        return None
+
+    labels = sorted(k for k in cons_map if k.endswith(")"))
+    rows = []
+    for fam, table in per_fam.items():
+        for label in labels:
+            cm = cons_map[label]
+            r = table.get(label)
+            rows.append({
+                "motif": label,
+                "tf_name": cm["name"],
+                "matrix_id": cm["id"],
+                "consensus": cm["core"],
+                "consensus_full": cm["consensus"],
+                "motif_width": cm["width"],
+                "info_bits": cm["info_bits"],
+                "family": fam,
+                "observed_consensus": (r["observed_consensus"] if r is not None
+                                       and isinstance(r["observed_consensus"], str) else ""),
+                "detected": "yes" if r is not None else "no",
+                "hits": int(r["hits"]) if r is not None else 0,
+                "copies_with_hit": int(r["copies_with_hit"]) if r is not None else 0,
+                "n_copies": int(r["n_copies"]) if r is not None else "",
+                "pct_copies": r["pct_copies"] if r is not None else 0.0,
+                "fold_prevalence": r["fold_prevalence"] if r is not None else "",
+                "fdr_q": r["fdr_q"] if r is not None else "",
+                "significant": ("yes" if (r is not None and float(r["fdr_q"]) < 0.05)
+                                else "no"),
+            })
+    df = pd.DataFrame(rows).sort_values(
+        ["family", "significant", "pct_copies"], ascending=[True, False, False])
+    path = out_dir / "MOTIF_SEQUENCES.tsv"
+    df.to_csv(path, sep="\t", index=False)
+    n_sig = int((df["significant"] == "yes").sum())
+    log.info("combined table: %s -- %d matrices x %d families = %d rows (%d significant)",
+             path.name, len(labels), len(per_fam), len(df), n_sig)
+    return path
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--gtf", required=True, help="rmsk-derived TE GTF")
-    ap.add_argument("--genome-fa", required=True, help="reference FASTA")
+    ap.add_argument("--gtf", help="rmsk-derived TE GTF")
+    ap.add_argument("--genome-fa", help="reference FASTA")
     ap.add_argument("--jaspar-pfm", required=True, help="JASPAR raw PFM bundle")
     ap.add_argument("--families", nargs="+", required=True)
     ap.add_argument("--out-dir", default="motifs")
@@ -248,7 +321,12 @@ def main():
     ap.add_argument("--threads", type=int, default=None)
     ap.add_argument("--top", type=int, default=25, help="rows per family in TOP_MOTIFS.txt")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--combine-only", action="store_true",
+                    help="rebuild MOTIF_SEQUENCES.tsv from the per-family tables "
+                         "already in --out-dir; no genome, no GTF, no rescan")
     args = ap.parse_args()
+    if not args.combine_only and not (args.gtf and args.genome_fa):
+        ap.error("--gtf and --genome-fa are required (unless --combine-only)")
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -268,6 +346,11 @@ def main():
     cons_map = pfm_consensus_map(args.jaspar_pfm)
     log.info("consensus sequences derived for %d matrices",
              sum(1 for k in cons_map if k.endswith(")")))
+
+    if args.combine_only:
+        p = write_motif_sequences(out_dir, args.families, cons_map, pd)
+        print(f"wrote {p}" if p else "nothing to combine")
+        return
 
     log.info("loading loci for %s from %s", ", ".join(args.families), args.gtf)
     fam_loci = load_family_loci(args.gtf, args.families)
@@ -440,6 +523,13 @@ def main():
         "  * A PWM match is a sequence match, NOT evidence of binding, and is\n"
         "    not tissue-specific on its own.\n"
         "  * Fragmented families depress %copies; read hits/kb alongside it.\n")
+
+    combined = write_motif_sequences(out_dir, args.families, cons_map, pd)
+    if combined:
+        summary_lines.append(
+            f"\nEvery motif and its sequence, all families in one table:\n"
+            f"  {combined.name}\n")
+
     (Path(args.out_dir) / "TOP_MOTIFS.txt").write_text(banner + "".join(summary_lines))
     print(banner + "".join(summary_lines))
 
