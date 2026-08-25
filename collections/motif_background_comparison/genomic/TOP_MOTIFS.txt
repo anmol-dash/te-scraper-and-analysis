@@ -1,0 +1,115 @@
+TOP MOTIFS BY FAMILY
+====================
+JASPAR CORE vertebrates, MOODS p < 0.0001, both strands.
+Enrichment is against a dinucleotide-preserving shuffle of the same
+copies, so GC/CpG content is controlled for and what remains is order.
+
+'binds' is the JASPAR matrix consensus, trimmed to its informative
+core; 'observed' is built from the bases these copies actually carry.
+IUPAC: R=A/G Y=C/T S=C/G W=A/T K=G/T M=A/C B=not A D=not C H=not G V=not T N=any
+
+Read with three caveats:
+  * JASPAR is redundant -- adjacent rows are often one TF family, not
+    independent hits.
+  * A PWM match is a sequence match, NOT evidence of binding, and is
+    not tissue-specific on its own.
+  * Fragmented families depress %copies; read hits/kb alongside it.
+
+=== LTR66 ===
+  405 copies scanned (94 skipped), median 226 bp, 122.1 kb
+  background: 25x length-matched random genomic intervals, family excluded (10125 sequences, 3052 kb)
+  148 motifs at FDR < 0.05 of 835 detected
+  full table: motifs_LTR66_enrichment.tsv
+  motif                     binds               observed             %copies   fold         q
+  GRHL2 (MA1105.3)          AACAGGTT            AACARGTT                46.2    7.5  2.5e-101
+  ZBTB6 (MA1581.2)          CTKGAGCC            YCTKGAGCC               48.4    6.3   2.4e-96
+  ESR2 (MA0258.2)           GGTCASVVWG          WGGTCAMCWWGTYYY         41.0    7.5   3.5e-88
+  SOX9 (MA0077.2)           ATTGT               CYATTGTT                40.7    7.5   9.6e-88
+  FOXB1 (MA0845.1)          GTMAAYA             TATRTATATAT             66.9    3.4   1.4e-86
+  ZNF341 (MA1655.2)         AACAGC              CAACAGCC                38.8    7.9   1.8e-85
+  SMAD2 (MA1964.2)          CCAGAC              CCAGAC                  52.1    4.7   1.6e-84
+  MSANTD3 (MA1523.2)        ACTC                CACTCAC                 32.1    9.5   3.4e-77
+  SOX13 (MA1120.2)          ACAATG              ACAATGG                 33.8    8.2   3.6e-75
+  SOX2 (MA0143.5)           ACAATG              ACAATGG                 33.8    8.2   3.6e-75
+  Sox3 (MA0514.3)           ACAATG              ACAATGG                 33.8    8.2   3.6e-75
+  FOXN3 (MA1489.1)          GTAAACAA            GTAAACAA                23.9   15.3   3.6e-71
+  Npas4 (MA1995.2)          CGTGAC              TCGTGAC                 17.8   36.0   1.4e-69
+  FOXA3 (MA1683.2)          GTAAACA             GTAAACA                 32.8    7.0   7.5e-66
+  FOXD1 (MA0031.2)          GTAAACA             GTAAACA                 32.8    7.0   7.5e-66
+  FOXI1 (MA0042.2)          GTAAACA             GTAAACA                 32.8    7.0   7.5e-66
+  FOXK1 (MA0852.3)          GTAAACA             GTAAACA                 32.8    7.0   7.5e-66
+  FOXK2 (MA1103.3)          TAAACA              GTAAACA                 32.8    7.0   7.5e-66
+  FOXL1 (MA0033.2)          TAAACA              GTAAACA                 32.8    7.0   7.5e-66
+  FOXO4 (MA0848.1)          GTAAACA             GTAAACA                 32.8    7.0   7.5e-66
+  FOXP1 (MA0481.4)          GTAAACA             GTAAACA                 32.8    7.0   7.5e-66
+  FOXP3 (MA0850.1)          RYAAAYA             GTAAACA                 32.8    7.0   7.5e-66
+  FOXP4 (MA2117.1)          TAAACA              GTAAACA                 32.8    7.0   7.5e-66
+  Foxf1 (MA1606.2)          TAAACA              GTAAACA                 32.8    7.0   7.5e-66
+  Foxo1 (MA0480.3)          GTAAACA             GTAAACA                 32.8    7.0   7.5e-66
+
+=== MER21C ===
+  5590 copies scanned (379 skipped), median 373 bp, 2411.1 kb
+  background: 25x length-matched random genomic intervals, family excluded (139750 sequences, 60277 kb)
+  344 motifs at FDR < 0.05 of 879 detected
+  full table: motifs_MER21C_enrichment.tsv
+  motif                     binds               observed             %copies   fold         q
+  RFX3 (MA0798.3)           GTTRCCATGGCAAC      GGTYDCCMKRRVAACC        19.4    5.8   0.0e+00
+  REL (MA0101.1)            GGRNWTTCC           KGGRRTTTCC              28.3    5.0   0.0e+00
+  RELA (MA0107.1)           GGRRTTTCC           KGGRRTTTCC              30.5    4.5   0.0e+00
+  ZNF682 (MA1599.2)         GCYAAGCCCC          KRMYMAGYCCC             22.6    3.7   0.0e+00
+  ZBTB24 (MA2330.1)         CAGGAC              YCCAGGAMCY              30.0    3.2   0.0e+00
+  ZNF707 (MA1715.1)         CCCCACTYCTGGT       CCCCACTYCWGRYRM         31.6    3.2   0.0e+00
+  Dux (MA0611.3)            GATTBAATCA          TGATTHAATCA             30.4    3.1   0.0e+00
+  POU6F1 (MA1549.2)         TAATGA              TAATGAG                 21.7    3.5  4.3e-299
+  ZNF667 (MA1984.2)         TAMRAGCWCA          TTARGRGCTCA             26.4    2.9  1.9e-293
+  OSR2 (MA1646.2)           CAGAAGC             HCAGAAGC                29.4    2.6  2.6e-282
+  ZNF341 (MA1655.2)         AACAGC              GAACAGCC                22.8    3.2  2.6e-276
+  ZNF148 (MA1653.2)         CCCCTCCC            CCCCTCCYYV              27.9    2.6  3.1e-257
+  ZNF282 (MA1154.2)         TTTCCCMYWACAC       SWKTCCCAYRASMCT         24.0    2.7  1.2e-234
+  NFYB (MA0502.3)           ATTGGCC             TCATTGGCC               20.6    3.0  6.5e-234
+  MEIS1 (MA1639.2)          ATMAATCA            MATMAATCA               27.4    2.5  2.0e-232
+  DUXA (MA0884.2)           TRAYTWARTYA         DTGATTWAATCAH           23.0    2.8  6.6e-231
+  KLF17 (MA1514.2)          CCACRCWCCC          VCCACMMHCCCMBY          23.0    2.7  5.0e-220
+  RFX1 (MA0509.3)           GTTGCCATGGYAAC      GGTTBYYMKRRVRACC        13.7    4.0  1.2e-209
+  PBX1 (MA0070.2)           ATCAATCA            ATCAATCAW               22.9    2.6  4.2e-209
+  DUX4 (MA0468.1)           AAYYYAATCA          KRAYTYAATCW             31.5    2.1  7.6e-195
+  STAT1 (MA0137.4)          TTCYRGGAA           TKCYRGGAA               29.2    2.1  1.7e-184
+  POU6F2 (MA0793.2)         CTMATTA             RYCTCATTA               22.3    2.5  4.6e-180
+  HAND2 (MA1638.2)          CAGATG              CAGATG                  41.6    1.7  1.4e-177
+  NR2C2 (MA0504.2)          GGTCARAGGKCR        RRGGKSARRGRBSR          24.0    2.3  7.0e-174
+  Six4 (MA2001.2)           AACCTGA             AACCTGA                 16.7    2.9  3.0e-172
+
+=== Harlequin-int ===
+  523 copies scanned (42 skipped), median 970 bp, 835.1 kb
+  background: 25x length-matched random genomic intervals, family excluded (13075 sequences, 20877 kb)
+  250 motifs at FDR < 0.05 of 879 detected
+  full table: motifs_Harlequin-int_enrichment.tsv
+  motif                     binds               observed             %copies   fold         q
+  Tfcp2l1 (MA0145.2)        CCRGYYHVRDCCRG      CCAGYVHMADCCWG          52.6    2.7   1.2e-57
+  MTF1 (MA0863.1)           TKTGCACACGKCMC      TKWGCACAYVKCAS          40.5    3.0   1.3e-47
+  GRHL1 (MA0647.2)          AACCGGTT            MAACMRGTTK              42.3    2.8   1.7e-44
+  TFAP2C (MA0815.1)         GCCCYBRGGGC         KSCCYYSRRGGSM           32.3    3.5   3.3e-43
+  TFAP2A (MA0872.1)         GCCCYBRGGGC         KSCCCYSRGGGSM           32.1    3.2   2.1e-39
+  TFAP2B (MA0813.1)         GCCCYBRRGGC         RSCCCYBRRGGSM           33.3    3.1   3.1e-38
+  TFCP2 (MA1968.2)          AACCGGWT            MAACYRGWT               35.0    2.8   1.3e-35
+  REL (MA0101.1)            GGRNWTTCC           KGGKMTTTYC              41.1    2.3   2.7e-32
+  SATB1 (MA1963.2)          CTAATAA             CTAATAA                 45.3    2.2   2.7e-32
+  HMBOX1 (MA0895.2)         TRGTTA              TAGTTAA                 38.4    2.3   1.4e-29
+  GRHL2 (MA1105.3)          AACAGGTT            ARCWGGTT                48.2    1.9   7.5e-27
+  ZIC1 (MA0696.1)           CCCCCYGCTGYG        BMCMCCMYRCKGTG          32.7    2.5   1.2e-26
+  VEZF1 (MA1578.2)          CCCCCC              CCCCCC                  42.3    2.0   3.8e-26
+  MYBL1 (MA0776.1)          CGTTAAC             AMAGTTAACRKT            19.7    3.6   9.5e-26
+  ETV5 (MA0765.4)           CCGGAAGT            MCCGGAARY               16.4    4.0   4.2e-24
+  TP63 (MA0525.2)           ACATGTYRKRACATGT    ARMAWGTTDWRACWTGTY      32.1    2.3   5.7e-24
+  NR4A1 (MA1112.3)          AAAGGTCA            AAAGGTYA                55.3    1.7   7.0e-24
+  ZIC4 (MA0751.2)           CCMCCYGYDG          SMCYCCMYRCKGTG          29.2    2.5   9.8e-24
+  IRF5 (MA1420.1)           GAAACCRA            YCAAAACCAAAAYY          37.5    2.1   4.2e-23
+  PLAGL2 (MA1548.2)         GGGCCCC             KGGCCCCC                27.7    2.5   1.9e-22
+  SMAD5 (MA1557.1)          GTCTAGAC            WGTSYRGACW              21.8    2.9   3.3e-22
+  ELK3 (MA0759.3)           CCGGAAGT            MCCGGAARY               16.1    3.5   1.6e-20
+  IRF4 (MA1419.2)           CGAAACCGAAAC        CAAAACCAAAAYYM          44.2    1.8   2.3e-20
+  SPDEF (MA0686.2)          AMCCGGATRT          WMCCGGAWRY              20.5    2.8   2.7e-19
+  FOXA3 (MA1683.2)          GTAAACA             GTAAACA                 37.7    1.9   2.7e-19
+
+Every motif and its sequence, all families in one table:
+  MOTIF_SEQUENCES.tsv

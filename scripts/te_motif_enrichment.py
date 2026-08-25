@@ -14,7 +14,14 @@ Method
      coordinates and orientation, never which motifs are found.)
   3. Scan copies against the JASPAR CORE PFM bundle with MOODS (p < 1e-4),
      reusing te_moods_scan.scan_loci.
-  4. Scan a DINUCLEOTIDE-PRESERVING shuffle of each copy as background.
+  4. Scan a background. Two are available (--background):
+       dinuc   (default) a DINUCLEOTIDE-PRESERVING shuffle of each copy
+       genomic length-matched random intervals sampled off-family
+     They answer different questions: the shuffle asks whether a motif is
+     explained by this family's own base composition; the genomic one asks
+     whether it is more common here than in average genomic sequence, and
+     does NOT control composition. Report which one produced a number.
+     On the default:
      This is the step that makes the answer mean anything. Raw motif counts in
      a GC-rich LTR are dominated by whichever matrices happen to like GC, and a
      mononucleotide shuffle does not control for that (CpG especially). The
@@ -198,6 +205,53 @@ def dinuc_shuffle(s, rng):
     return "".join(res)
 
 
+# ── genomic background ───────────────────────────────────────────────────────
+
+_PRIMARY = tuple("chr%s" % c for c in list(range(1, 23)) + ["X", "Y"])
+
+
+def sample_genomic_background(fh, idx, lens, n_each, rng, exclude,
+                              max_n_frac=0.2, max_tries=60):
+    """Length-matched random genomic intervals, one set of n_each per real copy.
+
+    The other background a reader can ask for: instead of asking "is this motif
+    explained by THIS sequence's own composition" (the dinucleotide shuffle),
+    it asks "is this motif more common here than in an average piece of the
+    genome". Both are legitimate and they answer different questions --- the
+    genomic one does NOT control for the family's base composition, so an
+    AT-rich family will show AT-rich matrices enriched by composition alone.
+    That is exactly why it is worth reporting next to the shuffle, not instead.
+
+    Intervals overlapping a copy of the family itself are rejected, as are
+    intervals that are mostly assembly gap.
+    """
+    chroms = [c for c in _PRIMARY if c in idx]
+    if not chroms:
+        chroms = list(idx.keys())
+    weights = [idx[c][3] for c in chroms]          # (offset, lb, lw, length)
+    out_ids, out_seqs = [], []
+    for i, L in enumerate(lens):
+        got = 0
+        for _ in range(n_each * max_tries):
+            if got >= n_each:
+                break
+            c = rng.choices(chroms, weights=weights, k=1)[0]
+            clen = idx[c][3]
+            if clen <= L:
+                continue
+            s0 = rng.randrange(1, clen - L + 1)
+            e0 = s0 + L - 1
+            if any(not (e0 < a or s0 > b) for a, b in exclude.get(c, ())):
+                continue
+            seq = fetch_seq(fh, idx, c, s0, e0)
+            if len(seq) < L or seq.count("N") / max(len(seq), 1) > max_n_frac:
+                continue
+            out_seqs.append(revcomp(seq) if rng.random() < 0.5 else seq)
+            out_ids.append(f"bg{got}|{c}:{s0}-{e0}")
+            got += 1
+    return out_ids, out_seqs
+
+
 # ── TE GTF ───────────────────────────────────────────────────────────────────
 
 def load_family_loci(gtf_path, families):
@@ -313,6 +367,11 @@ def main():
     ap.add_argument("--families", nargs="+", required=True)
     ap.add_argument("--out-dir", default="motifs")
     ap.add_argument("--pvalue", type=float, default=1e-4)
+    ap.add_argument("--background", choices=["dinuc", "genomic"], default="dinuc",
+                    help="dinuc = per-copy dinucleotide-preserving shuffle "
+                         "(controls the family's own base composition); "
+                         "genomic = length-matched random intervals off-family "
+                         "(does NOT control composition)")
     ap.add_argument("--nshuffle", type=int, default=50,
                     help="dinuc-shuffled background copies per element")
     ap.add_argument("--min-len", type=int, default=50,
@@ -392,21 +451,33 @@ def main():
             hits = scan_loci(real_df, None, args.jaspar_pfm, "chr", "start", "stop",
                              pvalue=args.pvalue, threads=args.threads, seq_col="Seq")
 
-            # dinucleotide-preserving background
-            log.info("%s: building %dx dinucleotide-shuffled background (%.1f kb)",
-                     fam, args.nshuffle, total_kb * args.nshuffle)
-            bg_ids, bg_seqs = [], []
-            for i, s in enumerate(seqs):
-                for k in range(args.nshuffle):
-                    bg_seqs.append(dinuc_shuffle(s, rng))
-                    bg_ids.append(f"bg{k}|{ids[i]}")
+            if args.background == "genomic":
+                log.info("%s: sampling %dx length-matched genomic background "
+                         "(%.1f kb), family loci excluded",
+                         fam, args.nshuffle, total_kb * args.nshuffle)
+                excl = defaultdict(list)
+                for _eid, chrom, s1, e1, _st in loci:
+                    excl[chrom].append((s1, e1))
+                bg_ids, bg_seqs = sample_genomic_background(
+                    fh, idx, [len(s) for s in seqs], args.nshuffle, rng,
+                    excl, max_n_frac=args.max_n_frac)
+            else:
+                log.info("%s: building %dx dinucleotide-shuffled background (%.1f kb)",
+                         fam, args.nshuffle, total_kb * args.nshuffle)
+                bg_ids, bg_seqs = [], []
+                for i, s in enumerate(seqs):
+                    for k in range(args.nshuffle):
+                        bg_seqs.append(dinuc_shuffle(s, rng))
+                        bg_ids.append(f"bg{k}|{ids[i]}")
             bg_df = pd.DataFrame({"chr": bg_ids, "start": [0] * len(bg_seqs),
                                   "stop": [len(s) for s in bg_seqs], "Seq": bg_seqs})
             bg_hits = scan_loci(bg_df, None, args.jaspar_pfm, "chr", "start", "stop",
                                 pvalue=args.pvalue, threads=args.threads, seq_col="Seq")
 
             n_real, n_bg = len(seqs), len(bg_seqs)
-            kb_real, kb_bg = total_kb, total_kb * args.nshuffle
+            # measured, not assumed: genomic sampling can fall short of
+            # nshuffle x when a copy's length cannot be placed off-family
+            kb_real, kb_bg = total_kb, sum(len(s) for s in bg_seqs) / 1e3
 
             obs_cop = hits.groupby("Motif_name")["chr"].nunique() if len(hits) else {}
             obs_n = hits["Motif_name"].value_counts() if len(hits) else {}
@@ -489,8 +560,11 @@ def main():
             summary_lines.append(
                 f"\n=== {fam} ===\n"
                 f"  {n_real} copies scanned ({skipped} skipped), median {med} bp, {total_kb:.1f} kb\n"
-                f"  background: {args.nshuffle}x dinucleotide-preserving shuffle "
-                f"({n_bg} sequences, {kb_bg:.0f} kb)\n"
+                f"  background: {args.nshuffle}x "
+                + ("length-matched random genomic intervals, family excluded"
+                   if args.background == "genomic"
+                   else "dinucleotide-preserving shuffle")
+                + f" ({n_bg} sequences, {kb_bg:.0f} kb)\n"
                 f"  {len(sig)} motifs at FDR < 0.05 of {len(res)} detected\n"
                 f"  full table: {enr_path.name}\n")
             head = (sig if len(sig) else res).head(args.top)
