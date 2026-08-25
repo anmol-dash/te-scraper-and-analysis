@@ -1,7 +1,3 @@
-MOTIF ENRICHMENT: dinucleotide-shuffle vs genomic background
-JASPAR2024 CORE vertebrates (879 matrices), MOODS p<1e-4, 25x background
-consensus        = the matrix's IUPAC core (what the TF binds)
-observed_consensus = the bases these copies actually carry at the hits
 
 === LTR66 ===
   significant (FDR<0.05): dinuc 159   genomic 148   both 145   dinuc-only 14   genomic-only 3
