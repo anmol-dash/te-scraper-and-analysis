@@ -88,11 +88,14 @@ def genome_hits(primer, genome_fa, cache):
         return f"NA({type(e).__name__})"
 
 
-def design_on(consensus, family, n_return, amp_min, amp_max, opt_tm):
+def design_on(consensus, family, n_return, amp_min, amp_max, opt_tm,
+              min_size=18, opt_size=20, max_size=25):
+    """primer3 on one real copy. Pass min_size=opt_size=max_size to pin the
+    primer length (e.g. all three = 20 for a fixed-20mer panel)."""
     import primer3
     seq_args = {"SEQUENCE_ID": family, "SEQUENCE_TEMPLATE": consensus}
     global_args = {
-        "PRIMER_OPT_SIZE": 20, "PRIMER_MIN_SIZE": 18, "PRIMER_MAX_SIZE": 25,
+        "PRIMER_OPT_SIZE": opt_size, "PRIMER_MIN_SIZE": min_size, "PRIMER_MAX_SIZE": max_size,
         "PRIMER_OPT_TM": opt_tm, "PRIMER_MIN_TM": opt_tm - 3, "PRIMER_MAX_TM": opt_tm + 3,
         "PRIMER_MIN_GC": 40.0, "PRIMER_MAX_GC": 60.0,
         "PRIMER_PRODUCT_SIZE_RANGE": [[amp_min, amp_max]],
